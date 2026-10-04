@@ -3,9 +3,14 @@
 # iptsd-calibrate and write /etc/iptsd.d/93-local-calibration.conf. Use
 # --revert to undo.
 #
-# Guardrails: SizeMax/AspectMax are never installed above the 92 tuning caps
+# Optional and not recommended on the SL7 currently: the shipped defaults
+# (91 + 92) are the supported configuration.
+#
+# Guardrails: calibration may only LOWER SizeMin/AspectMin (never above the
+# run's measured minimum or the current 91/92 value), and SizeMax/AspectMax are never installed above the 92 tuning caps
 # (they gate DisableOnPalm, which masks firmware clicks on palm-sized
-# contacts), and a run whose maxima dwarf the mean is treated as polluted.
+# contacts). A run whose maxima dwarf the mean is treated as polluted and
+# can only be re-run, never installed.
 set -euo pipefail
 
 CONF=/etc/iptsd.d/93-local-calibration.conf
@@ -53,11 +58,14 @@ parse_stats() {
   echo "$size $aspect"
 }
 
-# compute_limits SMEAN SMIN SMAX AMEAN AMIN AMAX
-# 0.1 slack like iptsd's 2mm snippet, then clamped. Prints:
+# compute_limits SMEAN SMIN SMAX AMEAN AMIN AMAX [CUR_SIZEMIN [CUR_ASPECTMIN]]
+# 0.1 slack like iptsd's 2mm snippet, then clamped. SizeMin/AspectMin never
+# exceed the measured min nor the current effective value (if given): they can
+# only go down. Prints:
 #   SizeMin SizeMax AspectMin AspectMax polluted(0|1) clamped(0|1)
 compute_limits() {
   awk -v sm="$1" -v sn="$2" -v sx="$3" -v am="$4" -v an="$5" -v ax="$6" \
+      -v cs="${7:-}" -v ca="${8:-}" \
       -v capS="$CAP_SIZE_MAX" -v capA="$CAP_ASPECT_MAX" \
       -v floorS="$SIZE_MIN_FLOOR" -v ratio="$POLLUTION_RATIO" '
     function fl(x) { x = x * 10 + 1e-9; return int(x) / 10 }
@@ -70,19 +78,23 @@ compute_limits() {
       if (smax > capS) { smax = capS; clamped = 1 }
       if (amax > capA) { amax = capA; clamped = 1 }
       if (smin < floorS) { smin = floorS; clamped = 1 }
-      if (smin > sm) { smin = sm; clamped = 1 }
-      if (amin > am) { amin = (am < 1 ? 1 : am); clamped = 1 }
+      if (smin > sn) { smin = sn; clamped = 1 }
+      if (amin > an) { amin = (an < 1 ? 1 : an); clamped = 1 }
+      if (cs != "" && smin > cs + 0) { smin = cs + 0; clamped = 1 }
+      if (ca != "" && amin > ca + 0) { amin = ca + 0; clamped = 1 }
       polluted = (sx > ratio * sm || ax > ratio * am) ? 1 : 0
       printf "%.3f %.3f %.3f %.3f %d %d\n", smin, smax, amin, amax, polluted, clamped
     }'
 }
 
 # effective_contacts DIR: last-wins [Contacts] keys across DIR/*.conf (and
-# /etc/iptsd.conf first). Prints "Key value" lines.
+# /etc/iptsd.conf first), excluding our own 93 output. Prints "Key value" lines.
 effective_contacts() {
   local files=() f
   [[ -f /etc/iptsd.conf ]] && files+=(/etc/iptsd.conf)
-  for f in "$1"/*.conf; do [[ -f $f ]] && files+=("$f"); done
+  for f in "$1"/*.conf; do
+    [[ -f $f && $f != "$CONF" ]] && files+=("$f")
+  done
   [[ ${#files[@]} -gt 0 ]] || return 0
   awk '
     FNR == 1 { sec = "" }
@@ -156,6 +168,14 @@ main() {
   workdir=$(mktemp -d)
   trap 'rm -rf "$workdir"; systemctl start "$unit" || true' EXIT
 
+  cat <<'MSG'
+NOTICE: this calibration is optional and NOT recommended on the SL7 right
+now. The shipped defaults (91 + 92) are the supported configuration. It can
+only lower SizeMin/AspectMin, and polluted runs cannot be installed.
+MSG
+  read -r -p "Continue anyway? [y/N] " ans
+  [[ $ans == [yY]* ]] || { echo "Aborted; nothing changed."; exit 0; }
+
   local stats limits smin smax amin amax polluted clamped ans note
   while true; do
     rm -f "$workdir"/iptsd_calib_* "$workdir/calib.log"
@@ -170,6 +190,7 @@ with ONE FINGERTIP only:
   2. normal two-finger scrolling (two fingertips)
 Do NOT use a thumb, palm, flat finger or resting hand, and do not click.
 Anything bigger than a fingertip pollutes the measurement.
+Two close fingers can read as one large blob; that also pollutes it.
 Press Ctrl-C when done.
 MSG
     read -r -p "Press Enter to start (Ctrl-C to abort) " _
@@ -189,7 +210,10 @@ MSG
     echo "Measured (mean min max): Size $(cut -d' ' -f1-3 <<<"$stats"), Aspect $(cut -d' ' -f4-6 <<<"$stats")"
 
     # shellcheck disable=SC2086  # stats is six space-separated numbers
-    limits=$(compute_limits $stats)
+    local cur_smin cur_amin
+    cur_smin=$(effective_contacts "$CONF_DIR" | awk '$1 == "SizeMin" { print $2 }')
+    cur_amin=$(effective_contacts "$CONF_DIR" | awk '$1 == "AspectMin" { print $2 }')
+    limits=$(compute_limits $stats "$cur_smin" "$cur_amin")
     read -r smin smax amin amax polluted clamped <<<"$limits"
     note=''
     ((clamped)) && note="Values were clamped to the guardrails above."
@@ -198,10 +222,9 @@ MSG
       echo
       echo "WARNING: the measured maximum is more than ${POLLUTION_RATIO}x the mean:" \
            "palm/thumb samples polluted this run."
-      echo "Installing the raw maxima would disable palm rejection and make every click register."
-      read -r -p "Re-run with fingertips only [Y], install clamped values [c], or quit [n]? " ans
+      echo "Polluted runs are not installable. Nothing was changed."
+      read -r -p "Re-run with fingertips only [Y] or quit [n]? " ans
       case $ans in
-        c|C) note="Run was polluted (max > ${POLLUTION_RATIO}x mean); clamped values installed by choice." ;;
         n|N) echo "Not installed."; exit 0 ;;
         *) continue ;;
       esac

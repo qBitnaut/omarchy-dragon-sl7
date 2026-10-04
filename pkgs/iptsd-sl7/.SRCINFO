@@ -1,7 +1,7 @@
 pkgbase = iptsd-sl7
 	pkgdesc = Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)
 	pkgver = 3.1.0.r20260717
-	pkgrel = 6
+	pkgrel = 7
 	url = https://github.com/alex-lentz/iptsd
 	arch = aarch64
 	license = GPL-2.0-or-later
@@ -37,7 +37,7 @@ pkgbase = iptsd-sl7
 	sha256sums = 6eff936368650eebe1141b502c75625b757fa195592784f7fbc3b6645a365738
 	sha256sums = 6b2bab2ad225a86ef1fd31e2a2736b641a3d5a91f5723d2069c18ecf63ae2889
 	sha256sums = f3ca193c0ec2bf2470e442a43684b1c2097dc58dbc11e9e0e252193f61e67dcd
-	sha256sums = 9b066a486be89831cfba90b0c15ecff475fff065a543316c121d239517ad30a3
+	sha256sums = 9961090ef66c6dd4f25198337e56cb64261d0d6a99ab2d35cb604e443b1606b4
 	sha256sums = c79e82423445434063ce5fc84db251580109b5ba5ba7c727357b395dd21faf76
 
 pkgname = iptsd-sl7

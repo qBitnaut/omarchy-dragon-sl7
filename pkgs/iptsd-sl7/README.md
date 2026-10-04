@@ -90,3 +90,10 @@ Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package
 - `/etc/iptsd.d/92-iptsd-sl7-tuning.conf` overrides the 91 calibration;
   `/etc/iptsd.d/93-local-calibration.conf` (from `iptsd-sl7-calibrate`) overrides
   both. `iptsd-sl7-calibrate --revert` removes it.
+- `iptsd-sl7-calibrate` is optional and not recommended on the SL7 currently:
+  the defaults (91 + 92) are the supported configuration. It prints a notice and
+  asks to continue. It may only lower `SizeMin`/`AspectMin` (never above the
+  run's measured minimum or the current 91/92 value) and caps `SizeMax`/
+  `AspectMax` at the 92 values. A run whose maxima exceed 2.5x the mean is
+  polluted (two close fingers can read as one large blob) and cannot be
+  installed; re-run or quit.
