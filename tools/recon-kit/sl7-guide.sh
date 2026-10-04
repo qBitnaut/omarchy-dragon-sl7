@@ -59,6 +59,14 @@ if [ "$(id -u)" != 0 ]; then
 	echo "(continuing anyway: SL7_UI test mode)" >&2
 fi
 
+# The SL7 panel is 2304x1536 at 13.8", so the default console font is tiny.
+# On a Linux VT, switch to the largest Terminus font the live root has.
+if [ "${TERM:-linux}" = linux ] && command -v setfont >/dev/null 2>&1; then
+	for font in ter-132b ter-v32b ter-132n ter-v32n ter-128b ter-v28b; do
+		setfont "$font" 2>/dev/null && break
+	done
+fi
+
 if [ "${TERM:-linux}" = linux ] || ! locale charmap 2>/dev/null | grep -qi 'utf-8'; then
 	OK="[OK]"
 	BAD="[!!]"
