@@ -179,5 +179,20 @@ if [[ -d ${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}/qcom-battmgr-bat ]
   fi
 fi
 
+# AC/battery power mode: current source, applied caps, and whether they match.
+powermode=${OMARCHY_SL7_POWERMODE:-/usr/bin/omarchy-sl7-powermode}
+if [[ -x $powermode ]]; then
+  pm_out=$("$powermode" status 2>&1)
+  pm_rc=$?
+  while IFS= read -r line; do printf 'INFO  powermode: %s\n' "$line"; done <<<"$pm_out"
+  if ((pm_rc == 0)); then
+    pass "power mode matches the power source"
+  else
+    fail "power mode does not match the power source (sudo $powermode auto)"
+  fi
+else
+  warn "omarchy-sl7-powermode not installed; power mode check skipped"
+fi
+
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
 ((fails == 0))

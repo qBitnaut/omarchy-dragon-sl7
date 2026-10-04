@@ -1,0 +1,421 @@
+#!/bin/bash
+# AC/battery switcher for the Surface Laptop 7 (X1E, qcom-battmgr).
+#
+#   omarchy-sl7-powermode [--system|--user] auto|battery|ac|status
+#   omarchy-sl7-powermode watch        (user daemon, see omarchy-sl7-powermode.service)
+#
+# System part (root; run by udev through power-event, and at boot): per-policy
+# scaling_max_freq cap, GPU devfreq max_freq cap, Wi-Fi power save, platform
+# profile. User part (your session): eDP refresh rate, optionally animations
+# and blur, through "hyprctl eval" at runtime only; monitors.lua is never
+# touched. Without a flag, root runs the system part and anyone else the user
+# part. Policy lives in /etc/omarchy-surface-sl7/power.conf.
+#
+# Omarchy's shell already runs omarchy-powerprofiles-set on UPower OnBattery
+# changes; that only talks to power-profiles-daemon, which has no backend on
+# ARM, and Omarchy offers no hook for it. This script is independent of it
+# (same signal, different knobs) and does not touch the PPD profile.
+set -u
+
+conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
+ps=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
+cpufreq=${OMARCHY_SL7_CPUFREQ:-/sys/devices/system/cpu/cpufreq}
+devfreq=${OMARCHY_SL7_DEVFREQ:-/sys/class/devfreq}
+netdir=${OMARCHY_SL7_NET:-/sys/class/net}
+pp_class=${OMARCHY_SL7_PLATFORM_PROFILE_CLASS:-/sys/class/platform-profile}
+pp_acpi=${OMARCHY_SL7_PLATFORM_PROFILE_ACPI:-/sys/firmware/acpi/platform_profile}
+run_dir=${OMARCHY_SL7_RUN_DIR:-/run/omarchy-surface-sl7}
+user_state=${OMARCHY_SL7_USER_STATE:-${XDG_RUNTIME_DIR:-/tmp}/omarchy-sl7-powermode}
+
+# Defaults mirror power.conf.
+ENABLE=yes
+CPU_MAX_FREQ_BATTERY=2188800
+GPU_MAX_FREQ_BATTERY=auto
+WIFI_PS=yes
+PLATFORM_PROFILE_BATTERY=low-power
+PLATFORM_PROFILE_AC=balanced
+REFRESH_ON_BATTERY=60
+EDP_OUTPUT=eDP-1
+DISABLE_ANIMATIONS_ON_BATTERY=no
+DISABLE_BLUR_ON_BATTERY=no
+load_conf() {
+  # shellcheck disable=SC1090
+  [[ -r $conf ]] && . "$conf"
+  return 0
+}
+load_conf
+
+usage() {
+  echo "usage: ${0##*/} [--system|--user] auto|battery|ac|status" >&2
+  echo "       ${0##*/} watch" >&2
+  exit 2
+}
+
+say() {
+  echo "$*"
+  [[ -t 1 ]] || logger -t omarchy-sl7-powermode -- "$*" 2>/dev/null || true
+}
+
+# --- power source ------------------------------------------------------------
+
+# Prints "ac" or "battery". Any online Mains/USB supply means AC; with no
+# readable source, fall back to the battery's own status.
+detect_source() {
+  local s have=0
+  for s in "$ps"/*; do
+    [[ -r $s/type && -r $s/online ]] || continue
+    case $(<"$s/type") in
+      Mains | USB*)
+        have=1
+        if [[ $(<"$s/online") == 1 ]]; then echo ac; return; fi
+        ;;
+    esac
+  done
+  if ((have)); then echo battery; return; fi
+  for s in "$ps"/*; do
+    [[ -r $s/type && -r $s/status ]] || continue
+    if [[ $(<"$s/type") == Battery ]]; then
+      if [[ $(<"$s/status") == Discharging ]]; then echo battery; else echo ac; fi
+      return
+    fi
+  done
+  echo ac
+}
+
+# --- system part ---------------------------------------------------------------
+
+# put FILE VALUE: write only when different. Returns 0 if written or equal.
+put() {
+  local f=$1 v=$2
+  [[ -w $f ]] || { echo "cannot write $f" >&2; return 1; }
+  [[ $(<"$f") == "$v" ]] && return 0
+  if printf '%s\n' "$v" >"$f" 2>/dev/null; then
+    say "set $f = $v"
+  else
+    echo "write failed: $f = $v" >&2
+    return 1
+  fi
+}
+
+is_num() { [[ ${1:-} =~ ^[0-9]+$ ]]; }
+
+sys_cpu() { # battery|ac
+  local pol min max cap
+  for pol in "$cpufreq"/policy*; do
+    [[ -r $pol/cpuinfo_max_freq && -w $pol/scaling_max_freq ]] || continue
+    max=$(<"$pol/cpuinfo_max_freq")
+    min=0
+    [[ -r $pol/cpuinfo_min_freq ]] && min=$(<"$pol/cpuinfo_min_freq")
+    cap=$max
+    if [[ $1 == battery ]]; then
+      is_num "$CPU_MAX_FREQ_BATTERY" || return 0
+      cap=$CPU_MAX_FREQ_BATTERY
+      ((cap > max)) && cap=$max
+      ((cap < min)) && cap=$min
+    fi
+    put "$pol/scaling_max_freq" "$cap" || true
+  done
+}
+
+gpu_freqs() { # prints available frequencies, ascending, one per line
+  tr -s ' \n' '\n\n' <"$1/available_frequencies" 2>/dev/null | grep -E '^[0-9]+$' | sort -n
+}
+
+sys_gpu() {
+  local d freqs n cap
+  for d in "$devfreq"/*gpu*; do
+    [[ -w $d/max_freq && -r $d/available_frequencies ]] || continue
+    mapfile -t freqs < <(gpu_freqs "$d")
+    n=${#freqs[@]}
+    ((n)) || continue
+    cap=${freqs[n - 1]}
+    if [[ $1 == battery ]]; then
+      case $GPU_MAX_FREQ_BATTERY in
+        '') return 0 ;;
+        auto) cap=${freqs[n / 2]} ;;
+        *)
+          is_num "$GPU_MAX_FREQ_BATTERY" || return 0
+          cap=$GPU_MAX_FREQ_BATTERY
+          ;;
+      esac
+    fi
+    put "$d/max_freq" "$cap" || true
+  done
+}
+
+sys_wifi() {
+  local w dev want cur
+  [[ $WIFI_PS == yes ]] || return 0
+  command -v iw >/dev/null 2>&1 || return 0
+  if [[ $1 == battery ]]; then want=on; else want=off; fi
+  for w in "$netdir"/*/wireless; do
+    [[ -d $w ]] || continue
+    dev=$(basename "$(dirname "$w")")
+    cur=$(iw dev "$dev" get power_save 2>/dev/null | awk '/Power save/ {print $3}')
+    [[ $cur == "$want" ]] && continue
+    iw dev "$dev" set power_save "$want" && say "wifi $dev power_save $want" || true
+  done
+}
+
+# Echo the files that hold the platform profile (legacy ACPI file wins).
+pp_files() {
+  local f
+  if [[ -e $pp_acpi ]]; then echo "$pp_acpi"; return; fi
+  for f in "$pp_class"/*/profile; do
+    [[ -e $f ]] && echo "$f"
+  done
+}
+
+pp_choices() { # profile file -> choices
+  if [[ $1 == "$pp_acpi" ]]; then
+    cat "${pp_acpi}_choices" 2>/dev/null
+  else
+    cat "$(dirname "$1")/choices" 2>/dev/null
+  fi
+}
+
+sys_platform_profile() {
+  local want f
+  if [[ $1 == battery ]]; then want=$PLATFORM_PROFILE_BATTERY; else want=$PLATFORM_PROFILE_AC; fi
+  [[ -n $want ]] || return 0
+  while IFS= read -r f; do
+    [[ -n $f && -w $f ]] || continue
+    [[ " $(pp_choices "$f") " == *" $want "* ]] || continue
+    put "$f" "$want" || true
+  done < <(pp_files)
+}
+
+apply_system() { # battery|ac
+  sys_cpu "$1"
+  sys_gpu "$1"
+  sys_wifi "$1"
+  sys_platform_profile "$1"
+  mkdir -p "$run_dir" 2>/dev/null && printf '%s\n' "$1" >"$run_dir/mode" 2>/dev/null
+  return 0
+}
+
+# --- user part (Hyprland) ------------------------------------------------------
+
+hypr_env() {
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && return 0
+  local d rt=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+  d=$(find "$rt/hypr" -maxdepth 2 -name .socket.sock -printf '%T@ %h\n' 2>/dev/null |
+    sort -rn | head -n1 | cut -d' ' -f2-)
+  [[ -n $d ]] || return 1
+  HYPRLAND_INSTANCE_SIGNATURE=$(basename "$d")
+  export HYPRLAND_INSTANCE_SIGNATURE
+}
+
+hypr_socket2() {
+  echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+}
+
+# hypr_bool OPTION -> "true"/"false"
+hypr_bool() {
+  hyprctl getoption "$1" -j 2>/dev/null | jq -r '.bool // empty' 2>/dev/null
+}
+
+user_refresh() { # battery|ac
+  local mon info w h x y scale cur want mode saved
+  mon=$EDP_OUTPUT
+  [[ $mon =~ ^[A-Za-z0-9._-]+$ ]] || { echo "unsafe EDP_OUTPUT" >&2; return 0; }
+  info=$(hyprctl monitors -j 2>/dev/null | jq -c --arg m "$mon" '.[] | select(.name == $m)') || return 0
+  [[ -n $info ]] || return 0
+  read -r w h x y scale cur < <(jq -r '[.width, .height, .x, .y, .scale, .refreshRate] | @tsv' <<<"$info")
+  saved=$user_state/refresh
+  if [[ $1 == battery ]]; then
+    [[ -n $REFRESH_ON_BATTERY ]] || return 0
+    mode=$(jq -r --argjson want "$REFRESH_ON_BATTERY" --arg res "${w}x${h}" '
+      [.availableModes[] | capture("^(?<r>[0-9]+x[0-9]+)@(?<hz>[0-9.]+)Hz$")
+        | select(.r == $res) | .hz | tonumber | select((. - $want) < 1 and ($want - .) < 1)]
+      | first // empty' <<<"$info")
+    [[ -n $mode ]] || { echo "no ${REFRESH_ON_BATTERY} Hz mode at ${w}x${h} on $mon" >&2; return 0; }
+    # Already there (within half a Hz): nothing to do.
+    awk -v a="$cur" -v b="$mode" 'BEGIN { d = a - b; exit !(d < 0.5 && d > -0.5) }' && return 0
+    mkdir -p "$user_state"
+    [[ -e $saved ]] || printf '%s\n' "$cur" >"$saved"
+    want=$mode
+  else
+    [[ -r $saved ]] || return 0
+    want=$(<"$saved")
+    rm -f "$saved"
+    is_num "${want%.*}" || return 0
+  fi
+  hyprctl eval "hl.monitor({ output = \"$mon\", mode = \"${w}x${h}@${want}\", position = \"${x}x${y}\", scale = $scale })" >/dev/null &&
+    echo "display $mon ${w}x${h}@${want}"
+}
+
+# user_toggle NAME CONFIG_PATH LUA_FRAGMENT_FORMAT enabled-on-battery
+user_toggle() { # battery|ac name option lua_prefix lua_suffix
+  local mode=$1 name=$2 opt=$3 pre=$4 suf=$5 f cur
+  f=$user_state/$name
+  if [[ $mode == battery ]]; then
+    cur=$(hypr_bool "$opt")
+    [[ $cur == true ]] || return 0
+    mkdir -p "$user_state"
+    printf '%s\n' "$cur" >"$f"
+    hyprctl eval "${pre}false${suf}" >/dev/null && echo "hyprland $name off"
+  else
+    [[ -r $f ]] || return 0
+    cur=$(<"$f")
+    rm -f "$f"
+    [[ $cur == true || $cur == false ]] || return 0
+    hyprctl eval "${pre}${cur}${suf}" >/dev/null && echo "hyprland $name $cur"
+  fi
+}
+
+apply_user() { # battery|ac
+  command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || {
+    echo "hyprctl/jq not found; skipping display part" >&2
+    return 0
+  }
+  hypr_env || { echo "no running Hyprland instance; skipping display part" >&2; return 0; }
+  user_refresh "$1"
+  if [[ $DISABLE_ANIMATIONS_ON_BATTERY == yes || -e $user_state/animations ]]; then
+    user_toggle "$1" animations animations:enabled 'hl.config({ animations = { enabled = ' ' } })'
+  fi
+  if [[ $DISABLE_BLUR_ON_BATTERY == yes || -e $user_state/blur ]]; then
+    user_toggle "$1" blur decoration:blur:enabled 'hl.config({ decoration = { blur = { enabled = ' ' } } })'
+  fi
+  return 0
+}
+
+# --- status ----------------------------------------------------------------------
+
+# Prints a report; exit 1 when ENABLE=yes and the applied caps disagree with
+# the current power source.
+status() {
+  local src bad=0 pol cur max want d freqs n w dev f mon
+  src=$(detect_source)
+  echo "power source: $src"
+  echo "powermode: $(cat "$run_dir/mode" 2>/dev/null || echo unset) (ENABLE=$ENABLE, config $conf)"
+  for pol in "$cpufreq"/policy*; do
+    [[ -r $pol/scaling_max_freq ]] || continue
+    cur=$(<"$pol/scaling_max_freq")
+    max=$(<"$pol/cpuinfo_max_freq")
+    echo "cpu ${pol##*/}: scaling_max_freq $cur kHz (hardware max $max)"
+    if [[ $ENABLE == yes ]] && is_num "$CPU_MAX_FREQ_BATTERY"; then
+      if [[ $src == battery ]]; then want=$CPU_MAX_FREQ_BATTERY; ((want > max)) && want=$max; else want=$max; fi
+      [[ $cur == "$want" ]] || bad=1
+    fi
+  done
+  for d in "$devfreq"/*gpu*; do
+    [[ -r $d/max_freq && -r $d/available_frequencies ]] || continue
+    mapfile -t freqs < <(gpu_freqs "$d")
+    n=${#freqs[@]}
+    cur=$(<"$d/max_freq")
+    echo "gpu ${d##*/}: max_freq $cur Hz (highest ${freqs[n - 1]:-?})"
+    if [[ $ENABLE == yes && -n $GPU_MAX_FREQ_BATTERY && $n -gt 0 ]]; then
+      if [[ $src == battery ]]; then
+        if [[ $GPU_MAX_FREQ_BATTERY == auto ]]; then want=${freqs[n / 2]}; else want=$GPU_MAX_FREQ_BATTERY; fi
+      else
+        want=${freqs[n - 1]}
+      fi
+      [[ $cur == "$want" ]] || bad=1
+    fi
+  done
+  [[ -d $devfreq ]] && ! compgen -G "$devfreq/*gpu*" >/dev/null && echo "gpu: no devfreq device"
+  for w in "$netdir"/*/wireless; do
+    [[ -d $w ]] || continue
+    dev=$(basename "$(dirname "$w")")
+    if command -v iw >/dev/null 2>&1; then
+      cur=$(iw dev "$dev" get power_save 2>/dev/null | awk '/Power save/ {print $3}')
+      echo "wifi $dev: power_save ${cur:-unknown}"
+      if [[ $ENABLE == yes && $WIFI_PS == yes && -n $cur ]]; then
+        if [[ $src == battery ]]; then want=on; else want=off; fi
+        [[ $cur == "$want" ]] || bad=1
+      fi
+    else
+      echo "wifi $dev: iw not installed"
+    fi
+  done
+  f=$(pp_files | head -n1)
+  if [[ -n $f ]]; then
+    echo "platform profile: $(<"$f") (choices: $(pp_choices "$f"))"
+  else
+    echo "platform profile: none"
+  fi
+  mon=$EDP_OUTPUT
+  if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && hypr_env 2>/dev/null &&
+    [[ $mon =~ ^[A-Za-z0-9._-]+$ ]]; then
+    cur=$(hyprctl monitors -j 2>/dev/null | jq -r --arg m "$mon" '.[] | select(.name == $m) | "\(.width)x\(.height)@\(.refreshRate)"')
+    [[ -n $cur ]] && echo "display $mon: $cur"
+  fi
+  if ((bad)); then
+    echo "MISMATCH: applied settings do not match the power source (sudo omarchy-sl7-powermode auto)"
+    return 1
+  fi
+  return 0
+}
+
+# --- watcher ----------------------------------------------------------------------
+
+# One long-lived process: UPower OnBattery changes (D-Bus signal, no polling)
+# and Hyprland config reloads / monitor changes (a reload re-reads
+# monitors.lua and would undo the 60 Hz mode). The source of truth stays
+# sysfs; the signals only say when to look.
+# Re-read the config each time; ENABLE=no behaves like AC (restores).
+watch_apply() {
+  local mode
+  load_conf
+  mode=$(detect_source)
+  [[ $ENABLE == yes ]] || mode=ac
+  apply_user "$mode"
+}
+
+watch() {
+  local sock
+  hypr_env || { echo "no running Hyprland instance; nothing to watch" >&2; exit 0; }
+  sock=$(hypr_socket2)
+  watch_apply
+  exec 3< <(
+    gdbus monitor --system --dest org.freedesktop.UPower --object-path /org/freedesktop/UPower 2>/dev/null |
+      grep --line-buffered "'OnBattery'" &
+    if command -v socat >/dev/null 2>&1; then
+      socat -u "UNIX-CONNECT:$sock" - 2>/dev/null |
+        grep --line-buffered -E '^(configreloaded|monitoradded(v2)?)>>' &
+    fi
+    wait
+  )
+  while IFS= read -r _ <&3; do
+    # Coalesce bursts (a reload fires several events).
+    while read -r -t 1 _ <&3; do :; done
+    watch_apply
+  done
+  echo "event stream ended" >&2
+  exit 1
+}
+
+# --- main --------------------------------------------------------------------------
+
+part=
+case ${1:-} in
+  --system) part=system; shift ;;
+  --user) part=user; shift ;;
+esac
+cmd=${1:-}
+[[ $# -eq 1 ]] || usage
+
+if [[ -z $part ]]; then
+  if ((EUID == 0)); then part=system; else part=user; fi
+fi
+
+case $cmd in
+  watch) watch ;;
+  status) status ;;
+  auto | battery | ac)
+    mode=$cmd
+    if [[ $cmd == auto ]]; then
+      [[ $ENABLE == yes ]] || exit 0
+      mode=$(detect_source)
+    fi
+    if [[ $part == system ]]; then
+      ((EUID == 0)) || [[ -n ${OMARCHY_SL7_ALLOW_NONROOT:-} ]] || { echo "system part needs root (sudo ${0##*/} $cmd)" >&2; exit 1; }
+      apply_system "$mode"
+    else
+      apply_user "$mode"
+      ((EUID == 0)) || echo "user part only; caps, Wi-Fi and platform profile need: sudo ${0##*/} --system $cmd" >&2
+    fi
+    ;;
+  *) usage ;;
+esac

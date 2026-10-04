@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply the Surface Laptop 7 AC/battery power mode at boot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omarchy-sl7-powermode --system auto
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Laptop 7 AC/battery display mode (Hyprland refresh rate)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/omarchy-sl7-powermode watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

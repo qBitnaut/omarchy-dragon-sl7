@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""Battery power test harness for the Surface Laptop 7 (qcom-battmgr).
+
+  sl7-powertest idle  [--minutes N]
+  sl7-powertest video FILE [--minutes N] [--hwdec MODE]
+  sl7-powertest suspend
+  sl7-powertest compare A.jsonl B.jsonl
+
+Run as your own user, on battery, with the charger unplugged. The tool only
+reads sysfs; the settings it changes for the run (screen brightness, and the
+idle/sleep inhibitor) are restored when it exits, also on Ctrl-C.
+
+Watts come from the energy_now delta between two gauge updates, not from
+power_now: the gauge steps in 10 mWh, so the tool waits for a fresh update
+before it starts the clock and again before it stops it (recon run 5: the
+gauge goes stale). power_now is recorded as a cross-check only.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+GAUGE_STEP_MWH = 10.0  # energy_now resolution of qcom-battmgr
+SUSPEND_CYCLE_MWH = 24.0  # fixed cost per suspend cycle (Dell 7441; re-measure)
+SYNC_TIMEOUT_S = 300.0
+POLL_S = 0.5
+
+ROOT = os.environ.get("SL7_SYSROOT", "")  # test hook: prefix for /sys, /proc/cmdline, /run
+
+
+def p(path):
+    return Path(ROOT + path)
+
+
+def read(path, default=None):
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return default
+
+
+def read_int(path):
+    v = read(path)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def run(cmd, timeout=5):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+# --- battery / power source ---------------------------------------------------
+
+
+def supplies():
+    base = p("/sys/class/power_supply")
+    return sorted(d for d in base.glob("*") if d.is_dir())
+
+
+def find_battery():
+    bats = [d for d in supplies() if read(d / "type") == "Battery"]
+    scoped = [d for d in bats if read(d / "scope") != "Device"]
+    bats = scoped or bats
+    pref = [d for d in bats if d.name == "qcom-battmgr-bat"]
+    return (pref or bats or [None])[0], len(bats)
+
+
+def ac_online():
+    for d in supplies():
+        if read(d / "type") in ("Mains", "USB") or (read(d / "type") or "").startswith("USB"):
+            if read(d / "online") == "1":
+                return True
+    return False
+
+
+def energy_mwh(bat):
+    v = read_int(bat / "energy_now")
+    return None if v is None else v / 1000.0
+
+
+# --- environment capture --------------------------------------------------------
+
+
+def hypr_monitors():
+    out = run(["hyprctl", "monitors", "-j"])
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        return None
+
+
+def display_mode(mons):
+    if not mons:
+        return None
+    for m in mons:
+        if m.get("name", "").startswith("eDP"):
+            return "%sx%s@%.2f" % (m.get("width"), m.get("height"), m.get("refreshRate", 0))
+    return None
+
+
+def wifi_ifaces():
+    return sorted(d.parent.name for d in p("/sys/class/net").glob("*/wireless"))
+
+
+def wifi_power_save():
+    out = {}
+    for dev in wifi_ifaces():
+        txt = run(["iw", "dev", dev, "get", "power_save"])
+        out[dev] = txt.split(":")[-1].strip() if txt else None
+    return out
+
+
+def wifi_ssid():
+    for dev in wifi_ifaces():
+        txt = run(["iw", "dev", dev, "link"])
+        for line in (txt or "").splitlines():
+            if line.strip().startswith("SSID:"):
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def policies():
+    return sorted(p("/sys/devices/system/cpu/cpufreq").glob("policy*"), key=lambda d: int(d.name[6:]))
+
+
+def gpu_devices():
+    return sorted(p("/sys/class/devfreq").glob("*gpu*"))
+
+
+def bluetooth_state():
+    states = []
+    for d in sorted(p("/sys/class/rfkill").glob("rfkill*")):
+        if read(d / "type") == "bluetooth":
+            states.append("blocked" if read(d / "soft") == "1" or read(d / "hard") == "1" else "on")
+    return states or None
+
+
+def capture_config(brightness, extra):
+    mons = hypr_monitors()
+    cfg = {
+        "kernel": read(p("/proc/sys/kernel/osrelease")) or os.uname().release,
+        "cmdline": read(p("/proc/cmdline")),
+        "display": display_mode(mons),
+        "monitors": sorted(m.get("name", "?") for m in mons) if mons else None,
+        "governor": {d.name: read(d / "scaling_governor") for d in policies()},
+        "cpu_max_khz": {d.name: read_int(d / "scaling_max_freq") for d in policies()},
+        "gpu_max_hz": {d.name: read_int(d / "max_freq") for d in gpu_devices()},
+        "wifi_power_save": wifi_power_save(),
+        "wifi_ssid": wifi_ssid(),
+        "bluetooth": bluetooth_state(),
+        "brightness": brightness,
+        "powermode": read(p("/run/omarchy-surface-sl7/mode")),
+    }
+    cfg.update(extra)
+    return cfg
+
+
+def config_hash(cfg):
+    blob = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+# --- brightness -------------------------------------------------------------------
+
+
+class Brightness:
+    """Pin the backlight for the run and put it back afterwards."""
+
+    def __init__(self, pct):
+        self.pct = pct
+        self.orig = None
+        self.max = None
+
+    def _info(self):
+        out = run(["brightnessctl", "-m", "-c", "backlight", "info"])
+        if not out:
+            return None
+        f = out.strip().splitlines()[0].split(",")
+        return int(f[2]), int(f[4])
+
+    def pin(self):
+        info = self._info()
+        if not info:
+            return None
+        self.orig, self.max = info
+        run(["brightnessctl", "-q", "-c", "backlight", "set", "%d%%" % self.pct])
+        now = self._info()
+        return {"percent": self.pct, "raw": now[0] if now else None, "max": self.max}
+
+    def restore(self):
+        if self.orig is not None:
+            run(["brightnessctl", "-q", "-c", "backlight", "set", str(self.orig)])
+            self.orig = None
+
+
+# --- samplers -----------------------------------------------------------------------
+
+
+class CpuIdle:
+    def __init__(self):
+        self.prev = None
+
+    def read(self):
+        acc = {}
+        for st in p("/sys/devices/system/cpu").glob("cpu[0-9]*/cpuidle/state*"):
+            name = read(st / "name") or st.name
+            t, u = read_int(st / "time"), read_int(st / "usage")
+            if t is None or u is None:
+                continue
+            a = acc.setdefault(name, [0, 0])
+            a[0] += t
+            a[1] += u
+        return acc
+
+    def delta(self):
+        cur = self.read()
+        if self.prev is None:
+            self.prev = cur
+            return None
+        d = {
+            n: {"time_us": cur[n][0] - self.prev.get(n, [0, 0])[0], "usage": cur[n][1] - self.prev.get(n, [0, 0])[1]}
+            for n in cur
+        }
+        self.prev = cur
+        return d
+
+
+class TopProcs:
+    def __init__(self):
+        self.prev = None
+        self.prev_t = None
+        self.me = os.getpid()
+        self.tck = os.sysconf("SC_CLK_TCK")
+
+    def snapshot(self):
+        snap = {}
+        for d in Path("/proc").iterdir():
+            if not d.name.isdigit() or int(d.name) == self.me:
+                continue
+            try:
+                s = (d / "stat").read_text()
+            except OSError:
+                continue
+            comm = s[s.index("(") + 1 : s.rindex(")")]
+            rest = s[s.rindex(")") + 2 :].split()
+            snap[int(d.name)] = (comm, int(rest[11]) + int(rest[12]))
+        return snap
+
+    def top(self, n=5):
+        now, snap = time.monotonic(), self.snapshot()
+        res = None
+        if self.prev is not None:
+            dt = now - self.prev_t
+            rows = []
+            for pid, (comm, ticks) in snap.items():
+                if pid in self.prev:
+                    d = ticks - self.prev[pid][1]
+                    if d > 0:
+                        rows.append((d, pid, comm))
+            rows.sort(reverse=True)
+            res = [
+                {"pid": pid, "comm": comm, "cpu_pct": round(100.0 * d / self.tck / dt, 1)}
+                for d, pid, comm in rows[:n]
+            ]
+        self.prev, self.prev_t = snap, now
+        return res
+
+
+def sample(bat, idle, mons_now):
+    pw = read_int(bat / "power_now")
+    return {
+        "type": "sample",
+        "t": round(time.time(), 3),
+        "energy_mwh": energy_mwh(bat),
+        "power_w": None if pw is None else round(abs(pw) / 1e6, 3),
+        "capacity": read_int(bat / "capacity"),
+        "status": read(bat / "status"),
+        "cpu_khz": {d.name: read_int(d / "scaling_cur_freq") for d in policies()},
+        "cpuidle": idle.delta(),
+        "gpu_hz": {d.name: read_int(d / "cur_freq") for d in gpu_devices()},
+        "display": display_mode(mons_now),
+    }
+
+
+# --- the run ---------------------------------------------------------------------------
+
+
+class Abort(Exception):
+    pass
+
+
+def _sig(signum, _frame):
+    raise Abort("signal %d" % signum)
+
+
+def mean(vals):
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def summarize(samples, t0, t1, e0, e1, cfg, hsh, meta):
+    win = [s for s in samples if t0 <= s["t"] <= t1]
+    hours = (t1 - t0) / 3600.0
+    s = {
+        "type": "summary",
+        "valid": meta["valid"],
+        "notes": meta["notes"],
+        "workload": meta["workload"],
+        "label": meta.get("label"),
+        "config_hash": hsh,
+        "window_s": round(t1 - t0, 1),
+        "energy_start_mwh": e0,
+        "energy_end_mwh": e1,
+    }
+    if hours > 0 and e0 is not None and e1 is not None:
+        s["watts"] = round((e0 - e1) / 1000.0 / hours, 3)
+        s["error_w"] = round(GAUGE_STEP_MWH / 1000.0 / hours, 3)
+    s["power_now_mean_w"] = None if not win else round(mean([x["power_w"] for x in win]) or 0, 3)
+    s["samples"] = len(win)
+    s["capacity_start"] = win[0]["capacity"] if win else None
+    s["capacity_end"] = win[-1]["capacity"] if win else None
+    pols = sorted({k for x in win for k in x["cpu_khz"]})
+    s["cpu_mean_khz"] = {k: round(mean([x["cpu_khz"].get(k) for x in win]) or 0) for k in pols}
+    gpus = sorted({k for x in win for k in x["gpu_hz"]})
+    s["gpu_mean_hz"] = {k: round(mean([x["gpu_hz"].get(k) for x in win]) or 0) for k in gpus}
+    states = {}
+    for x in win:
+        for n, v in (x["cpuidle"] or {}).items():
+            a = states.setdefault(n, [0, 0])
+            a[0] += v["time_us"]
+            a[1] += v["usage"]
+    ncpu = len(list(p("/sys/devices/system/cpu").glob("cpu[0-9]*/cpuidle"))) or 1
+    wall_us = (win[-1]["t"] - win[0]["t"]) * 1e6 * ncpu if len(win) > 1 else 0
+    s["cpuidle_residency_pct"] = {n: round(100.0 * a[0] / wall_us, 1) if wall_us else None for n, a in states.items()}
+    s["cpuidle_entries"] = {n: a[1] for n, a in states.items()}
+    s["config"] = cfg
+    return s
+
+
+def fmt_summary(s):
+    lines = []
+    tag = "" if s["valid"] else "  [INVALID: %s]" % "; ".join(s["notes"])
+    lines.append("%s%s  config %s" % (s["workload"], tag, s["config_hash"]))
+    if "watts" in s:
+        lines.append(
+            "  %.3f W (gauge, %.1f min window), error +/-%.3f W (one %g mWh gauge step)"
+            % (s["watts"], s["window_s"] / 60.0, s["error_w"], GAUGE_STEP_MWH)
+        )
+        lines.append(
+            "  energy %.0f -> %.0f mWh; power_now mean %.3f W (cross-check)"
+            % (s["energy_start_mwh"], s["energy_end_mwh"], s["power_now_mean_w"] or 0)
+        )
+    if s["valid"] and s["notes"]:
+        lines.append("  notes: " + "; ".join(s["notes"]))
+    if s.get("cpu_mean_khz"):
+        lines.append("  mean cpu MHz: " + " ".join("%s=%d" % (k, v / 1000) for k, v in s["cpu_mean_khz"].items()))
+    if s.get("cpuidle_residency_pct"):
+        lines.append(
+            "  cpuidle residency: " + " ".join("%s=%s%%" % (k, v) for k, v in s["cpuidle_residency_pct"].items())
+        )
+    return "\n".join(lines)
+
+
+def workload_run(args, workload, launcher=None):
+    bat, nbat = find_battery()
+    if bat is None:
+        sys.exit("sl7-powertest: no battery found under /sys/class/power_supply")
+    if nbat > 1:
+        print("warning: %d batteries listed; using %s" % (nbat, bat.name), file=sys.stderr)
+    if ac_online() or read(bat / "status") != "Discharging":
+        sys.exit(
+            "sl7-powertest: the charger must be unplugged and the battery Discharging "
+            "(charger online: %s, battery status: %s). Unplug it and wait a few seconds."
+            % ("yes" if ac_online() else "no", read(bat / "status"))
+        )
+    if energy_mwh(bat) is None:
+        sys.exit("sl7-powertest: %s/energy_now is not readable" % bat)
+    cap = read_int(bat / "capacity")
+    notes = []
+    if cap is not None and cap < 15:
+        sys.exit("sl7-powertest: battery at %d%%; charge above 30%% first" % cap)
+    if cap is not None and not 30 <= cap <= 90:
+        notes.append("battery at %d%% (recommended 30-90%%)" % cap)
+    if args.minutes < 20:
+        notes.append("%.1f min run: error is large; use 20+ minutes (30 for +/-0.02 W)" % args.minutes)
+
+    outdir = Path(os.environ.get("SL7_POWERTEST_DIR", Path.home() / ".local/state/sl7-powertest"))
+    outdir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    label = ("-" + args.label) if args.label else ""
+    path = outdir / ("%s-%s%s.jsonl" % (stamp, workload, label))
+
+    bright = Brightness(args.brightness)
+    mpv = None
+    out = open(path, "w", buffering=1)
+    samples = []
+    meta = {"workload": workload, "label": args.label, "valid": False, "notes": notes}
+    t0 = t1 = e0 = e1 = None
+    cfg = {}
+    hsh = ""
+    old = {s: signal.signal(s, _sig) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        pinned = bright.pin()
+        if pinned is None:
+            notes.append("brightness not pinned (brightnessctl failed)")
+        extra = launcher.config() if launcher else {}
+        extra["inhibited"] = bool(os.environ.get("SL7_POWERTEST_INHIBITED"))
+        cfg = capture_config(pinned, extra)
+        hsh = config_hash(cfg)
+        out.write(json.dumps({"type": "config", "t": round(time.time(), 3), "workload": workload,
+                              "label": args.label, "minutes": args.minutes, "hash": hsh, "config": cfg}) + "\n")
+        if launcher:
+            mpv = launcher.start()
+        time.sleep(2.0)  # let brightness and the workload settle
+
+        idle, top = CpuIdle(), TopProcs()
+        top.top()
+        idle.delta()
+        e_seen = energy_mwh(bat)
+        phase, started = "sync-start", time.monotonic()
+        next_sample = next_minute = started
+        e_ref = e_last = e_seen
+        run_until = None
+        sync_end_from = started
+        print("%s: waiting for a fresh gauge update (up to %d s)..." % (workload, SYNC_TIMEOUT_S))
+        while True:
+            now = time.monotonic()
+            if ac_online() or read(bat / "status") == "Charging":
+                raise Abort("charger plugged in during the run")
+            if mpv is not None and mpv.poll() is not None:
+                raise Abort("mpv exited early (code %s)" % mpv.returncode)
+            e = energy_mwh(bat)
+            if e is not None and e_last is not None and e > e_last + 0.5:
+                raise Abort("energy_now rose (charging?)")
+            if e is not None:
+                e_last = e
+            if phase == "sync-start":
+                if e is not None and e != e_ref:
+                    t0, e0 = time.time(), e
+                    run_until = now + args.minutes * 60.0
+                    next_minute = now + 60.0
+                    phase = "run"
+                    print("clock started: %.0f mWh at %s, running %.1f min" % (e0, time.strftime("%H:%M:%S"), args.minutes))
+                elif now - started > SYNC_TIMEOUT_S:
+                    raise Abort("energy_now never updated (gauge stale?)")
+            elif phase == "run":
+                if now >= run_until:
+                    e_ref = e
+                    phase = "sync-end"
+                    sync_end_from = now
+                    print("run done; waiting for a fresh gauge update to stop the clock...")
+            elif phase == "sync-end":
+                if e is not None and e != e_ref:
+                    t1, e1 = time.time(), e
+                    break
+                if now - sync_end_from > SYNC_TIMEOUT_S:
+                    notes.append("end gauge sync timed out; window ends at the last sample")
+                    e1, t1 = e_ref, time.time()
+                    break
+            if now >= next_sample:
+                mons = hypr_monitors()
+                rec = sample(bat, idle, mons)
+                rec["phase"] = phase
+                samples.append(rec)
+                out.write(json.dumps(rec) + "\n")
+                next_sample += args.sample
+                if next_sample < now:
+                    next_sample = now + args.sample
+            if now >= next_minute and phase != "sync-start":
+                out.write(json.dumps({"type": "minute", "t": round(time.time(), 3), "phase": phase,
+                                      "top": top.top(), "wifi_power_save": wifi_power_save(),
+                                      "display": display_mode(hypr_monitors())}) + "\n")
+                next_minute += 60.0
+            time.sleep(POLL_S)
+        meta["valid"] = True
+    except Abort as exc:
+        notes.append("aborted: %s" % exc)
+        t1 = t1 or time.time()
+        if t0 is None:
+            t0 = t1
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+        if launcher:
+            launcher.stop()
+        bright.restore()
+    summ = summarize(samples, t0 or time.time(), t1 or time.time(), e0, e1, cfg, hsh, meta)
+    out.write(json.dumps(summ) + "\n")
+    out.close()
+    (path.with_suffix(".summary.json")).write_text(json.dumps(summ, indent=2) + "\n")
+    print()
+    print(fmt_summary(summ))
+    print("  log: %s" % path)
+    return 0 if meta["valid"] else 1
+
+
+class Mpv:
+    def __init__(self, args):
+        self.args = args
+        self.proc = None
+
+    def cmdline(self):
+        cmd = ["mpv", "--loop-file=inf", "--no-terminal", "--mute=yes", "--hwdec=%s" % self.args.hwdec]
+        if not self.args.windowed:
+            cmd.append("--fullscreen")
+        return cmd + list(self.args.mpv_args) + [self.args.file]
+
+    def config(self):
+        return {"video": os.path.basename(self.args.file), "mpv": self.cmdline()[:-1]}
+
+    def start(self):
+        self.proc = subprocess.Popen(self.cmdline(), start_new_session=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return self.proc
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+                self.proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                self.proc.kill()
+
+
+# --- suspend / compare ---------------------------------------------------------------------
+
+
+def cmd_suspend(_args):
+    bat, _ = find_battery()
+    print("""sl7-powertest suspend: guidance (nothing is changed or suspended by this command)
+
+Gauge: the fixed per-cycle cost is about %g mWh (Dell 7441, not yet measured on
+this SL7). Re-measure it once with one 3-minute and one 40-minute suspend.
+
+Procedure, with the charger unplugged and the battery between 30%% and 90%%:
+  1. Pin the brightness you will use afterwards and close anything busy.
+  2. Wait for energy_now to change, then note it and the time:
+       watch -n1 'date +%%T; cat %s/energy_now'
+     (the gauge steps in %g mWh; start the clock on a change)
+  3. systemctl suspend. Wake it by hand (power button); the SL7 RTC has no alarm.
+  4. Wait for the next energy_now change, note it and the time.
+  5. W = (start - end - %g mWh per cycle) / hours asleep. Use 45+ minutes
+     asleep; shorter runs are dominated by the gauge step and the cycle cost.
+Change one variable per run and repeat each setting three times, alternating.
+Use `sl7-powertest idle` for the awake baseline."""
+          % (SUSPEND_CYCLE_MWH, bat if bat else "/sys/class/power_supply/qcom-battmgr-bat", GAUGE_STEP_MWH, SUSPEND_CYCLE_MWH))
+    if bat is None:
+        print("\nwarning: no battery found", file=sys.stderr)
+    elif ac_online():
+        print("\nnote: a charger is currently connected.")
+    return 0
+
+
+def load_summary(path):
+    last = None
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "summary":
+                    last = rec
+    except OSError as exc:
+        sys.exit("sl7-powertest: %s" % exc)
+    if last is None:
+        sys.exit("sl7-powertest: no summary record in %s (run aborted?)" % path)
+    return last
+
+
+def flatten(d, prefix=""):
+    out = {}
+    for k, v in d.items():
+        key = prefix + k
+        if isinstance(v, dict):
+            out.update(flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def cmd_compare(args):
+    a, b = load_summary(args.a), load_summary(args.b)
+    for name, s in (("A", a), ("B", b)):
+        print("%s: %s  %s  config %s%s" % (name, s["workload"], s.get("label") or "", s["config_hash"],
+                                          "" if s["valid"] else "  [INVALID]"))
+        if "watts" in s:
+            print("   %.3f W +/- %.3f   (%d min, %.0f%% -> %.0f%%, power_now mean %.3f W)" % (
+                s["watts"], s["error_w"], round(s["window_s"] / 60), s["capacity_start"] or 0,
+                s["capacity_end"] or 0, s["power_now_mean_w"] or 0))
+    if "watts" in a and "watts" in b:
+        d = b["watts"] - a["watts"]
+        err = a["error_w"] + b["error_w"]
+        pct = 100.0 * d / a["watts"] if a["watts"] else 0.0
+        print("\nB - A = %+.3f W (%+.1f%%), combined error +/-%.3f W" % (d, pct, err))
+        print("verdict: " + ("difference exceeds the measurement error" if abs(d) > err
+                             else "within the measurement error; not a distinguishable change"))
+        if a["workload"] != b["workload"]:
+            print("warning: different workloads (%s vs %s)" % (a["workload"], b["workload"]))
+    fa, fb = flatten(a.get("config", {})), flatten(b.get("config", {}))
+    diffs = [(k, fa.get(k), fb.get(k)) for k in sorted(set(fa) | set(fb)) if fa.get(k) != fb.get(k)]
+    print("\nconfig differences:" + (" none" if not diffs else ""))
+    for k, x, y in diffs:
+        print("  %s: %s -> %s" % (k, x, y))
+    for key, title in (("cpu_mean_khz", "mean cpu MHz"), ("cpuidle_residency_pct", "cpuidle residency %")):
+        ka, kb = a.get(key) or {}, b.get(key) or {}
+        if ka or kb:
+            print("\n%s:" % title)
+            for k in sorted(set(ka) | set(kb)):
+                va, vb = ka.get(k), kb.get(k)
+                f = (lambda v: "-" if v is None else ("%.0f" % (v / 1000) if key == "cpu_mean_khz" else "%.1f" % v))
+                print("  %-12s %8s -> %8s" % (k, f(va), f(vb)))
+    return 0
+
+
+# --- main -------------------------------------------------------------------------------------
+
+
+def reexec_inhibited():
+    """Run under systemd-inhibit so hypridle neither dims, locks nor sleeps."""
+    if os.environ.get("SL7_POWERTEST_INHIBITED") or ROOT:
+        return
+    exe = None
+    for d in os.environ.get("PATH", "").split(":"):
+        if os.access(os.path.join(d, "systemd-inhibit"), os.X_OK):
+            exe = os.path.join(d, "systemd-inhibit")
+            break
+    if exe is None:
+        print("warning: systemd-inhibit not found; the idle timer may dim or lock the screen", file=sys.stderr)
+        return
+    os.environ["SL7_POWERTEST_INHIBITED"] = "1"
+    os.execv(exe, [exe, "--what=idle:sleep", "--who=sl7-powertest", "--why=power measurement run",
+                   sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="sl7-powertest", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(sp):
+        sp.add_argument("--minutes", type=float, default=20.0, help="run length (default 20; 30 gives +/-0.02 W)")
+        sp.add_argument("--brightness", type=int, default=30, metavar="PCT",
+                        help="backlight percent held for the run (default 30)")
+        sp.add_argument("--label", help="tag for the file name, e.g. before / after")
+        sp.add_argument("--sample", type=float, default=5.0, help=argparse.SUPPRESS)
+
+    sp = sub.add_parser("idle", help="idle desktop")
+    common(sp)
+    sp = sub.add_parser("video", help="loop a video file in mpv")
+    sp.add_argument("file")
+    common(sp)
+    sp.add_argument("--hwdec", default="no", help="mpv --hwdec value (default no)")
+    sp.add_argument("--windowed", action="store_true", help="do not use fullscreen")
+    sp.add_argument("mpv_args", nargs="*", help="extra mpv arguments (after --)")
+    sub.add_parser("suspend", help="print the suspend measurement procedure")
+    sp = sub.add_parser("compare", help="compare two runs")
+    sp.add_argument("a")
+    sp.add_argument("b")
+    args = ap.parse_args()
+
+    if args.cmd == "suspend":
+        return cmd_suspend(args)
+    if args.cmd == "compare":
+        return cmd_compare(args)
+    if not 1 <= args.brightness <= 100:
+        sys.exit("sl7-powertest: --brightness must be 1-100")
+    if args.cmd == "video" and not os.path.isfile(args.file):
+        sys.exit("sl7-powertest: no such file: %s" % args.file)
+    reexec_inhibited()
+    return workload_run(args, args.cmd, Mpv(args) if args.cmd == "video" else None)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

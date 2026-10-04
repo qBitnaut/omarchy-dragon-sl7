@@ -25,7 +25,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 5 | factory Wi-Fi/BT MAC | `/usr/bin/sl7-mac`, `sl7-wifi-mac.service`, `sl7-bt-mac.service`, `99-sl7-bt-mac.rules` |
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
-| 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power` |
+| 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
 
@@ -164,6 +164,27 @@ use this tool for the SL7.
   wifi-powersave enable` writes a NetworkManager drop-in (`wifi.powersave = 1`, ignore) and a
   flag file; `power-event` then runs `iw dev <wlan> set power_save on|off` by power
   source. Needs `iw`. `disable` reverts. Not enabled by default.
+- **AC/battery power mode** (`omarchy-sl7-powermode`, config
+  `/etc/omarchy-surface-sl7/power.conf`, enabled by default; `ENABLE=no` turns it off).
+  `power-event` runs it as root on every battery change event, at boot
+  (`omarchy-surface-sl7-powermode.service`) and shortly after resume. On battery it caps every
+  cpufreq policy's `scaling_max_freq` (2188800 kHz), caps the GPU devfreq `max_freq` at the
+  middle entry of `available_frequencies`, turns Wi-Fi power save on and sets the platform
+  profile to `low-power` if the kernel has one (linux-sl7 does not build the Surface driver, so
+  that is normally a no-op). On AC all of it returns to hardware maximum, Wi-Fi power save off,
+  profile `balanced`. Writes are idempotent. The user part, a user service
+  (`omarchy-sl7-powermode.service`, enabled globally for `graphical-session.target`) subscribes
+  to UPower's `OnBattery` over D-Bus and to Hyprland's socket, and switches `eDP-1` to 60 Hz on
+  battery and back to the original rate on AC with `hyprctl eval hl.monitor(...)`
+  (`hyprctl keyword` does not work with the Lua parser). It never edits `monitors.lua`. It
+  re-applies after a config reload, which would otherwise undo the 60 Hz mode. Animations and
+  blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). Omarchy has no
+  hook for its own `omarchy-powerprofiles-set`, which only calls power-profiles-daemon (no
+  backend on ARM), so this runs beside it on the same signal and does not change the PPD
+  profile. Restart the user part after editing the config:
+  `systemctl --user restart omarchy-sl7-powermode`. Check with `omarchy-sl7-powermode status`
+  or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting (off) when a connection is
+  re-activated; run `sudo omarchy-surface-sl7-power wifi-powersave enable` to stop that.
 
 ### 9. Upstream leaf
 
@@ -184,7 +205,48 @@ negative `power_now` absolute. Remove both files and their PKGBUILD lines when #
 
 Read-only check (`/usr/bin/sl7-doctor`): running kernel and DT, 3 cpufreq policies, SAM
 modules in the initramfs, firmware, iptsd units, `BOOT_ORDER`, uki.conf, no active
-`surface_device_modules.conf`, Pro Audio guard. Exit 1 on any failure.
+`surface_device_modules.conf`, Pro Audio guard, and the power mode (current source, caps
+applied, whether they match the source). Exit 1 on any failure.
+
+### 12. Measuring power: `sl7-powertest`
+
+Run as your user, on battery, charger unplugged, battery between 30% and 90%. It only reads
+sysfs. For the run it pins the backlight (`brightnessctl`, default 30%, `--brightness PCT`)
+and holds an idle/sleep inhibitor so hypridle does not dim or lock; both are restored on exit
+and on Ctrl-C.
+
+```
+sl7-powertest idle --minutes 20 --label before
+sl7-powertest video clip.mp4 --minutes 30 --hwdec no --label sw
+sl7-powertest suspend            # prints the procedure, changes nothing
+sl7-powertest compare A.jsonl B.jsonl
+```
+
+Watts come from the `energy_now` delta between two gauge updates: the tool waits for a fresh
+update before starting and before stopping the clock (the gauge goes stale), so the error is
+one 10 mWh step over the window (about +/-0.03 W at 20 minutes, +/-0.02 W at 30). `power_now`
+(absolute value) is logged as a cross-check. Every 5 s it records `energy_now`, `power_now`,
+capacity, per-policy `scaling_cur_freq`, cpuidle time and entry deltas, GPU devfreq `cur_freq`
+and the eDP mode; once a minute the top 5 CPU processes and Wi-Fi power save. The first record
+is the configuration (refresh rate, governor and caps, Wi-Fi power save, brightness, kernel
+command line, monitors, Bluetooth, power mode) with a hash; `compare` lists what differs.
+Output goes to `~/.local/state/sl7-powertest/` (JSONL plus a `.summary.json`).
+
+Before/after a change (for example the power mode):
+
+```
+# 1. baseline: ENABLE=no in power.conf, then: sudo omarchy-sl7-powermode ac
+sl7-powertest idle --minutes 20 --label before
+# 2. change one thing (ENABLE=yes, then: sudo omarchy-sl7-powermode battery)
+sl7-powertest idle --minutes 20 --label after
+sl7-powertest compare ~/.local/state/sl7-powertest/*-before.jsonl ~/.local/state/sl7-powertest/*-after.jsonl
+```
+
+Change one variable per run, repeat each setting three times in alternating order, and keep
+the same Wi-Fi network. While the power mode is enabled, plug/unplug events and resume re-apply it by themselves;
+that is why the baseline sets `ENABLE=no` first. The user part also holds 60 Hz: for a
+"before" run at 120 Hz, `systemctl --user stop omarchy-sl7-powermode` as well and run
+`omarchy-sl7-powermode ac`.
 
 ### 10. Scriptlet
 
@@ -244,5 +306,13 @@ Untested on hardware:
   Omarchy's iwd/NetworkManager MAC settings.
 - The WirePlumber guard script (no SL7 card here; syntax only).
 - The power rule and the opt-in Wi-Fi power save (latency impact unmeasured).
-- Not covered by this package: CPU/GPU frequency caps, the ADSP late-start service,
-  `sl7-doctor`, board-2 for Wi-Fi, the romulus13 cpu fusing DTB hook.
+- `omarchy-sl7-powermode`, `sl7-powertest`: logic exercised against fake sysfs trees with
+  stubbed `iw`, `hyprctl`, `brightnessctl`, `gdbus` and `mpv` (caps, idempotency, restore,
+  display switch and restore, watcher events, gauge sync, Ctrl-C restore, compare). Not run on
+  the SL7: that the udev change events arrive on plug/unplug and after resume, that the SCMI
+  firmware honours `scaling_max_freq` below the sustained frequency on all three clusters,
+  the GPU devfreq node name and OPP list, the real UPower signal and the `hl.monitor`
+  refresh switch on the 2304x1536 panel (other monitor attributes such as bit depth are not
+  carried over), and the gauge's real update cadence.
+- Not covered by this package: the ADSP late-start service, board-2 for Wi-Fi, the romulus13
+  cpu fusing DTB hook.

@@ -7,7 +7,9 @@
 #    notifications but none for plug/unplug of the charger, so UPower's
 #    OnBattery goes stale (Omarchy's shell then never switches profiles).
 #    Forward the battery event to the AC/USB supplies.
-# 2. If the user opted in (omarchy-surface-sl7-power wifi-powersave enable),
+# 2. Apply the AC/battery caps (omarchy-sl7-powermode: CPU and GPU max
+#    frequency, Wi-Fi power save, platform profile) for the current source.
+# 3. If the user opted in (omarchy-surface-sl7-power wifi-powersave enable),
 #    apply Wi-Fi power save by power source.
 ps=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
 flag=${OMARCHY_SL7_WIFI_PS_FLAG:-/etc/omarchy-surface-sl7/wifi-powersave}
@@ -19,6 +21,9 @@ done
 if ((${#targets[@]})); then
   udevadm trigger --action=change "${targets[@]}"
 fi
+
+powermode=${OMARCHY_SL7_POWERMODE:-/usr/bin/omarchy-sl7-powermode}
+[[ -x $powermode ]] && "$powermode" --system auto >/dev/null 2>&1
 
 [[ -e $flag ]] || exit 0
 command -v iw >/dev/null 2>&1 || exit 0

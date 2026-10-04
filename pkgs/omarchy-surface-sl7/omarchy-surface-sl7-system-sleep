@@ -20,6 +20,17 @@ case ${1:-} in
     else
       "$helper" || true
     fi
+    # The charger may have been (un)plugged while asleep, and no udev event
+    # is guaranteed on resume: re-apply the AC/battery caps shortly after.
+    if [[ -x /usr/bin/omarchy-sl7-powermode ]]; then
+      if command -v systemd-run >/dev/null 2>&1; then
+        systemd-run --quiet --no-block --on-active=3 \
+          /usr/bin/omarchy-sl7-powermode --system auto ||
+          { /usr/bin/omarchy-sl7-powermode --system auto >/dev/null 2>&1 & }
+      else
+        /usr/bin/omarchy-sl7-powermode --system auto >/dev/null 2>&1 &
+      fi
+    fi
     ;;
 esac
 exit 0
