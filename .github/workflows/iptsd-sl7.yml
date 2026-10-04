@@ -46,7 +46,7 @@ jobs:
               cp -r /src /home/builder/build
               chown -R builder:builder /home/builder/build
               cd /home/builder/build
-              su builder -c "makepkg --syncdeps --noconfirm --cleanbuild"
+              su builder -c "PKGEXT=.pkg.tar.zst makepkg --syncdeps --noconfirm --cleanbuild"
               cp /home/builder/build/*.pkg.tar.* /out/
             '
 

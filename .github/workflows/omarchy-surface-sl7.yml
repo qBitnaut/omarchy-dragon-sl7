@@ -68,7 +68,7 @@ jobs:
               cd /home/builder/build
               su builder -c "makepkg --printsrcinfo" > /tmp/SRCINFO.new
               diff -u .SRCINFO /tmp/SRCINFO.new
-              su builder -c "makepkg --nodeps --noconfirm --cleanbuild"
+              su builder -c "PKGEXT=.pkg.tar.zst makepkg --nodeps --noconfirm --cleanbuild"
               cp /home/builder/build/*.pkg.tar.* /out/
               pacman -S --noconfirm --needed namcap || true
               if command -v namcap >/dev/null; then
