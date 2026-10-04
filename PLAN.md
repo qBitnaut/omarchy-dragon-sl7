@@ -51,7 +51,7 @@ Full evidence lives outside this repo (never committed; contains Microsoft-licen
 5. **Safety first on audio.** No config we ship may raise the WSA speaker limits or expose the PipeWire "Pro Audio" profile.
 6. **Measure, don't guess**, on power. Every power tweak lands with before/after watts.
 
-**Closest template:** `denislopt/omarchy-surface-laptop7` (published 2026-09-16, SL7 15" only): dragon-based, stock ALARM kernel + out-of-tree modules (SAM keyboard, touchpad, touchscreen, Wi-Fi), firmware package, pre-unlock display hook, `fix-surface-keyboard.sh` bypass, kernel-upgrade review hook. We follow its overlay shape but still build our own `linux-sl7` (distinct pkgname, `provides`/`conflicts` `linux-aarch64`): the X1P SCMI fix lives in built-in code (`ARM_SCMI_PERF_DOMAIN=y`) and Iris needs `SM_VIDEOCC_8550`, neither of which a module package can carry. Its scripts hard-check `microsoft,romulus15` and need adapting to romulus13.
+**Closest template:** `denislopt/omarchy-surface-laptop7` (published 2026-09-16, SL7 15" only): dragon-based, stock ALARM kernel + out-of-tree modules (SAM keyboard, touchpad, touchscreen, Wi-Fi), firmware package, pre-unlock display hook, `fix-surface-keyboard.sh` bypass, kernel-upgrade review hook. We follow its overlay shape but still build our own `linux-sl7` (distinct pkgname, installed side by side with `linux-aarch64`): the X1P SCMI fix lives in built-in code (`ARM_SCMI_PERF_DOMAIN=y`) and Iris needs `SM_VIDEOCC_8550`, neither of which a module package can carry. Its scripts hard-check `microsoft,romulus15` and need adapting to romulus13.
 
 ---
 
@@ -164,8 +164,9 @@ Surface UEFI (Secure Boot OFF)
 
 ### 3.1 Base
 
-- ALARM `core/linux-aarch64` PKGBUILD and config (7.2.8 today), with its own pkgbase `linux-sl7` (`provides`/`conflicts` `linux-aarch64`) so ALARM updates can never overwrite it. The Dell 7441 owner's same-named custom kernel was overwritten by ALARM 7.2.7-2.
-- Ship `vmlinuz` + `pkgbase` in the modules dir and DTBs in `/boot/dtbs/qcom`, so no pkgbase shim is needed for `linux-sl7`.
+- ALARM `core/linux-aarch64` PKGBUILD and config (7.2.8 today), with its own pkgbase `linux-sl7` so ALARM updates can never overwrite it. The Dell 7441 owner's same-named custom kernel was overwritten by ALARM 7.2.7-2. It installs **side by side** with `linux-aarch64`: it neither `provides` nor `conflicts` `linux-aarch64` or `linux` (`linux-aarch64` conflicts with `linux`).
+- Patch queue taken from dwhinham's `linux-sp11` (`v7.2.8-arch1-sp11`) via `git format-patch`, not his whole tree (his Arch Ports config builds ~2x the modules, adds debug info, Rust and module signing, and uses a different gcc). ELLX is not used (Ubuntu packaging, older incompatible spi-hid lineage). Decision 2026-10-03; evidence in `Research/omarchy-dragon-sl7/kernel/raw/2026-10-03-linux-sl7-scoping-evidence.txt`.
+- Ship `vmlinuz` + `pkgbase` in the modules dir and DTBs at a private path (nothing written directly to `/boot`), so no pkgbase shim is needed for `linux-sl7`. The add-on points `DeviceTreeAuto` at those DTBs.
 - Keep `linux-aarch64` (stock) installable as the **rescue kernel**. It has no internal keyboard, but works with a USB keyboard.
 - **Alternative considered:** send the SURFACE_* config to ALARM (like PKGBUILDs #2217/#2220). Do this anyway. The patch queue still forces our own kernel for 6–12 months.
 

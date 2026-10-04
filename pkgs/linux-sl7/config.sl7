@@ -1,0 +1,26 @@
+# linux-sl7 config fragment, merged over config.alarm (ALARM core/linux-aarch64)
+# with scripts/kconfig/merge_config.sh, then resolved with `make olddefconfig`.
+# scripts/check-config.sh asserts every option below after resolution.
+
+# Internal keyboard (Surface Aggregator, incl. at the LUKS prompt), fan, profile
+CONFIG_SURFACE_PLATFORMS=y
+CONFIG_SURFACE_AGGREGATOR=m
+CONFIG_SURFACE_AGGREGATOR_BUS=y
+CONFIG_SURFACE_AGGREGATOR_REGISTRY=m
+CONFIG_SURFACE_AGGREGATOR_HUB=m
+CONFIG_SURFACE_HID=m
+CONFIG_SURFACE_HID_CORE=m
+CONFIG_SURFACE_PLATFORM_PROFILE=m
+CONFIG_SENSORS_SURFACE_FAN=m
+
+# Touchpad and SPI touchscreen (spi-hid v4 series, QSPI in spi-geni-qcom)
+CONFIG_SPI_HID=m
+CONFIG_SPI_HID_OF=m
+
+# Battery life: schedutil, and SCMI cpufreq built in so no autoload series
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+CONFIG_ARM_SCMI_CPUFREQ=y
+
+# Hardware video decode
+CONFIG_VIDEO_QCOM_IRIS=m
+CONFIG_SM_VIDEOCC_8550=m

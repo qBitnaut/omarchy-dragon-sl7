@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jiajie Chen <c@jia.je>
+Date: Fri, 25 Oct 2024 13:38:57 +0800
+Subject: [PATCH] HACK: disable rfkill of ath12k_pci
+
+Origin: https://github.com/dwhinham/linux-sp11 branch v7.2.8-arch1-sp11 (37f883437b); Jiajie Chen
+Upstream-Status: Inappropriate (hardware workaround, will not go upstream)
+
+---
+ drivers/net/wireless/ath/ath12k/core.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+index 5cdf4973d..18f72064d 100644
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -80,6 +80,8 @@ static int ath12k_core_rfkill_config(struct ath12k_base *ab)
+ 	if (ath12k_acpi_get_disable_rfkill(ab))
+ 		return 0;
+ 
++	return 0;
++
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		ar = ab->pdevs[i].ar;
+ 

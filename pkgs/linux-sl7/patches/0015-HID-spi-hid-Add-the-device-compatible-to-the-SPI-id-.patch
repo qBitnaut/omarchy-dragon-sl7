@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dale Whinham <daleyo@gmail.com>
+Date: Wed, 2 Sep 2026 13:02:17 +0100
+Subject: [PATCH] HID: spi-hid: Add the device compatible to the SPI id table
+
+The SPI bus builds its uevent modalias from the first compatible's name,
+so a device tree using the binding's device specific compatible ahead of
+the generic one never triggers a module load.
+
+Origin: https://github.com/dwhinham/linux-sp11 branch v7.2.8-arch1-sp11 (378b6a8f72)
+Upstream-Status: Pending (not posted upstream)
+
+---
+ drivers/hid/spi-hid/spi-hid-of.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/hid/spi-hid/spi-hid-of.c b/drivers/hid/spi-hid/spi-hid-of.c
+index 561cf453e..b96deb515 100644
+--- a/drivers/hid/spi-hid/spi-hid-of.c
++++ b/drivers/hid/spi-hid/spi-hid-of.c
+@@ -222,6 +222,7 @@ MODULE_DEVICE_TABLE(of, spi_hid_of_match);
+ static const struct spi_device_id spi_hid_of_id_table[] = {
+ 	{ "hid", 0 },
+ 	{ "hid-over-spi", 0 },
++	{ "g6-touch-digitizer", 0 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(spi, spi_hid_of_id_table);

@@ -1,0 +1,241 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Maintainer: omarchy-dragon-sl7 <https://github.com/qBitnaut/omarchy-dragon-sl7>
+#
+# linux-sl7: Linux for the Microsoft Surface Laptop 7 (Snapdragon X Plus/Elite)
+# running Arch Linux ARM + Omarchy.
+#
+# Derived from the Arch Linux ARM core/linux-aarch64 PKGBUILD and config
+# (Kevin Mihelich, graysky), with a patch queue and a config fragment on top.
+# Side-by-side design: this package never provides or conflicts with
+# linux-aarch64 or linux, installs nothing into /boot, and keeps its DTBs in
+# a private directory so linux-aarch64 stays installable as a rescue kernel.
+
+pkgbase=linux-sl7
+pkgname=("$pkgbase" "$pkgbase-headers")
+_srcname=linux-7.2
+_desc="Microsoft Surface Laptop 7"
+pkgver=7.2.8
+pkgrel=1
+arch=('aarch64')
+url="https://github.com/qBitnaut/omarchy-dragon-sl7"
+license=('GPL-2.0-only')
+makedepends=('bc' 'cpio' 'dtc' 'git' 'inetutils' 'kmod' 'pahole' 'perl' 'python' 'tar' 'xz')
+options=('!strip')
+
+# The two downloads are pinned to the kernel.org sha256sums.asc values. Files
+# from this directory are covered by the repository's git history instead.
+source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
+        "https://www.kernel.org/pub/linux/kernel/v7.x/patch-${pkgver}.xz"
+        'config.alarm'
+        'config.sl7'
+        'scripts/check-config.sh'
+        'patches/series'
+        'patches/0001-spi-geni-qcom-Add-QSPI-1-4-4-support.patch'
+        'patches/0002-dmaengine-qcom-gpi-Add-QSPI-protocol-support.patch'
+        'patches/0003-Documentation-Correction-in-HID-output_report-callba.patch'
+        'patches/0004-HID-Add-BUS_SPI-support-and-define-HID_SPI_DEVICE-ma.patch'
+        'patches/0005-HID-spi-hid-add-transport-driver-skeleton-for-HID-ov.patch'
+        'patches/0006-HID-spi-hid-add-spi-hid-driver-HID-layer.patch'
+        'patches/0007-HID-spi-hid-add-HID-SPI-protocol-implementation.patch'
+        'patches/0008-HID-spi_hid-add-spi_hid-traces.patch'
+        'patches/0009-HID-spi_hid-add-ACPI-support-for-SPI-over-HID.patch'
+        'patches/0010-HID-spi_hid-add-device-tree-support-for-SPI-over-HID.patch'
+        'patches/0011-dt-bindings-input-Document-hid-over-spi-DT-schema.patch'
+        'patches/0012-HID-spi-hid-add-power-management-implementation.patch'
+        'patches/0013-HID-spi-hid-add-panel-follower-support.patch'
+        'patches/0014-HID-spi-hid-Use-a-single-full-duplex-transfer.patch'
+        'patches/0015-HID-spi-hid-Add-the-device-compatible-to-the-SPI-id-.patch'
+        'patches/0016-arm64-dts-qcom-x1e80100-romulus-Add-the-touchpad.patch'
+        'patches/0017-arm64-dts-qcom-x1e80100-romulus13-Add-the-touch-digi.patch'
+        'patches/0018-firmware-arm_scmi-perf-Ignore-sustained-frequency-be.patch'
+        'patches/0019-power-supply-qcom_battmgr-Report-capacity-on-X1E8010.patch'
+        'patches/0020-usb-typec-mux-ps883x-support-TYPEC_DP_STATE_F.patch'
+        'patches/0021-usb-typec-mux-ps883x-add-a-delay-after-writing-confi.patch'
+        'patches/0022-usb-typec-mux-ps883x-disable-USB4-on-incomplete-USB4.patch'
+        'patches/0023-HACK-disable-rfkill-of-ath12k_pci.patch')
+sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
+            'b509067e26487f23795b30640bbfdff0afba0c48290f1100fe880c9bdf369776'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP')
+
+prepare() {
+  cd "$_srcname"
+
+  echo "Setting version..."
+  echo "-$pkgrel" > localversion.10-pkgrel
+  echo "${pkgbase#linux}" > localversion.20-pkgname
+
+  echo "Applying upstream stable patch..."
+  patch -Np1 -i "../patch-${pkgver}"
+
+  echo "Applying the linux-sl7 patch queue..."
+  local name
+  while read -r name; do
+    [[ -z $name || $name == \#* ]] && continue
+    echo "  $name"
+    patch -Np1 -i "../$name"
+  done < ../series
+
+  echo "Configuring..."
+  cp ../config.alarm .config
+  scripts/kconfig/merge_config.sh -m -O . .config ../config.sl7 > /dev/null
+  make olddefconfig
+  bash ../check-config.sh .config ../config.sl7
+
+  make -s kernelrelease > version
+  echo "Prepared $pkgbase version $(<version)"
+}
+
+build() {
+  cd "$_srcname"
+
+  # unset LDFLAGS as the kernel build does not use them
+  unset LDFLAGS
+  make ${MAKEFLAGS} Image modules
+  # Symbols in the blobs allow device tree overlays
+  make ${MAKEFLAGS} DTC_FLAGS="-@" dtbs
+}
+
+_package() {
+  pkgdesc="The Linux kernel and modules - ${_desc}"
+  depends=('coreutils' 'initramfs' 'kmod')
+  optdepends=(
+    'linux-firmware: firmware images needed for some devices'
+    'wireless-regdb: to set the correct wireless channels of your country'
+    "$pkgbase-headers: headers and scripts for building modules"
+  )
+  # No provides/conflicts: linux-aarch64 stays installable as the rescue kernel.
+  provides=("KSMBD-MODULE" "WIREGUARD-MODULE")
+
+  cd "$_srcname"
+  local kernver="$(<version)"
+  local modulesdir="$pkgdir/usr/lib/modules/$kernver"
+
+  echo "Installing boot image..."
+  # systemd and mkinitcpio expect the kernel here; nothing goes into /boot
+  install -Dm644 arch/arm64/boot/Image "$modulesdir/vmlinuz"
+
+  # Used by mkinitcpio to name the kernel
+  echo "$pkgbase" | install -Dm644 /dev/stdin "$modulesdir/pkgbase"
+
+  echo "Installing device tree binaries (Qualcomm only)..."
+  local dtbdir="$modulesdir/dtbs"
+  make INSTALL_DTBS_PATH="$dtbdir" dtbs_install
+  find "$dtbdir" -mindepth 1 -maxdepth 1 ! -name qcom -exec rm -rf {} +
+
+  echo "Installing modules..."
+  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 \
+    DEPMOD=/doesnt/exist modules_install
+
+  # remove build link
+  rm "$modulesdir"/build
+}
+
+_package-headers() {
+  pkgdesc="Header files and scripts for building modules for ${_desc} kernel"
+
+  cd "$_srcname"
+  local builddir="$pkgdir/usr/lib/modules/$(<version)/build"
+
+  echo "Installing build files..."
+  install -Dt "$builddir" -m644 .config Makefile Module.symvers System.map \
+    localversion.* version vmlinux
+  install -Dt "$builddir/kernel" -m644 kernel/Makefile
+  install -Dt "$builddir/arch/arm64" -m644 arch/arm64/Makefile
+  cp -t "$builddir" -a scripts
+
+  # add xfs and shmem for aufs building
+  mkdir -p "$builddir"/{fs/xfs,mm}
+
+  echo "Installing headers..."
+  cp -t "$builddir" -a include
+  cp -t "$builddir/arch/arm64" -a arch/arm64/include
+  install -Dt "$builddir/arch/arm64/kernel" -m644 arch/arm64/kernel/asm-offsets.s
+  mkdir -p "$builddir/arch/arm"
+  cp -t "$builddir/arch/arm" -a arch/arm/include
+
+  install -Dt "$builddir/drivers/md" -m644 drivers/md/*.h
+  install -Dt "$builddir/net/mac80211" -m644 net/mac80211/*.h
+
+  # https://bugs.archlinux.org/task/13146
+  install -Dt "$builddir/drivers/media/i2c" -m644 drivers/media/i2c/msp3400-driver.h
+
+  # https://bugs.archlinux.org/task/20402
+  install -Dt "$builddir/drivers/media/usb/dvb-usb" -m644 drivers/media/usb/dvb-usb/*.h
+  install -Dt "$builddir/drivers/media/dvb-frontends" -m644 drivers/media/dvb-frontends/*.h
+  install -Dt "$builddir/drivers/media/tuners" -m644 drivers/media/tuners/*.h
+
+  # https://bugs.archlinux.org/task/71392
+  install -Dt "$builddir/drivers/iio/common/hid-sensors" -m644 drivers/iio/common/hid-sensors/*.h
+
+  echo "Installing KConfig files..."
+  find . -name 'Kconfig*' -exec install -Dm644 {} "$builddir/{}" \;
+
+  echo "Removing unneeded architectures..."
+  local arch
+  for arch in "$builddir"/arch/*/; do
+    [[ $arch = */arm64/ || $arch == */arm/ ]] && continue
+    echo "Removing $(basename "$arch")"
+    rm -r "$arch"
+  done
+
+  echo "Removing documentation..."
+  rm -r "$builddir/Documentation"
+
+  echo "Removing broken symlinks..."
+  find -L "$builddir" -type l -printf 'Removing %P\n' -delete
+
+  echo "Removing loose objects..."
+  find "$builddir" -type f -name '*.o' -printf 'Removing %P\n' -delete
+
+  echo "Stripping build tools..."
+  local file
+  while read -rd '' file; do
+    case "$(file -bi "$file")" in
+      application/x-sharedlib\;*)      # Libraries (.so)
+        strip -v $STRIP_SHARED "$file" ;;
+      application/x-archive\;*)        # Libraries (.a)
+        strip -v $STRIP_STATIC "$file" ;;
+      application/x-executable\;*)     # Binaries
+        strip -v $STRIP_BINARIES "$file" ;;
+      application/x-pie-executable\;*) # Relocatable binaries
+        strip -v $STRIP_SHARED "$file" ;;
+    esac
+  done < <(find "$builddir" -type f -perm -u+x ! -name vmlinux -print0)
+
+  echo "Adding symlink..."
+  mkdir -p "$pkgdir/usr/src"
+  ln -sr "$builddir" "$pkgdir/usr/src/$pkgbase"
+}
+
+for _p in "${pkgname[@]}"; do
+  eval "package_${_p}() {
+    $(declare -f "_package${_p#$pkgbase}")
+    _package${_p#$pkgbase}
+  }"
+done

@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rafael Guariento <rafaelguariento@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 22:01:55 -0500
+Subject: [PATCH] firmware: arm_scmi: perf: Ignore sustained frequency below
+ the lowest OPP
+
+On Snapdragon X1P-64-100 laptops the firmware reports a sustained
+frequency of 0 kHz for some performance domains. Every OPP is then
+above the sustained frequency and gets marked as turbo, which leaves
+cpufreq with no usable frequency and drops the policy.
+
+Ignore a sustained frequency that is below the domain's lowest OPP.
+Genuine boost OPPs on parts whose firmware reports a sensible sustained
+frequency are unaffected.
+
+Observed on a Dell Inspiron 14 Plus 7441 (X1P-64-100):
+
+  cpu cpu4: [1][NCC1]: sustained freq 0 kHz below lowest OPP, not marking turbo OPPs
+  cpu cpu7: [2][NCC2]: sustained freq 0 kHz below lowest OPP, not marking turbo OPPs
+
+Origin: rafaelguariento, https://github.com/omacom/omarchy/discussions/12441
+        (discussioncomment-18568484)
+Upstream-Status: Not submitted
+
+---
+ drivers/firmware/arm_scmi/perf.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/firmware/arm_scmi/perf.c b/drivers/firmware/arm_scmi/perf.c
+index 4583d02be..8e7a1aaa3 100644
+--- a/drivers/firmware/arm_scmi/perf.c
++++ b/drivers/firmware/arm_scmi/perf.c
+@@ -865,14 +865,33 @@ static int scmi_dvfs_device_opps_add(const struct scmi_protocol_handle *ph,
+ 				     struct device *dev, u32 domain)
+ {
+ 	int idx, ret;
+-	unsigned long freq;
++	unsigned long freq, min_freq = ULONG_MAX;
+ 	struct dev_pm_opp_data data = {};
+ 	struct perf_dom_info *dom;
++	bool sustained_valid;
+ 
+ 	dom = scmi_perf_domain_lookup(ph, domain);
+ 	if (IS_ERR(dom))
+ 		return PTR_ERR(dom);
+ 
++	for (idx = 0; idx < dom->opp_count; idx++) {
++		if (!dom->level_indexing_mode)
++			freq = dom->opp[idx].perf * dom->mult_factor;
++		else
++			freq = dom->opp[idx].indicative_freq * dom->mult_factor;
++		min_freq = min(min_freq, freq);
++	}
++
++	/*
++	 * Some firmware reports a sustained frequency below the lowest OPP
++	 * (e.g. zero) for some domains. Treating every OPP as turbo then
++	 * leaves cpufreq with no usable frequency, so the policy is dropped.
++	 */
++	sustained_valid = dom->sustained_freq_khz * 1000UL >= min_freq;
++	if (!sustained_valid)
++		dev_info(dev, "[%d][%s]: sustained freq %u kHz below lowest OPP, not marking turbo OPPs\n",
++			 domain, dom->info.name, dom->sustained_freq_khz);
++
+ 	for (idx = 0; idx < dom->opp_count; idx++) {
+ 		if (!dom->level_indexing_mode)
+ 			freq = dom->opp[idx].perf * dom->mult_factor;
+@@ -880,7 +899,8 @@ static int scmi_dvfs_device_opps_add(const struct scmi_protocol_handle *ph,
+ 			freq = dom->opp[idx].indicative_freq * dom->mult_factor;
+ 
+ 		/* All OPPs above the sustained frequency are treated as turbo */
+-		data.turbo = freq > dom->sustained_freq_khz * 1000UL;
++		data.turbo = sustained_valid &&
++			     freq > dom->sustained_freq_khz * 1000UL;
+ 
+ 		data.level = dom->opp[idx].perf;
+ 		data.freq = freq;

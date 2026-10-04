@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 22:01:34 -0500
+Subject: [PATCH] arm64: dts: qcom: x1e80100-romulus: Add the touchpad
+
+Microsoft Surface Laptop 7 touchpad (MSHW0238, 045E:0C77), HID over SPI
+on QUP2 SE3 using the QSPI transfer mode, four lane transfers through
+GPI DMA.
+
+Device description comes from the HSPI device in the Windows SSDT:
+
+  gpio 3         GpioInt (Edge, ActiveLow, PullNone)
+  gpio 65        VDD enable, 500 ms power-up wait in _PS0
+  gpio 120       reset, active low
+  20 MHz         SpiSerialBusV2 0x01312D00, mode 0, CS0
+  addresses      _DSM functions 1 to 3 (0x1000, 0x1004, 0x2000)
+  opcodes        _DSM functions 4 and 5 (0xeb read, 0xe2 write)
+
+The controller side is based on the Surface Laptop 7 device tree in
+orvitpng's Nix flake (devicetree/hardware/qspi.dtsi and
+devicetree/hardware/touch/touchpad.dtsi at commit b274dd722fb1), with
+the node properties adapted to the Chromium spi-hid v4 binding as used
+for the Surface Pro 11 digitizer.
+
+Origin: https://github.com/orvitpng/nix1e (b274dd7), omarchy-dragon-sl7
+Upstream-Status: Pending (depends on the spi-hid and QSPI series)
+
+---
+ .../dts/qcom/x1e80100-microsoft-romulus.dtsi  | 90 +++++++++++++++++++
+ 1 file changed, 90 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+index 13d0f09e0..a849c8654 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+@@ -3,9 +3,11 @@
+  * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+  */
+ 
++#include <dt-bindings/dma/qcom-gpi.h>
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/gpio-keys.h>
+ #include <dt-bindings/input/input.h>
++#include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+ 
+@@ -304,6 +306,21 @@ vreg_rtmr1_3p3: regulator-rtmr1-3p3 {
+ 	};
+ 
+ 
++	vreg_tp: regulator-tp {
++		compatible = "regulator-fixed";
++
++		regulator-name = "VREG_TP";
++
++		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++
++		/* ACPI HSPI _PS0: power rail up, then a 500 ms wait */
++		startup-delay-us = <500000>;
++
++		pinctrl-0 = <&tp_reg_en>;
++		pinctrl-names = "default";
++	};
++
+ 	vreg_nvme: regulator-nvme {
+ 		compatible = "regulator-fixed";
+ 
+@@ -1269,6 +1286,51 @@ &smb2360_2_eusb2_repeater {
+ 	vdd3-supply = <&vreg_l8b>;
+ };
+ 
++&gpi_dma2 {
++	status = "okay";
++};
++
++/*
++ * Touchpad (MSHW0238, 045E:0C77): HID over SPI in QSPI mode on QUP2 SE3.
++ * Wiring from the ACPI HSPI device: SpiSerialBusV2 20 MHz mode 0, IRQ GPIO3,
++ * reset GPIO120, VDD enable GPIO65.
++ */
++&spi19 {
++	compatible = "qcom,geni-spi-qspi";
++
++	dmas = <&gpi_dma2 0 3 QCOM_GPI_QSPI>,
++	       <&gpi_dma2 1 3 QCOM_GPI_QSPI>;
++
++	pinctrl-0 = <&qup_spi19_data_clk>, <&qup_spi19_data23>, <&qup_spi19_cs>;
++
++	status = "okay";
++
++	/*
++	 * The touchpad speaks the same HID over SPI protocol as the G6
++	 * digitizer (identical _DSM), so it uses the same compatible.
++	 */
++	touchpad@0 {
++		compatible = "microsoft,g6-touch-digitizer", "hid-over-spi";
++		reg = <0>;
++
++		interrupts-extended = <&tlmm 3 IRQ_TYPE_EDGE_FALLING>;
++		spi-max-frequency = <20000000>;
++
++		reset-gpios = <&tlmm 120 GPIO_ACTIVE_LOW>;
++
++		vdd-supply = <&vreg_tp>;
++
++		pinctrl-0 = <&tp_int_n>, <&tp_reset_n>;
++		pinctrl-names = "default";
++
++		input-report-header-address = <0x1000>;
++		input-report-body-address = <0x1004>;
++		output-report-address = <0x2000>;
++		read-opcode = <0xeb>;
++		write-opcode = <0xe2>;
++	};
++};
++
+ &swr0 {
+ 	pinctrl-0 = <&wsa_swr_active>, <&spkr_01_sd_n_active>;
+ 	pinctrl-names = "default";
+@@ -1332,6 +1394,34 @@ hall_int_n_default: hall-int-n-state {
+ 		bias-disable;
+ 	};
+ 
++	tp_reg_en: tp-reg-en-state {
++		pins = "gpio65";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	tp_reset_n: tp-reset-n-state {
++		pins = "gpio120";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	tp_int_n: tp-int-n-state {
++		pins = "gpio3";
++		function = "gpio";
++		bias-disable;
++	};
++
++	qup_spi19_data23: qup-spi19-data23-state {
++		/* IO2, IO3 */
++		pins = "gpio66", "gpio67";
++		function = "qup2_se3";
++		drive-strength = <6>;
++		bias-disable;
++	};
++
+ 	nvme_reg_en: nvme-reg-en-state {
+ 		pins = "gpio18";
+ 		function = "gpio";

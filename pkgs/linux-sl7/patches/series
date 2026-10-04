@@ -1,0 +1,41 @@
+# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.8).
+# One file name per line; lines starting with # are comments.
+# Every patch carries Origin: and Upstream-Status: headers.
+
+# 1. QSPI for spi-geni-qcom and GPI (dwhinham/linux-sp11)
+0001-spi-geni-qcom-Add-QSPI-1-4-4-support.patch
+0002-dmaengine-qcom-gpi-Add-QSPI-protocol-support.patch
+
+# 2. spi-hid v4 series (Chromium) plus dwhinham fixes
+0003-Documentation-Correction-in-HID-output_report-callba.patch
+0004-HID-Add-BUS_SPI-support-and-define-HID_SPI_DEVICE-ma.patch
+0005-HID-spi-hid-add-transport-driver-skeleton-for-HID-ov.patch
+0006-HID-spi-hid-add-spi-hid-driver-HID-layer.patch
+0007-HID-spi-hid-add-HID-SPI-protocol-implementation.patch
+0008-HID-spi_hid-add-spi_hid-traces.patch
+0009-HID-spi_hid-add-ACPI-support-for-SPI-over-HID.patch
+0010-HID-spi_hid-add-device-tree-support-for-SPI-over-HID.patch
+0011-dt-bindings-input-Document-hid-over-spi-DT-schema.patch
+0012-HID-spi-hid-add-power-management-implementation.patch
+0013-HID-spi-hid-add-panel-follower-support.patch
+0014-HID-spi-hid-Use-a-single-full-duplex-transfer.patch
+0015-HID-spi-hid-Add-the-device-compatible-to-the-SPI-id-.patch
+
+# 3. romulus touchpad on spi19 (ours)
+0016-arm64-dts-qcom-x1e80100-romulus-Add-the-touchpad.patch
+# 5. romulus13 SPI touchscreen on spi10 (ours)
+0017-arm64-dts-qcom-x1e80100-romulus13-Add-the-touch-digi.patch
+
+# 4. SCMI sustained_freq fix (omarchy discussion 12441)
+0018-firmware-arm_scmi-perf-Ignore-sustained-frequency-be.patch
+
+# 6. qcom_battmgr capacity (patchwork 1169875)
+0019-power-supply-qcom_battmgr-Report-capacity-on-X1E8010.patch
+
+# 8. ps883x v5 (usb-next, expected in 7.4; drop once rebased on 7.4)
+0020-usb-typec-mux-ps883x-support-TYPEC_DP_STATE_F.patch
+0021-usb-typec-mux-ps883x-add-a-delay-after-writing-confi.patch
+0022-usb-typec-mux-ps883x-disable-USB4-on-incomplete-USB4.patch
+
+# 7. ath12k rfkill hack
+0023-HACK-disable-rfkill-of-ath12k_pci.patch
