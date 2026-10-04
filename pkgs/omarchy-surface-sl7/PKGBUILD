@@ -12,7 +12,7 @@ arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'linux-sl7' 'iptsd-sl7' 'linux-firmware-qcom'
+depends=('omarchy' 'linux-sl7' 'iptsd-sl7' 'linux-firmware-qcom' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'
@@ -32,6 +32,8 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         '85-omarchy-surface-sl7-dtbs.hook'
         'neutralize-surface-keyboard'
         'update-uki-dtbs'
+        'set-boot-order'
+        'sl7-doctor'
         'omarchy-surface-sl7-system-sleep'
         'restart-iptsd'
         'omarchy-surface-sl7-firmware'
@@ -44,13 +46,15 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'README.md'
         'surface-laptop-7.sh')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
-            'c3bb2eeaf449d25aa04c28fc5cbbe084e641fab4d5b4fd0426c1f6072451a089'
+            '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
-            '53839ef1e687b73ef5ddd7844569f6b6af0aa37f8bf42cb62c62136bc5950319'
+            'db07a4ed0b22597a05f2d2fbb3d5152b5a5546338c4d12fa31caf1b0469a391f'
             '6388aee2902813bd547a4806adba30f8127e101a1f47653fc40748cc56601325'
-            '2ef39467934ca295d5765643efc57b9f7ed3a1ef3e203ba45de5f018bdacb092'
+            '69e5b2567199b9570cdf8f535840eb93f7fc5d158cba4d8dd950069862d6aea4'
             'e891c20777143c8f0dfdbb8bf241393c469ddab4e2745db52243aa219cf20279'
-            'c584e0aaaaeda53334a1066edd56e745a59166841eea3333f215cc5386f0e66a'
+            '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
+            '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
+            'b1ffb5261f7ae011573d5477af1e518d7ef849059309654eb400886681bec4ea'
             '02f8d166382d5e1e416fc5eb30008b2a998ed6d1e6a38fa3e520b3604bdc74c7'
             '8eb2a1f2fcfe85201e780660107362568d6d05e7335b8946b981b202d790c2c4'
             '3712c804f49d6baceed7f2c387b1ae68001ee0139ddfe76cf755558026004b15'
@@ -60,7 +64,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '65618a41d56ab3859feaf93a3232aeb918abfa13bd46f50a93dbc646d011b350'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '70077cf0798a46ac776049db81d0831f839763cbb71960f8414b3878e60f4386'
+            '3924b1876f20c1bb84b83694943a091177cbcc6b2cb4c00797a0d767a8a2fc91'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b')
 
 package() {
@@ -80,6 +84,8 @@ package() {
   install -Dm644 omarchy-surface-sl7.limine.conf \
     "$pkgdir/etc/limine-entry-tool.d/omarchy-surface-sl7.conf"
   install -Dm755 update-uki-dtbs "$lib/update-uki-dtbs"
+  install -Dm755 set-boot-order "$lib/set-boot-order"
+  install -Dm755 sl7-doctor "$pkgdir/usr/bin/sl7-doctor"
   install -Dm644 85-omarchy-surface-sl7-dtbs.hook \
     "$pkgdir/usr/share/libalpm/hooks/85-omarchy-surface-sl7-dtbs.hook"
 

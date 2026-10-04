@@ -1,0 +1,98 @@
+#!/bin/bash
+# Read-only health check for the Surface Laptop 7 add-on. Exit 1 if any check fails.
+set -u
+
+fw_root=${SL7_FIRMWARE_ROOT:-/usr/lib/firmware}
+limine_default=${OMARCHY_SL7_LIMINE_DEFAULT:-/etc/default/limine}
+uki_config=${OMARCHY_QUALCOMM_UKI_CONFIG:-/etc/kernel/uki.conf}
+mkinitcpio_dir=${OMARCHY_SL7_MKINITCPIO_DIR:-/etc/mkinitcpio.conf.d}
+compatible=${OMARCHY_SL7_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
+cpufreq=${OMARCHY_SL7_CPUFREQ:-/sys/devices/system/cpu/cpufreq}
+
+fails=0
+pass() { printf 'PASS  %s\n' "$1"; }
+fail() { printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
+warn() { printf 'WARN  %s\n' "$1"; }
+check() { # description, command...
+  local d=$1
+  shift
+  if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi
+}
+
+kernel=$(uname -r)
+check "running kernel is linux-sl7 ($kernel)" \
+  grep -qx linux-sl7 "/usr/lib/modules/$kernel/pkgbase"
+
+check "device tree is romulus13" \
+  bash -c "tr '\\0' '\\n' <'$compatible' | grep -qx 'microsoft,romulus13'"
+
+policies=$(find "$cpufreq" -maxdepth 1 -name 'policy*' 2>/dev/null | wc -l)
+if ((policies == 3)); then pass "3 cpufreq policies"; else fail "cpufreq policies: $policies (want 3)"; fi
+
+if command -v lsinitcpio >/dev/null 2>&1; then
+  initrd_list=""
+  for img in "/boot/initramfs-linux-sl7.img" /boot/initramfs-linux-sl7*.img; do
+    [[ -f $img ]] && { initrd_list=$(lsinitcpio "$img" 2>/dev/null); break; }
+  done
+  if [[ -z $initrd_list ]]; then
+    for efi in /boot/EFI/Linux/*sl7*.efi /boot/efi/EFI/Linux/*sl7*.efi; do
+      [[ -f $efi ]] && { warn "only a UKI found ($efi); extract the initrd to check modules"; break; }
+    done
+  elif grep -q 'surface_aggregator' <<<"$initrd_list" && grep -q 'surface_hid' <<<"$initrd_list"; then
+    pass "SAM modules in the linux-sl7 initramfs"
+  else
+    fail "SAM modules missing from the linux-sl7 initramfs"
+  fi
+else
+  warn "lsinitcpio not found; SAM initramfs check skipped"
+fi
+
+fw_ok() { # path under qcom/
+  local sfx d
+  for d in "$fw_root/updates" "$fw_root"; do
+    for sfx in '' .zst .xz; do
+      [[ -f $d/$1$sfx ]] && return 0
+    done
+  done
+  return 1
+}
+ms=qcom/x1e80100/microsoft
+for f in $ms/qcdxkmsuc8380.mbn $ms/Romulus/qcadsp8380.mbn $ms/Romulus/qccdsp8380.mbn; do
+  if fw_ok "$f"; then pass "firmware ${f##*/}"; else fail "firmware ${f##*/} missing (omarchy-surface-sl7-firmware)"; fi
+done
+
+for id in 0C77 0C6E; do
+  active=0
+  for node in /sys/class/hidraw/hidraw*; do
+    [[ -r $node/device/uevent ]] || continue
+    grep -Eiq "^HID_ID=[0-9A-F]+:0000045E:0000$id\$" "$node/device/uevent" || continue
+    unit="iptsd@$(systemd-escape --path "/dev/${node##*/}").service"
+    systemctl is-active --quiet "$unit" && active=1
+  done
+  if ((active)); then pass "iptsd active for 045E:$id"; else fail "no active iptsd@ unit for 045E:$id"; fi
+done
+
+if grep -Eq '^[[:space:]]*BOOT_ORDER="?linux-sl7([ ,"]|$)' "$limine_default" 2>/dev/null; then
+  pass "BOOT_ORDER starts with linux-sl7"
+else
+  fail "BOOT_ORDER does not start with linux-sl7 ($limine_default)"
+fi
+
+if grep -q '^DeviceTreeAuto=.*x1e80100-microsoft-romulus13\.dtb' "$uki_config" 2>/dev/null; then
+  pass "uki.conf DeviceTreeAuto lists romulus13"
+else
+  fail "uki.conf DeviceTreeAuto lacks romulus13"
+fi
+
+if [[ -e $mkinitcpio_dir/surface_device_modules.conf ]]; then
+  fail "$mkinitcpio_dir/surface_device_modules.conf is active"
+else
+  pass "no surface_device_modules.conf active"
+fi
+
+check "Pro Audio guard installed" \
+  test -f /usr/share/wireplumber/scripts/omarchy-surface-sl7/guard-pro-audio.lua \
+  -a -f /usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf
+
+((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
+((fails == 0))

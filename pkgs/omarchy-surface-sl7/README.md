@@ -11,7 +11,8 @@ needs no change to Omarchy. License: MIT for our files (see `LICENSE`);
 the bundled `sl7-mac` pieces are MIT too (`LICENSE.sl7-mac`).
 
 **No firmware is in this package.** The Microsoft/Qualcomm files are installed on the
-target by `omarchy-surface-sl7-firmware` (item 7).
+target by `qcom-firmware-extract` (a dependency, used by the installer) or by
+`omarchy-surface-sl7-firmware` (item 7, manual fallback).
 
 ## What it installs
 
@@ -19,7 +20,7 @@ target by `omarchy-surface-sl7-firmware` (item 7).
 |---|---|---|
 | 1 | initramfs modules and firmware hook | `/etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf`, `/usr/lib/initcpio/install/sl7-firmware` |
 | 2 | neutralise upstream `fix-surface-keyboard.sh` | `/usr/share/libalpm/hooks/70-omarchy-surface-sl7-keyboard.hook`, `/usr/lib/omarchy-surface-sl7/neutralize-surface-keyboard` |
-| 3 | kernel command line, `ENABLE_UKI`, UKI device trees | `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, `85-omarchy-surface-sl7-dtbs.hook`, `/usr/lib/omarchy-surface-sl7/update-uki-dtbs` |
+| 3 | kernel command line, `ENABLE_UKI`, UKI device trees | `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, `85-omarchy-surface-sl7-dtbs.hook`, `/usr/lib/omarchy-surface-sl7/update-uki-dtbs`, `/usr/lib/omarchy-surface-sl7/set-boot-order` |
 | 4 | touch resume | `/usr/lib/systemd/system-sleep/omarchy-surface-sl7`, `/usr/lib/omarchy-surface-sl7/restart-iptsd` |
 | 5 | factory Wi-Fi/BT MAC | `/usr/bin/sl7-mac`, `sl7-wifi-mac.service`, `sl7-bt-mac.service`, `99-sl7-bt-mac.rules` |
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
@@ -32,9 +33,10 @@ target by `omarchy-surface-sl7-firmware` (item 7).
 
 `MODULES+=` adds `surface_aggregator surface_aggregator_registry surface_aggregator_hub
 surface_hid_core surface_hid msm dispcc-x1e80100 gpucc-x1e80100 phy-qcom-edp panel-edp
-ps883x pmic_glink pmic_glink_altmode ucsi_glink qrtr i2c-hid-of`. Each name was checked
-against the `linux-sl7-7.2.8-1` package (CI run 37214915036): all are `.ko` modules,
-none is built in, so none was dropped.
+ps883x pmic_glink pmic_glink_altmode ucsi_glink qrtr i2c-hid-of leds_qcom_lpg`, every
+entry suffixed `?` (optional) so the stock `linux-aarch64` rescue UKI still builds.
+All were checked against `linux-sl7-7.2.8-1` (modules, none built in). `ath12k` is kept
+out: it probes before its firmware is reachable and does not retry (runs 4/5).
 
 The GPU firmware goes in through the `sl7-firmware` mkinitcpio hook (appended with
 `HOOKS+=`), not `FILES+=`. `FILES` fails the build when a file is missing or only exists
@@ -55,7 +57,7 @@ upstream change; until it merges (and a Qualcomm guard is added) we defend in la
 
 1. **The drop-in filters.** `zz-omarchy-surface-sl7.conf` sorts after
    `surface_device_modules.conf` (`s` before `z`), appends our modules, then removes
-   `surface_kbd`, `intel_lpss_pci`, `8250_dw` and duplicates from `MODULES`. This is the
+   `surface_kbd`, `intel_lpss_pci`, `8250_dw`, every `pinctrl_*` and duplicates from `MODULES`. This is the
    protection that works even if Omarchy regenerates the file later.
 2. **The pacman hook moves the file aside.** `70-omarchy-surface-sl7-keyboard.hook`
    (PostTransaction, Install/Upgrade) fires when the `omarchy` package replaces
@@ -73,27 +75,24 @@ script; `surface-laptop-7.sh` shows the leaf that would replace this package's w
 ### 3. Command line, UKI, device trees
 
 - `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf` appends
-  `cpufreq.default_governor=schedutil fw_devlink.sync_state=timeout` and sets
+  `cpufreq.default_governor=schedutil fw_devlink.sync_state=timeout console=tty0` and sets
   `ENABLE_UKI=yes`. Omarchy's own drop-ins keep supplying quiet boot and
   `clk_ignore_unused pd_ignore_unused arm64.nopauth systemd.tpm2_wait=0`; we do not
   duplicate them. If `/etc/default/limine` explicitly sets `ENABLE_UKI=no`, the
   scriptlet warns.
-- **Device trees.** Omarchy's `qualcomm/dtb-uki.sh` supports `OMARCHY_QUALCOMM_DTB_DIR`
-  but takes one directory and lists every `x1*.dtb` in it, and defaults to
-  `/boot/dtbs/qcom`, which `linux-sl7` never writes (its DTBs live in
-  `/usr/lib/modules/<kver>/dtbs/qcom`). So `update-uki-dtbs` writes the same managed
-  block (`# BEGIN/END OMARCHY QUALCOMM DEVICE TREES`) into `/etc/kernel/uki.conf` itself,
-  listing only `x1e80100-microsoft-romulus13.dtb` and `-romulus15.dtb` of the newest
-  installed `linux-sl7` (identified by `pkgbase`), never `-el2`. Using the same markers
-  means a later `dtb-uki.sh` run replaces the block instead of duplicating it (it leaves
-  the file alone when it finds no DTBs). `DeviceTreeAuto` needs literal paths, so
-  `85-omarchy-surface-sl7-dtbs.hook` re-runs it after every `linux-sl7`
-  install/upgrade. The `85-` number sorts before `90-mkinitcpio-install.hook`
-  and the limine hook, so the new UKI already sees the new paths.
-  `update-uki-dtbs --print` shows the block without writing.
-  Caveat: if a stock `linux-aarch64` is installed beside it, running `dtb-uki.sh`
-  (`omarchy apply hardware`) will list its `/boot/dtbs/qcom` trees; the next
-  `linux-sl7` upgrade rewrites the block.
+- `/etc/default/limine` is read after the drop-ins, so a drop-in cannot change
+  `BOOT_ORDER`; `set-boot-order` (run from the scriptlet, idempotent) prepends
+  `linux-sl7` to it and keeps `linux-aarch64` as a later rescue entry.
+- **Device trees.** `linux-sl7` keeps its DTBs in `/usr/lib/modules/<kver>/dtbs/qcom`;
+  Omarchy's `qualcomm/dtb-uki.sh` reads `/boot/dtbs/qcom`, where `linux-aarch64`'s
+  romulus DTBs lack the touchpad/touchscreen nodes. `update-uki-dtbs` copies the newest
+  linux-sl7 romulus13/15 DTBs over those two files (the original is kept once as
+  `.dtb.alarm-orig`, which the `*.dtb` glob ignores) and writes the DeviceTreeAuto block
+  from `/boot/dtbs/qcom` with dtb-uki.sh's exact markers (`# BEGIN/END OMARCHY QUALCOMM
+  DEVICE TREES`, verified against omarchy@dragon 4a7fc751). dtb-uki.sh lists every x1*
+  tree there, a superset that contains the same romulus files, so whichever runs last is
+  correct. `85-omarchy-surface-sl7-dtbs.hook` fires on `linux-sl7` or `linux-aarch64`
+  install/upgrade, before `90-mkinitcpio-install`. `update-uki-dtbs --print` is a dry run.
 
 ### 4. Touch
 
@@ -172,10 +171,16 @@ use this tool for the SL7.
 `install/hardware/microsoft/surface-laptop-7.sh` doing the same via drop-ins, for
 upstreaming. The package does not run it.
 
+### 11. `sl7-doctor`
+
+Read-only check (`/usr/bin/sl7-doctor`): running kernel and DT, 3 cpufreq policies, SAM
+modules in the initramfs, firmware, iptsd units, `BOOT_ORDER`, uki.conf, no active
+`surface_device_modules.conf`, Pro Audio guard. Exit 1 on any failure.
+
 ### 10. Scriptlet
 
-`post_install`/`post_upgrade`: move the x86 module list aside, update the UKI device
-tree block, warn about `ENABLE_UKI=no`, print the firmware instructions when the zap
+`post_install`/`post_upgrade`: move the x86 module list aside, update the DTBs and UKI
+block, put linux-sl7 first in BOOT_ORDER, warn about `ENABLE_UKI=no`, print the firmware instructions when the zap
 shader is absent, then rebuild with `limine-mkinitcpio` (or `mkinitcpio -P`). The rebuild
 is skipped in a chroot (pacstrap/mkarchiso; the installer builds the image) and when
 `OMARCHY_SL7_SKIP_REBUILD` is set. Failures never fail the transaction.

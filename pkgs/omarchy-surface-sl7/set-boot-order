@@ -1,0 +1,21 @@
+#!/bin/bash
+# Put linux-sl7 first in BOOT_ORDER of /etc/default/limine, keeping every
+# other entry (linux-aarch64 stays as a later, rescue entry). /etc/default/limine
+# is read after limine-entry-tool.d drop-ins, so a drop-in cannot do this.
+# Idempotent. Does nothing if the file does not exist yet.
+set -euo pipefail
+
+conf=${OMARCHY_SL7_LIMINE_DEFAULT:-/etc/default/limine}
+[[ -f $conf ]] || exit 0
+
+if grep -Eq '^[[:space:]]*BOOT_ORDER="?linux-sl7([ ,"]|$)' "$conf"; then
+  exit 0
+fi
+
+if grep -Eq '^[[:space:]]*BOOT_ORDER="' "$conf"; then
+  sed -i -E '0,/^[[:space:]]*BOOT_ORDER="/s//BOOT_ORDER="linux-sl7, /' "$conf"
+else
+  sed -i -E '/^[[:space:]]*BOOT_ORDER=/d' "$conf"
+  printf 'BOOT_ORDER="linux-sl7, *, *fallback, Snapshots"\n' >>"$conf"
+fi
+echo "omarchy-surface-sl7: linux-sl7 first in BOOT_ORDER ($conf)"

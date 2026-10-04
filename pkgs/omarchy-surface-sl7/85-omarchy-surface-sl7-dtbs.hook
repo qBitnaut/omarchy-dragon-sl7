@@ -1,12 +1,17 @@
-# Sorts before 90-mkinitcpio-install.hook (and the limine hook), so the UKI
-# built for the new kernel already lists the new DTB paths.
+# Copies linux-sl7's romulus13/15 device trees over linux-aarch64's in
+# /boot/dtbs/qcom and refreshes the UKI DeviceTreeAuto block. Fires for either
+# kernel package so an ALARM kernel update cannot put its DTBs back. Sorts
+# before 90-mkinitcpio-install.hook and the limine hook.
 [Trigger]
 Operation = Install
 Operation = Upgrade
 Type = Path
 Target = usr/lib/modules/*/dtbs/qcom/x1e80100-microsoft-romulus13.dtb
+Target = usr/lib/modules/*/dtbs/qcom/x1e80100-microsoft-romulus15.dtb
+Target = boot/dtbs/qcom/x1e80100-microsoft-romulus13.dtb
+Target = boot/dtbs/qcom/x1e80100-microsoft-romulus15.dtb
 
 [Action]
-Description = Updating UKI DeviceTreeAuto for linux-sl7 (omarchy-surface-sl7)...
+Description = Installing linux-sl7 device trees and updating UKI DeviceTreeAuto (omarchy-surface-sl7)...
 When = PostTransaction
 Exec = /usr/lib/omarchy-surface-sl7/update-uki-dtbs

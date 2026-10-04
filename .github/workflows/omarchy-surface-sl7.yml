@@ -27,7 +27,7 @@ jobs:
             omarchy-surface-sl7-firmware omarchy-surface-sl7-power \
             omarchy-surface-sl7-system-sleep update-uki-dtbs \
             neutralize-surface-keyboard restart-iptsd power-event \
-            sl7-firmware surface-laptop-7.sh omarchy-surface-sl7.install
+            sl7-firmware sl7-doctor set-boot-order surface-laptop-7.sh omarchy-surface-sl7.install
           luac5.4 -p guard-pro-audio.lua
           if grep -rIn '[[:space:]]$' . ; then
             echo "trailing whitespace found" >&2
@@ -105,6 +105,7 @@ jobs:
             usr/lib/systemd/system-sleep/omarchy-surface-sl7 \
             usr/bin/omarchy-surface-sl7-firmware \
             usr/bin/sl7-mac \
+            usr/bin/sl7-doctor \
             usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf \
             usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules; do
             grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
