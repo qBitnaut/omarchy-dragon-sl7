@@ -952,14 +952,22 @@ sl7_start_iptsd() {
 		return 1
 	fi
 	bin="$root/usr/bin/iptsd"
-	miss="$(ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
+	# Optional ALARM libraries staged on the stick under sl7test/lib (files named by
+	# soname; FAT has no symlinks). Copy to RAM so noexec mounts cannot matter.
+	local ldp=""
+	if [ -d "$SL7TEST/lib" ]; then
+		mkdir -p "$root/sl7lib"
+		cp -a "$SL7TEST/lib/." "$root/sl7lib/"
+		ldp="$root/sl7lib"
+	fi
+	miss="$(LD_LIBRARY_PATH="$ldp" ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
 	if [ -n "$miss" ] && ui_yesno "iptsd needs libraries" "The iptsd-sl7 binary (built on Arch Linux ARM) cannot run in this live root:
 
 $(echo "$miss" | head -n 4)
 
 Try 'pacman -S --needed fmt libinih spdlog' now? This needs working network (Wi-Fi or Ethernet) and only changes the live RAM root, never a disk." n; then
 		pacman -S --noconfirm --needed fmt libinih spdlog >>"$LOG" 2>&1
-		miss="$(ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
+		miss="$(LD_LIBRARY_PATH="$ldp" ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
 	fi
 	if [ -n "$miss" ]; then
 		sl7_result sl7_iptsd_start 2 "iptsd" "binary cannot run in this live root: $(echo "$miss" | head -n 2 | tr -s '\t ' ' ')"
@@ -972,7 +980,7 @@ Try 'pacman -S --needed fmt libinih spdlog' now? This needs working network (Wi-
 	done
 	[ -d "$root/usr/share/iptsd" ] && cp -a "$root/usr/share/iptsd/." /usr/share/iptsd/
 	sl7_stop_iptsd
-	"$bin" "$hr" >"$IPTSD_LOG" 2>&1 &
+	LD_LIBRARY_PATH="$ldp" "$bin" "$hr" >"$IPTSD_LOG" 2>&1 &
 	IPTSD_PID=$!
 	for ((i = 0; i < 10; i++)); do
 		sleep 1
