@@ -33,6 +33,7 @@ _sl7_rebuild() {
 
 _sl7_setup() {
   "$_sl7_dir/neutralize-surface-keyboard" || true
+  "$_sl7_dir/ath12k-board-update" || true
   "$_sl7_dir/update-uki-dtbs" || true
   "$_sl7_dir/set-boot-order" || true
 

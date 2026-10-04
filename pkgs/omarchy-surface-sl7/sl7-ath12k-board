@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Add Surface Laptop 7 board names to an ath12k WCN7850 board-2.bin.
+
+Same logic as bryce-hoehn/fix-board-2-wifi.sh: find the board entry that
+carries the 17cb:3378 / qmi-board-id=255 name and append the SL7's own name
+(subsystem 17cb:1107) to that entry, so ath12k finds the same calibration
+blob. Extra names (for example the exact string from dmesg) can be added
+with --add.
+
+usage: sl7-ath12k-board [--bdencoder PATH] [--add NAME]... INPUT OUTPUT
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+PFX = "bus=pci,vendor=17cb,device=1107,subsystem-vendor=17cb,"
+SFX = ",qmi-chip-id=2,qmi-board-id=255"
+MATCH = PFX + "subsystem-device=3378" + SFX
+DEFAULT_NEW = [PFX + "subsystem-device=1107" + SFX]
+
+
+def run(enc, args, cwd):
+    subprocess.run([sys.executable, enc, *args], cwd=cwd, check=True,
+                   stdout=subprocess.DEVNULL)
+
+
+def extract(enc, binfile, work):
+    os.makedirs(work)
+    run(enc, ["-e", os.path.abspath(binfile)], work)
+    with open(os.path.join(work, "board-2.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def blob_for(data, name, work):
+    for group in data:
+        for entry in group.get("board", []):
+            if name in entry.get("names", []):
+                with open(os.path.join(work, entry["data"]), "rb") as f:
+                    return f.read()
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bdencoder",
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "ath12k-bdencoder"))
+    ap.add_argument("--add", action="append", default=[])
+    ap.add_argument("input")
+    ap.add_argument("output")
+    a = ap.parse_args()
+    new_names = DEFAULT_NEW + a.add
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "src")
+        data = extract(a.bdencoder, a.input, src)
+        src_blob = blob_for(data, MATCH, src)
+        if src_blob is None:
+            sys.exit("sl7-ath12k-board: %s not found in %s" % (MATCH, a.input))
+        for group in data:
+            for entry in group.get("board", []):
+                if MATCH in entry["names"]:
+                    for n in new_names:
+                        if n not in entry["names"]:
+                            entry["names"].append(n)
+        with open(os.path.join(src, "board-2.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+            f.write("\n")
+        out = os.path.join(tmp, "board-2.bin")
+        run(a.bdencoder, ["-c", "board-2.json", "-o", out], src)
+
+        chk = os.path.join(tmp, "chk")
+        new = extract(a.bdencoder, out, chk)
+        for n in new_names:
+            if blob_for(new, n, chk) != src_blob:
+                sys.exit("sl7-ath12k-board: verification failed for " + n)
+        with open(out, "rb") as f, open(a.output + ".tmp", "wb") as g:
+            g.write(f.read())
+        os.replace(a.output + ".tmp", a.output)
+    print("sl7-ath12k-board: wrote %s (%s)" % (a.output, ", ".join(n.split(",")[4] for n in new_names)))
+
+
+if __name__ == "__main__":
+    main()

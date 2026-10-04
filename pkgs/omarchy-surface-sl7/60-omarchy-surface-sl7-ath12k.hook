@@ -1,0 +1,13 @@
+# The SL7 has no entry in linux-firmware's WCN7850 board-2.bin, so ath12k fails
+# with "failed to fetch board data". Regenerate an override with the SL7 added
+# whenever the packaged file changes.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/firmware/ath12k/WCN7850/hw2.0/board-2.bin*
+
+[Action]
+Description = Adding the Surface Laptop 7 to the ath12k WCN7850 board data (omarchy-surface-sl7)...
+When = PostTransaction
+Exec = /usr/lib/omarchy-surface-sl7/ath12k-board-update

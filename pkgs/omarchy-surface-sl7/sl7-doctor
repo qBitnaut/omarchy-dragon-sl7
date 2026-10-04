@@ -90,6 +90,21 @@ else
   pass "no surface_device_modules.conf active"
 fi
 
+if fw_ok ath12k/WCN7850/hw2.0/board-2.bin; then
+  ath_bin=
+  for sfx in '' .zst .xz; do
+    [[ -f $fw_root/updates/ath12k/WCN7850/hw2.0/board-2.bin$sfx ]] && ath_bin=$fw_root/updates/ath12k/WCN7850/hw2.0/board-2.bin$sfx && break
+  done
+  sl7_name='subsystem-vendor=17cb,subsystem-device=1107,qmi-chip-id=2,qmi-board-id=255'
+  if [[ -n $ath_bin && $ath_bin != *.zst && $ath_bin != *.xz ]] && grep -aqF "$sl7_name" "$ath_bin"; then
+    pass "ath12k WCN7850 board-2.bin has the SL7 (updates/ override)"
+  else
+    fail "ath12k WCN7850 board-2.bin lacks the SL7 (run /usr/lib/omarchy-surface-sl7/ath12k-board-update)"
+  fi
+else
+  fail "ath12k WCN7850 board-2.bin missing (linux-firmware-atheros)"
+fi
+
 check "Pro Audio guard installed" \
   test -f /usr/share/wireplumber/scripts/omarchy-surface-sl7/guard-pro-audio.lua \
   -a -f /usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf

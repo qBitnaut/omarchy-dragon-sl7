@@ -1,0 +1,10 @@
+[Unit]
+Description=Move aside Omarchy's x86 Surface initramfs module list (omarchy-surface-sl7)
+ConditionPathExists=/etc/mkinitcpio.conf.d/surface_device_modules.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy-surface-sl7/neutralize-surface-keyboard
+
+[Install]
+WantedBy=multi-user.target

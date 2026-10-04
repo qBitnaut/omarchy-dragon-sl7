@@ -1,0 +1,37 @@
+#!/bin/bash
+# Regenerate /usr/lib/firmware/updates/ath12k/WCN7850/hw2.0/board-2.bin from the
+# installed linux-firmware-atheros board-2.bin, adding the Surface Laptop 7's
+# board names (it has no entry upstream). ath12k prefers updates/ over the
+# packaged file, so the packaged file stays untouched. Re-run by pacman when
+# linux-firmware-atheros changes.
+set -euo pipefail
+
+fw=${SL7_FIRMWARE_ROOT:-/usr/lib/firmware}
+lib=${SL7_LIB:-/usr/lib/omarchy-surface-sl7}
+rel=ath12k/WCN7850/hw2.0/board-2.bin
+out=$fw/updates/$rel
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+src=
+for sfx in '' .zst .xz; do
+  [[ -f $fw/$rel$sfx ]] && { src=$fw/$rel$sfx; break; }
+done
+if [[ -z $src ]]; then
+  echo "omarchy-surface-sl7: no $rel in $fw (linux-firmware-atheros missing?); Wi-Fi board data not generated" >&2
+  exit 0
+fi
+
+case $src in
+  *.zst) zstd -dqf "$src" -o "$tmp/board-2.bin" ;;
+  *.xz) xz -dc "$src" >"$tmp/board-2.bin" ;;
+  *) cp "$src" "$tmp/board-2.bin" ;;
+esac
+
+mkdir -p "${out%/*}"
+if "$lib/sl7-ath12k-board" --bdencoder "$lib/ath12k-bdencoder" "$tmp/board-2.bin" "$tmp/new.bin"; then
+  install -m644 "$tmp/new.bin" "$out"
+else
+  echo "omarchy-surface-sl7: could not add the SL7 to $src (new firmware layout?); Wi-Fi may need a manual fix" >&2
+fi

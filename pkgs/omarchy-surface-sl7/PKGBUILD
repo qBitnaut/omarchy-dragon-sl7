@@ -10,9 +10,9 @@ pkgrel=1
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
-license=('MIT')
+license=('MIT' 'ISC')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'linux-sl7' 'iptsd-sl7' 'linux-firmware-qcom' 'qcom-firmware-extract'
+depends=('omarchy' 'linux-sl7' 'iptsd-sl7' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'
@@ -31,6 +31,12 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         '70-omarchy-surface-sl7-keyboard.hook'
         '85-omarchy-surface-sl7-dtbs.hook'
         'neutralize-surface-keyboard'
+        'omarchy-surface-sl7-neutralize.service'
+        '60-omarchy-surface-sl7-ath12k.hook'
+        'ath12k-board-update'
+        'sl7-ath12k-board'
+        'ath12k-bdencoder'
+        'LICENSE.ath12k-bdencoder'
         'update-uki-dtbs'
         'set-boot-order'
         'sl7-doctor'
@@ -52,9 +58,15 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '6388aee2902813bd547a4806adba30f8127e101a1f47653fc40748cc56601325'
             '69e5b2567199b9570cdf8f535840eb93f7fc5d158cba4d8dd950069862d6aea4'
             'e891c20777143c8f0dfdbb8bf241393c469ddab4e2745db52243aa219cf20279'
+            '529300a4672cf0083270d54bfc685b79b62cd81a69a78581d874ba3cae6bb99e'
+            '015d6691c640aa45029aebf5a477d76f4408363c070d582f4d44c32daf4fce89'
+            'f90f1b615a50429ce8674a99608fd301e49425e35f1f709ee40293e5a057ed6e'
+            '9d47e5eab5dd986f9b5cc54e1238fc3fa08d76d0d528ff508c3c67f10f91dd7d'
+            'fdcc8dc9628d67e500d496a1de22e82e136ddeaec32669ea1b3add93f2980652'
+            '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            'b1ffb5261f7ae011573d5477af1e518d7ef849059309654eb400886681bec4ea'
+            '48395f97b42df33947837cebfcb614c4c690ba4c42e69f2bf8c4e66201648b76'
             '02f8d166382d5e1e416fc5eb30008b2a998ed6d1e6a38fa3e520b3604bdc74c7'
             '8eb2a1f2fcfe85201e780660107362568d6d05e7335b8946b981b202d790c2c4'
             '3712c804f49d6baceed7f2c387b1ae68001ee0139ddfe76cf755558026004b15'
@@ -79,6 +91,24 @@ package() {
   install -Dm755 neutralize-surface-keyboard "$lib/neutralize-surface-keyboard"
   install -Dm644 70-omarchy-surface-sl7-keyboard.hook \
     "$pkgdir/usr/share/libalpm/hooks/70-omarchy-surface-sl7-keyboard.hook"
+
+  # 2b. ...and again at boot: omarchy-apply-hardware regenerates the file after
+  # our pacman hook has run during install (idempotent, skipped when absent)
+  install -Dm644 omarchy-surface-sl7-neutralize.service \
+    "$pkgdir/usr/lib/systemd/system/omarchy-surface-sl7-neutralize.service"
+  install -dm755 "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
+  ln -s ../omarchy-surface-sl7-neutralize.service \
+    "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-surface-sl7-neutralize.service"
+
+  # 2c. Wi-Fi: WCN7850 board-2.bin override carrying the SL7 board names.
+  # ath12k-bdencoder: qca-swiss-army-knife @ 6df4dae (ISC), vendored unmodified.
+  install -Dm755 ath12k-board-update "$lib/ath12k-board-update"
+  install -Dm755 sl7-ath12k-board "$lib/sl7-ath12k-board"
+  install -Dm755 ath12k-bdencoder "$lib/ath12k-bdencoder"
+  install -Dm644 60-omarchy-surface-sl7-ath12k.hook \
+    "$pkgdir/usr/share/libalpm/hooks/60-omarchy-surface-sl7-ath12k.hook"
+  install -Dm644 LICENSE.ath12k-bdencoder \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE.ath12k-bdencoder"
 
   # 3. kernel command line, UKI, device trees
   install -Dm644 omarchy-surface-sl7.limine.conf \
