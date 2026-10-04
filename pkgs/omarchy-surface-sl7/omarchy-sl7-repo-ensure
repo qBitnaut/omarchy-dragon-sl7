@@ -1,0 +1,166 @@
+#!/bin/bash
+# Keep the omarchy-sl7 repository in /etc/pacman.conf. Idempotent; safe to re-run.
+#
+#   omarchy-sl7-repo-ensure [options]
+#     --check             report only (exit 1 if the Include is missing or misplaced)
+#     --quiet             print only problems
+#     --hook              for pacman hooks and the boot service: quiet, never fails
+#     --fingerprint FPR   key to require in the pacman keyring (default: the fingerprints
+#                         in /usr/share/pacman/keyrings/omarchy-sl7-trusted)
+#     --force             insert the Include even if the key is not trusted yet
+#     --provision-users   also install the `omarchy refresh pacman` hook for every user
+#                         that has ~/.config/omarchy
+#     --user-hook         install that hook for the invoking user only
+#
+# The Include goes above the first repository section so omarchy-sl7 packages
+# win over [omarchy] and the Arch Linux ARM repositories. It is only inserted
+# once the signing key is trusted: a signed database from an untrusted key makes
+# `pacman -Sy` (and therefore `omarchy update`) fail.
+# Opt out: touch /etc/pacman.d/omarchy-sl7.disabled
+set -u
+
+conf=${OMARCHY_SL7_PACMAN_CONF:-/etc/pacman.conf}
+snippet=${OMARCHY_SL7_SNIPPET:-/etc/pacman.d/omarchy-sl7.conf}
+keyring_dir=${OMARCHY_SL7_KEYRING_DIR:-/usr/share/pacman/keyrings}
+gnupg=${OMARCHY_SL7_GNUPGHOME:-/etc/pacman.d/gnupg}
+disabled=${OMARCHY_SL7_DISABLED_FILE:-/etc/pacman.d/omarchy-sl7.disabled}
+hook_src=${OMARCHY_SL7_HOOK_SRC:-/usr/share/omarchy-surface-sl7/pre-refresh-pacman.d/10-omarchy-sl7-repo}
+hook_rel=.config/omarchy/hooks/pre-refresh-pacman.d/10-omarchy-sl7-repo
+passwd_file=${OMARCHY_SL7_PASSWD:-/etc/passwd}
+
+orig_args=("$@")
+check=0 quiet=0 hookmode=0 force=0 provision=0 userhook=0 fpr_arg=
+while (($#)); do
+  case $1 in
+    --check) check=1 ;;
+    --quiet) quiet=1 ;;
+    --hook) hookmode=1 quiet=1 ;;
+    --force) force=1 ;;
+    --provision-users) provision=1 ;;
+    --user-hook) userhook=1 ;;
+    --fingerprint) fpr_arg=${2:?--fingerprint needs a value}; shift ;;
+    -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+    *) echo "omarchy-sl7-repo-ensure: unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+say() { ((quiet)) || echo "omarchy-sl7-repo-ensure: $*"; }
+warn() { echo "omarchy-sl7-repo-ensure: $*" >&2; }
+finish() { # status
+  ((hookmode)) && exit 0
+  exit "$1"
+}
+
+inc="Include = $snippet"
+
+# Is the Include present exactly once, above the first non-[options] section?
+include_ok() {
+  awk -v inc="$inc" '
+    { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t) }
+    t == inc { n++; if (sec) bad = 1; next }
+    t ~ /^\[.*\]$/ && t != "[options]" { sec = 1 }
+    END { exit !(n == 1 && !bad) }
+  ' "$conf"
+}
+
+inline_section() {
+  grep -Eq '^[[:space:]]*\[omarchy-sl7\][[:space:]]*$' "$conf"
+}
+
+key_trusted() {
+  local fprs f validity
+  if [[ -n $fpr_arg ]]; then
+    fprs=$fpr_arg
+  else
+    fprs=$(cut -d: -f1 "$keyring_dir/omarchy-sl7-trusted" 2>/dev/null | grep -E '^[0-9A-Fa-f]{40}$')
+  fi
+  [[ -n $fprs ]] || return 2
+  for f in $fprs; do
+    validity=$(gpg --homedir "$gnupg" --batch --no-auto-check-trustdb --with-colons \
+      --list-keys "$f" 2>/dev/null | awk -F: '$1 == "pub" { print $2; exit }')
+    [[ $validity == f || $validity == u ]] && return 0
+  done
+  return 1
+}
+
+rewrite_conf() {
+  awk -v inc="$inc" '
+    { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t) }
+    skipblank && t == "" { skipblank = 0; next }
+    { skipblank = 0 }
+    t == inc { skipblank = 1; next }
+    t ~ /^\[.*\]$/ && t != "[options]" && !done { print inc; print ""; done = 1 }
+    { print }
+    END { if (!done) { print ""; print inc } }
+  ' "$conf"
+}
+
+ensure_include() {
+  if [[ -e $disabled ]]; then say "disabled by $disabled"; return 0; fi
+  [[ -r $conf ]] || { warn "cannot read $conf"; return 1; }
+  if include_ok; then say "ok: $conf includes $snippet above the other repositories"; return 0; fi
+  if inline_section && ! grep -qxF "$inc" "$conf"; then
+    say "$conf defines [omarchy-sl7] itself (installer offline repository or a manual entry); left alone"
+    return 0
+  fi
+  if ((check)); then
+    say "$conf is missing the omarchy-sl7 Include (or it is below another repository)"
+    return 1
+  fi
+  [[ -r $snippet ]] || { warn "$snippet is missing (reinstall omarchy-surface-sl7)"; return 1; }
+  if ((!force)); then
+    key_trusted
+    case $? in
+      0) ;;
+      2) warn "no omarchy-sl7 signing key known (omarchy-sl7-keyring ships none yet); repository not enabled"; return 3 ;;
+      *) warn "the omarchy-sl7 signing key is not trusted by pacman yet; repository not enabled (pacman-key --populate omarchy-sl7, or omarchy-sl7-bootstrap)"; return 3 ;;
+    esac
+  fi
+  if [[ ! -w $conf ]]; then
+    say "root needed to edit $conf; running through sudo"
+    exec sudo "$0" "${orig_args[@]}"
+  fi
+  local tmp
+  tmp=$(mktemp "$conf.XXXXXX") || return 1
+  if ! rewrite_conf >"$tmp"; then rm -f "$tmp"; return 1; fi
+  chmod --reference="$conf" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+  cp -p "$conf" "$conf.omarchy-sl7.bak"
+  mv -f "$tmp" "$conf"
+  say "added '$inc' above the first repository in $conf (backup: $conf.omarchy-sl7.bak)"
+}
+
+install_user_hook() { # home [uid gid]
+  local home=$1 uid=${2:-} gid=${3:-} dest d
+  dest=$home/$hook_rel
+  [[ -r $hook_src ]] || { warn "hook source $hook_src missing"; return 0; }
+  [[ -e $dest ]] && return 0
+  for d in .config/omarchy/hooks .config/omarchy/hooks/pre-refresh-pacman.d; do
+    [[ -d $home/$d ]] && continue
+    if [[ -n $uid ]]; then install -d -m755 -o "$uid" -g "$gid" "$home/$d"; else install -d -m755 "$home/$d"; fi
+  done
+  if [[ -n $uid ]]; then install -m755 -o "$uid" -g "$gid" "$hook_src" "$dest"; else install -m755 "$hook_src" "$dest"; fi
+  say "installed the 'omarchy refresh pacman' hook: $dest"
+}
+
+provision_users() {
+  local _user _ uid gid _gecos home shell
+  while IFS=: read -r _user _ uid gid _gecos home shell; do
+    ((uid >= 1000 && uid < 60000)) || continue
+    case $shell in */nologin | */false) continue ;; esac
+    [[ -d $home/.config/omarchy ]] || continue
+    install_user_hook "$home" "$uid" "$gid"
+  done <"$passwd_file"
+}
+
+rc=0
+if ((userhook)); then
+  [[ -n ${HOME:-} ]] || { warn "HOME is not set"; exit 1; }
+  install_user_hook "$HOME"
+fi
+if ((!userhook || provision)); then
+  ensure_include
+  rc=$?
+fi
+if ((provision && !check)) && [[ -w $conf ]]; then provision_users; fi
+finish "$rc"

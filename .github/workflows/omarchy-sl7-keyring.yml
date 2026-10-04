@@ -1,0 +1,94 @@
+name: omarchy-sl7-keyring
+
+on:
+  push:
+    paths:
+      - 'pkgs/omarchy-sl7-keyring/**'
+      - '.github/workflows/omarchy-sl7-keyring.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint (shellcheck, trailing whitespace) and key sanity
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck gnupg
+          shellcheck -x -s bash -S warning pkgs/omarchy-sl7-keyring/omarchy-sl7-keyring.install
+          if grep -rIn '[[:space:]]$' pkgs/omarchy-sl7-keyring; then
+            echo "trailing whitespace found" >&2
+            exit 1
+          fi
+          cd pkgs/omarchy-sl7-keyring
+          if [ ! -s omarchy-sl7.gpg ] || [ ! -s omarchy-sl7-trusted ]; then
+            echo "::warning title=omarchy-sl7-keyring::omarchy-sl7.gpg / omarchy-sl7-trusted are empty: the package will be an inert placeholder (no signing key yet)"
+          else
+            # every fingerprint in -trusted must be a key in the .gpg file
+            gpg --show-keys --with-colons omarchy-sl7.gpg | awk -F: '$1 == "fpr" { print $10 }' | sort > /tmp/have
+            cut -d: -f1 omarchy-sl7-trusted | sort > /tmp/want
+            diff -u /tmp/want /tmp/have
+          fi
+
+      # The runner is native aarch64; Arch Linux ARM has no official Docker
+      # image, so import the ALARM root filesystem tarball as one.
+      - name: Bootstrap ALARM container image
+        run: |
+          set -euo pipefail
+          base=http://os.archlinuxarm.org/os
+          curl -fsSL -O "$base/ArchLinuxARM-aarch64-latest.tar.gz"
+          curl -fsSL -O "$base/ArchLinuxARM-aarch64-latest.tar.gz.md5"
+          md5sum -c ArchLinuxARM-aarch64-latest.tar.gz.md5
+          docker import ArchLinuxARM-aarch64-latest.tar.gz alarm:latest
+          rm -f ArchLinuxARM-aarch64-latest.tar.gz
+
+      - name: Build package in ALARM container
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm \
+            -v "$PWD/pkgs/omarchy-sl7-keyring:/src:ro" \
+            -v "$PWD/out:/out" \
+            alarm:latest bash -euxc '
+              sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+              pacman-key --init
+              pacman-key --populate archlinuxarm
+              pacman -Syu --noconfirm --needed base-devel git
+              useradd -m builder
+              cp -r /src /home/builder/build
+              chown -R builder:builder /home/builder/build
+              cd /home/builder/build
+              su builder -c "makepkg --printsrcinfo" > /tmp/SRCINFO.new
+              diff -u .SRCINFO /tmp/SRCINFO.new
+              su builder -c "makepkg --nodeps --noconfirm --cleanbuild"
+              cp /home/builder/build/*.pkg.tar.* /out/
+            '
+
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          pkg=$(ls out/*.pkg.tar.* | head -n1)
+          tar -tf "$pkg" | sort > out/contents.txt
+          cat out/contents.txt
+          if [ -s pkgs/omarchy-sl7-keyring/omarchy-sl7.gpg ] && [ -s pkgs/omarchy-sl7-keyring/omarchy-sl7-trusted ]; then
+            for f in omarchy-sl7.gpg omarchy-sl7-trusted omarchy-sl7-revoked; do
+              grep -qx "usr/share/pacman/keyrings/$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
+            done
+          else
+            echo "::warning title=omarchy-sl7-keyring::placeholder build: no keyring files in the package"
+          fi
+          mkdir x && tar -C x -xf "$pkg"
+          grep -E '^(arch|depend) = ' x/.PKGINFO
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-sl7-keyring-aarch64
+          path: out/*.pkg.tar.*
+          if-no-files-found: error

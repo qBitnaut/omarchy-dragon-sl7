@@ -171,6 +171,15 @@ use this tool for the SL7.
 `install/hardware/microsoft/surface-laptop-7.sh` doing the same via drop-ins, for
 upstreaming. The package does not run it.
 
+### 10b. Battery for Omarchy (TEMPORARY, omacom/omarchy#13029)
+
+Omarchy's `omarchy-battery-status`/`-present` match only `BAT*`; the SL7 battery is
+`qcom-battmgr-bat`. The bar reads UPower (works); the panel detail comes from
+`omarchy-battery-status`. Omarchy puts its own bin dir first in PATH, so a PATH override is
+impossible; `82-omarchy-sl7-battery.hook` runs `omarchy-sl7-battery-patch` after each
+`omarchy` install/upgrade (idempotent, no-op once upstream fixes the line). Also makes the
+negative `power_now` absolute. Remove both files and their PKGBUILD lines when #13029 lands.
+
 ### 11. `sl7-doctor`
 
 Read-only check (`/usr/bin/sl7-doctor`): running kernel and DT, 3 cpufreq policies, SAM
@@ -184,6 +193,29 @@ block, put linux-sl7 first in BOOT_ORDER, warn about `ENABLE_UKI=no`, print the 
 shader is absent, then rebuild with `limine-mkinitcpio` (or `mkinitcpio -P`). The rebuild
 is skipped in a chroot (pacstrap/mkarchiso; the installer builds the image) and when
 `OMARCHY_SL7_SKIP_REBUILD` is set. Failures never fail the transaction.
+
+## The omarchy-sl7 package repository
+
+`/etc/pacman.d/omarchy-sl7.conf` defines `[omarchy-sl7]` (GitHub Release `repo-aarch64`,
+`SigLevel = Required DatabaseOptional`). `/etc/pacman.conf` carries
+`Include = /etc/pacman.d/omarchy-sl7.conf` above `[core]`, so `linux-sl7`, `iptsd-sl7` and
+this package win over `[alarm]` and `[omarchy]`. Keeping that line is automated:
+
+- `omarchy-sl7-repo-ensure` (idempotent; `--check` reports only) inserts or repairs it, but only
+  once the signing key is trusted: a signed database from an unknown key breaks `pacman -Sy`.
+- `80-omarchy-sl7-repo.hook` runs it after `omarchy`, `omarchy-settings` and `pacman` change.
+- `omarchy-sl7-repo.service` runs it at boot. This is what enables the repository on a clean
+  install: Omarchy's installer replaces the offline pacman.conf (which defines `[omarchy-sl7]`
+  as a local directory) with its online one after our package is installed.
+- `omarchy refresh pacman`: at the pinned dragon commit its aarch64 path only rewrites the
+  `[omarchy]` Server line in place, so the Include survives. Omarchy has no system-wide hook
+  location (`omarchy-hook` reads only `~/.config/omarchy/hooks/<name>.d/`), so as a safety net
+  the package ships `10-omarchy-sl7-repo` in `/etc/skel` and the ensure script provisions it
+  for existing users (`--provision-users`, run at install/upgrade and boot).
+- Opt out with `touch /etc/pacman.d/omarchy-sl7.disabled`.
+
+`sl7-doctor` checks that the repository is configured and first in order, and that the key is
+trusted.
 
 ## Order for an installer
 

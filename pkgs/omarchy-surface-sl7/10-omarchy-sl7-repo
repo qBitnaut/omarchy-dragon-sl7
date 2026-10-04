@@ -1,0 +1,10 @@
+#!/bin/bash
+# Installed by omarchy-surface-sl7. Run by `omarchy refresh pacman` after it has
+# rewritten /etc/pacman.conf and before the package transaction (Omarchy only reads
+# hooks from ~/.config/omarchy/hooks, there is no system-wide location). Puts the
+# omarchy-sl7 repository back when the rewrite dropped it. A no-op, and no sudo
+# prompt, when the configuration is intact.
+command -v omarchy-sl7-repo-ensure >/dev/null 2>&1 || exit 0
+omarchy-sl7-repo-ensure --check --quiet && exit 0
+sudo omarchy-sl7-repo-ensure
+exit 0

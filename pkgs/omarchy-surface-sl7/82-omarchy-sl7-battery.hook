@@ -1,0 +1,14 @@
+# TEMPORARY (omacom/omarchy#13029): re-apply the qcom-battmgr battery lookup to
+# Omarchy's battery scripts whenever the omarchy package is (re)installed.
+# No-op once upstream carries the fix.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy
+Target = omarchy-dev
+
+[Action]
+Description = Teaching Omarchy's battery scripts about qcom-battmgr-bat (omarchy-surface-sl7)...
+When = PostTransaction
+Exec = /usr/lib/omarchy-surface-sl7/omarchy-sl7-battery-patch

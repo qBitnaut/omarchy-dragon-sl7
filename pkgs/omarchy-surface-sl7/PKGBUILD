@@ -6,20 +6,21 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT' 'ISC')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'linux-sl7' 'iptsd-sl7' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
+depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7' 'iptsd-sl7' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'
             'iw: opt-in Wi-Fi power save policy'
             'bluez-utils: bluetoothctl in sl7-mac status')
 backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
-        'etc/limine-entry-tool.d/omarchy-surface-sl7.conf')
+        'etc/limine-entry-tool.d/omarchy-surface-sl7.conf'
+        'etc/pacman.d/omarchy-sl7.conf')
 install=omarchy-surface-sl7.install
 
 # valeronm/sl7-mac (MIT): factory Wi-Fi/Bluetooth MAC from UEFI, pinned.
@@ -50,7 +51,14 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'omarchy-surface-sl7-power'
         'LICENSE'
         'README.md'
-        'surface-laptop-7.sh')
+        'surface-laptop-7.sh'
+        'omarchy-sl7.conf'
+        'omarchy-sl7-repo-ensure'
+        '80-omarchy-sl7-repo.hook'
+        'omarchy-sl7-repo.service'
+        '10-omarchy-sl7-repo'
+        '82-omarchy-sl7-battery.hook'
+        'omarchy-sl7-battery-patch')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -66,7 +74,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            '48395f97b42df33947837cebfcb614c4c690ba4c42e69f2bf8c4e66201648b76'
+            '6a8e57e38e18ed015b8681f7715e35fe703fd61e544dc6d45d780c1b00af4cec'
             '02f8d166382d5e1e416fc5eb30008b2a998ed6d1e6a38fa3e520b3604bdc74c7'
             '8eb2a1f2fcfe85201e780660107362568d6d05e7335b8946b981b202d790c2c4'
             '3712c804f49d6baceed7f2c387b1ae68001ee0139ddfe76cf755558026004b15'
@@ -76,8 +84,15 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '65618a41d56ab3859feaf93a3232aeb918abfa13bd46f50a93dbc646d011b350'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '3924b1876f20c1bb84b83694943a091177cbcc6b2cb4c00797a0d767a8a2fc91'
-            'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b')
+            '956a42c9a313541af5192cde85727b2df34bafce51d721f9d7268fb9fd603da1'
+            'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
+            'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
+            '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
+            '3d5cfb78ab27e29c97a9ffca6e688a8a195938464b3947279a3e57d0c44b1f9d'
+            '944a13c41db46deb0e66a55d12dc18dd09ec7fc811238a148558289d678c68b5'
+            '796d977f39d10441bdd32a2c44377241697d7fba6a34b25cb01a4f835f709dd1'
+            'd002cab0467b46cc91db61494686e21347d0d05e7be67695d387f86b3b5bae24'
+            '6b1b7bfa46cb011e150989885bd06716b7be50c39bcc4f4a81a68208d39731e1')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -156,7 +171,31 @@ package() {
   install -Dm755 power-event "$lib/power-event"
   install -Dm755 omarchy-surface-sl7-power "$pkgdir/usr/bin/omarchy-surface-sl7-power"
 
-  # 9. reference copy of the upstreamable Omarchy hardware leaf
+  # 9. omarchy-sl7 package repository: config, the script that keeps it Included
+  # above [core]/[alarm]/[omarchy], its pacman hook and boot service, and the
+  # `omarchy refresh pacman` hook (Omarchy reads hooks only from
+  # ~/.config/omarchy/hooks, so it goes to /etc/skel and, via
+  # omarchy-sl7-repo-ensure --provision-users, to existing users).
+  install -Dm644 omarchy-sl7.conf "$pkgdir/etc/pacman.d/omarchy-sl7.conf"
+  install -Dm755 omarchy-sl7-repo-ensure "$pkgdir/usr/bin/omarchy-sl7-repo-ensure"
+  install -Dm644 80-omarchy-sl7-repo.hook \
+    "$pkgdir/usr/share/libalpm/hooks/80-omarchy-sl7-repo.hook"
+  install -Dm644 omarchy-sl7-repo.service \
+    "$pkgdir/usr/lib/systemd/system/omarchy-sl7-repo.service"
+  ln -s ../omarchy-sl7-repo.service \
+    "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-sl7-repo.service"
+  install -Dm755 10-omarchy-sl7-repo \
+    "$pkgdir/usr/share/$pkgname/pre-refresh-pacman.d/10-omarchy-sl7-repo"
+  install -Dm755 10-omarchy-sl7-repo \
+    "$pkgdir/etc/skel/.config/omarchy/hooks/pre-refresh-pacman.d/10-omarchy-sl7-repo"
+
+  # 9b. TEMPORARY: qcom-battmgr battery for Omarchy's BAT*-only scripts
+  # (omacom/omarchy#13029). Drop with the hook when that merges.
+  install -Dm755 omarchy-sl7-battery-patch "$lib/omarchy-sl7-battery-patch"
+  install -Dm644 82-omarchy-sl7-battery.hook \
+    "$pkgdir/usr/share/libalpm/hooks/82-omarchy-sl7-battery.hook"
+
+  # 10. reference copy of the upstreamable Omarchy hardware leaf
   install -Dm644 surface-laptop-7.sh \
     "$pkgdir/usr/share/doc/$pkgname/upstream/install/hardware/microsoft/surface-laptop-7.sh"
 

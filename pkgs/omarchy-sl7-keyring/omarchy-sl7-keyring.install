@@ -1,0 +1,22 @@
+_populate() {
+  local ring=/usr/share/pacman/keyrings/omarchy-sl7.gpg
+  if [[ ! -s $ring ]]; then
+    echo "omarchy-sl7-keyring: no key shipped yet (placeholder build); nothing to populate."
+    return 0
+  fi
+  # The pacman keyring is created by 'pacman-key --init'. A pacstrap/installer
+  # run has none yet; Omarchy's installer runs 'pacman-key --init' and
+  # 'pacman-key --populate' for every installed keyring afterwards.
+  if usr/bin/pacman-key -l >/dev/null 2>&1; then
+    usr/bin/pacman-key --populate omarchy-sl7 ||
+      echo "omarchy-sl7-keyring: 'pacman-key --populate omarchy-sl7' failed; run it manually." >&2
+  fi
+}
+
+post_install() {
+  _populate
+}
+
+post_upgrade() {
+  _populate
+}

@@ -1,0 +1,190 @@
+name: publish-repo
+
+# Publishes the omarchy-sl7 pacman repository as assets of the rolling GitHub
+# Release "repo-aarch64":
+#   Server = https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64
+# Inputs: the latest successful, unexpired artifacts of linux-sl7, iptsd-sl7,
+# omarchy-surface-sl7 and omarchy-sl7-keyring on main, plus the packages already
+# on the release. Releases cannot hold symlinks, so omarchy-sl7.db and
+# omarchy-sl7.files are real files (copies of the .tar.gz), with detached
+# signatures. Signing needs the secrets REPO_SIGNING_KEY (ASCII-armored private
+# key, no passphrase) and REPO_SIGNING_KEY_ID; without them everything else
+# still runs and a loud warning says the repository is unsigned.
+# Immutable releases must stay OFF for this repository (assets are replaced).
+
+on:
+  workflow_run:
+    workflows: [linux-sl7, iptsd-sl7, omarchy-surface-sl7, omarchy-sl7-keyring]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: Upload to the release (false builds and checks only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # release assets
+  actions: read   # download artifacts of the producer workflows
+
+concurrency:
+  group: publish-repo
+  cancel-in-progress: false
+
+env:
+  TAG: repo-aarch64
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Lint repository scripts
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x -P SCRIPTDIR -s bash -S warning tools/repo/*.sh tools/bootstrap/*.sh
+          if grep -rIn '[[:space:]]$' tools/repo tools/bootstrap; then
+            echo "trailing whitespace found" >&2
+            exit 1
+          fi
+
+      # Latest successful run of each producer on main that still has an
+      # unexpired artifact (linux-sl7 artifacts expire after 14 days; a package
+      # already on the release simply stays).
+      - name: Download the latest artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl pool
+          fetch() { # workflow file, artifact name regex, artifact glob
+            local ids id n
+            ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch main \
+              --status success --limit 20 --json databaseId --jq '.[].databaseId')
+            for id in $ids; do
+              n=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                --jq "[.artifacts[] | select(.expired == false) | select(.name | test(\"$2\"))] | length")
+              if [ "$n" != 0 ]; then
+                echo "$1: using run $id"
+                gh run download "$id" -R "$GITHUB_REPOSITORY" -p "$3" -D "dl/$1"
+                return 0
+              fi
+            done
+            echo "::warning title=publish-repo::no unexpired artifact for $1; keeping what the release has"
+          }
+          fetch linux-sl7.yml '^linux-sl7-' 'linux-sl7-*'
+          fetch iptsd-sl7.yml '^iptsd-sl7-aarch64$' 'iptsd-sl7-aarch64'
+          fetch omarchy-surface-sl7.yml '^omarchy-surface-sl7-aarch64$' 'omarchy-surface-sl7-aarch64'
+          fetch omarchy-sl7-keyring.yml '^omarchy-sl7-keyring-aarch64$' 'omarchy-sl7-keyring-aarch64'
+          sums=$(find dl/linux-sl7.yml -name SHA256SUMS -print -quit 2>/dev/null || true)
+          if [ -n "$sums" ]; then (cd "$(dirname "$sums")" && sha256sum -c --quiet SHA256SUMS); fi
+          pkgs=$(find dl -name '*.pkg.tar.zst' ! -name '*-debug-*')
+          echo "$pkgs"
+
+      - name: Assemble the package pool (release contents, then new packages)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D pool \
+              --pattern '*.pkg.tar.zst' --pattern '*.pkg.tar.zst.sig' ||
+              echo "release $TAG has no packages yet"
+          else
+            echo "release $TAG does not exist yet; it is created on upload"
+          fi
+          : > new.txt
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            cp -f "$f" pool/
+            echo "$(basename "$f")" >> new.txt
+          done < <(find dl -name '*.pkg.tar.zst' ! -name '*-debug-*')
+          ls -l pool
+          pkgs=$(find pool -name '*.pkg.tar.zst' | wc -l)
+          [ "$pkgs" -gt 0 ] || { echo "no packages at all" >&2; exit 1; }
+
+      - name: Guard against firmware in the pool
+        run: pkgs/linux-sl7/scripts/guard-artifacts.sh pool
+
+      - name: Check signing secrets
+        env:
+          KEY: ${{ secrets.REPO_SIGNING_KEY }}
+          KEY_ID: ${{ secrets.REPO_SIGNING_KEY_ID }}
+        run: |
+          if [ -z "$KEY" ] || [ -z "$KEY_ID" ]; then
+            msg='REPO_SIGNING_KEY / REPO_SIGNING_KEY_ID are not set: the repository is published UNSIGNED and clients (SigLevel = Required) will reject it.'
+            echo "::warning title=UNSIGNED repository::$msg"
+            echo "### :warning: $msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # repo-add, vercmp and bsdtar come with the Arch image (pacman).
+      - name: Sign, prune and build the repository database
+        env:
+          REPO_SIGNING_KEY: ${{ secrets.REPO_SIGNING_KEY }}
+          REPO_SIGNING_KEY_ID: ${{ secrets.REPO_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/w:ro" -v "$PWD/pool:/pool" \
+            -e REPO_SIGNING_KEY -e REPO_SIGNING_KEY_ID -e GITHUB_ACTIONS \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            archlinux:base bash -euc '
+              for c in repo-add vercmp bsdtar gpg; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
+              exec bash /w/tools/repo/repo-build.sh /pool
+            '
+          cat pool/.assets
+
+      - name: Guard against firmware in the repository
+        run: pkgs/linux-sl7/scripts/guard-artifacts.sh pool
+
+      - name: Upload to the release
+        if: github.event_name != 'workflow_dispatch' || inputs.upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "omarchy-sl7 package repository (aarch64)" \
+              --notes "Rolling pacman repository, rebuilt by .github/workflows/publish-repo.yml. Do not download by hand: see the README (Updating an existing install)."
+          fi
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort > have.txt
+          sort pool/.assets > want.txt
+          # 1. packages that are new (or rebuilt under the same name) and every signature
+          while IFS= read -r f; do
+            case "$f" in omarchy-sl7.db* | omarchy-sl7.files* | omarchy-sl7.pub.asc) continue ;; esac
+            if grep -qxF "$f" new.txt || ! grep -qxF "$f" have.txt || [[ $f == *.sig ]]; then
+              echo "upload $f"
+              gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "pool/$f"
+            fi
+          done < want.txt
+          # 2. the database last, so it never lists a package that is not there yet
+          for f in omarchy-sl7.pub.asc omarchy-sl7.db omarchy-sl7.db.sig omarchy-sl7.files omarchy-sl7.files.sig; do
+            [ -f "pool/$f" ] || continue
+            echo "upload $f"
+            gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "pool/$f"
+          done
+          # 3. drop what was pruned (older than current + previous)
+          comm -23 have.txt want.txt | while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "delete $f"
+            gh release delete-asset "$TAG" "$f" -R "$GITHUB_REPOSITORY" -y
+          done
+          {
+            echo '### omarchy-sl7 repository published'
+            echo
+            echo '```'
+            cat pool/.assets
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

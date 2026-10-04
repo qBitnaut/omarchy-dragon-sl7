@@ -8,6 +8,10 @@ uki_config=${OMARCHY_QUALCOMM_UKI_CONFIG:-/etc/kernel/uki.conf}
 mkinitcpio_dir=${OMARCHY_SL7_MKINITCPIO_DIR:-/etc/mkinitcpio.conf.d}
 compatible=${OMARCHY_SL7_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
 cpufreq=${OMARCHY_SL7_CPUFREQ:-/sys/devices/system/cpu/cpufreq}
+pacman_conf=${OMARCHY_SL7_PACMAN_CONF:-/etc/pacman.conf}
+keyring_dir=${OMARCHY_SL7_KEYRING_DIR:-/usr/share/pacman/keyrings}
+pacman_gnupg=${OMARCHY_SL7_GNUPGHOME:-/etc/pacman.d/gnupg}
+user_hook=${OMARCHY_SL7_USER_HOOK:-$HOME/.config/omarchy/hooks/pre-refresh-pacman.d/10-omarchy-sl7-repo}
 
 fails=0
 pass() { printf 'PASS  %s\n' "$1"; }
@@ -108,6 +112,67 @@ fi
 check "Pro Audio guard installed" \
   test -f /usr/share/wireplumber/scripts/omarchy-surface-sl7/guard-pro-audio.lua \
   -a -f /usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf
+
+# omarchy-sl7 package repository: configured, ahead of [omarchy] and ALARM, key trusted.
+if command -v pacman-conf >/dev/null 2>&1; then
+  repos=$(pacman-conf --config "$pacman_conf" --repo-list 2>/dev/null)
+  if grep -qx omarchy-sl7 <<<"$repos" && pacman-conf --config "$pacman_conf" --repo=omarchy-sl7 2>/dev/null | grep -q '^Server'; then
+    pass "omarchy-sl7 repository configured"
+    first=$(grep -nxE 'omarchy-sl7|omarchy|alarm|core|extra' <<<"$repos" | head -n1)
+    if [[ ${first#*:} == omarchy-sl7 ]]; then
+      pass "omarchy-sl7 is listed before omarchy, alarm, core and extra"
+    else
+      fail "omarchy-sl7 is not the first repository (run: sudo omarchy-sl7-repo-ensure)"
+    fi
+  else
+    fail "omarchy-sl7 repository not configured in $pacman_conf (run: sudo omarchy-sl7-repo-ensure, or omarchy-sl7-bootstrap)"
+  fi
+else
+  warn "pacman-conf not found; repository check skipped"
+fi
+
+sl7_fprs=$(cut -d: -f1 "$keyring_dir/omarchy-sl7-trusted" 2>/dev/null | grep -E '^[0-9A-Fa-f]{40}$')
+if [[ -z $sl7_fprs ]]; then
+  warn "omarchy-sl7-keyring ships no signing key yet (placeholder build)"
+else
+  key_ok=0
+  for f in $sl7_fprs; do
+    v=$(gpg --homedir "$pacman_gnupg" --batch --no-auto-check-trustdb --with-colons --list-keys "$f" 2>/dev/null |
+      awk -F: '$1 == "pub" { print $2; exit }')
+    [[ $v == f || $v == u ]] && key_ok=1
+  done
+  if ((key_ok)); then pass "omarchy-sl7 signing key trusted by pacman"; else fail "omarchy-sl7 signing key not trusted (pacman-key --populate omarchy-sl7)"; fi
+fi
+
+if [[ -e $user_hook ]]; then
+  pass "omarchy refresh pacman hook installed for $(id -un)"
+else
+  warn "no omarchy refresh pacman hook for $(id -un) (omarchy-sl7-repo-ensure --user-hook)"
+fi
+
+# Battery visible to Omarchy: UPower must list the qcom-battmgr battery and
+# Omarchy's own scripts must find it (temporary patch for omacom/omarchy#13029).
+if [[ -d ${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}/qcom-battmgr-bat ]] || [[ -n ${OMARCHY_SL7_BATTERY_CHECK:-} ]]; then
+  if command -v upower >/dev/null 2>&1; then
+    if upower -e 2>/dev/null | grep -q 'battery_qcom_battmgr_bat'; then
+      pass "UPower lists the qcom-battmgr battery"
+    else
+      fail "UPower does not list qcom-battmgr-bat (check upower.service and scope/type attributes)"
+    fi
+    if command -v omarchy-battery-status >/dev/null 2>&1; then
+      if omarchy-battery-status --shell 2>/dev/null | grep -q '^percentage'; then
+        pass "omarchy-battery-status reports the battery"
+      else
+        fail "omarchy-battery-status finds no battery (rerun: sudo /usr/lib/omarchy-surface-sl7/omarchy-sl7-battery-patch)"
+      fi
+    fi
+  else
+    warn "upower not found; battery visibility check skipped"
+  fi
+  if command -v omarchy-battery-present >/dev/null 2>&1; then
+    check "omarchy-battery-present finds the battery" omarchy-battery-present
+  fi
+fi
 
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
 ((fails == 0))

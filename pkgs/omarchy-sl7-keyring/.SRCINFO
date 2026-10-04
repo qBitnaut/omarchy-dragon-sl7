@@ -1,0 +1,21 @@
+pkgbase = omarchy-sl7-keyring
+	pkgdesc = Omarchy Surface Laptop 7 (omarchy-sl7) repository signing keyring
+	pkgver = 1
+	pkgrel = 1
+	url = https://github.com/qBitnaut/omarchy-dragon-sl7
+	install = omarchy-sl7-keyring.install
+	arch = any
+	license = MIT
+	depends = pacman
+	source = omarchy-sl7.gpg
+	source = omarchy-sl7-trusted
+	source = omarchy-sl7-revoked
+	source = README.md
+	source = LICENSE
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+	sha256sums = SKIP
+
+pkgname = omarchy-sl7-keyring

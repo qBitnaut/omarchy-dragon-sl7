@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the omarchy-sl7 pacman repository configured (omarchy-surface-sl7)
+ConditionPathExists=!/etc/pacman.d/omarchy-sl7.disabled
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omarchy-sl7-repo-ensure --hook --provision-users
+
+[Install]
+WantedBy=multi-user.target

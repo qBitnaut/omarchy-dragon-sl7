@@ -1,0 +1,40 @@
+# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+#
+# pacman keyring for the omarchy-sl7 repository (modelled on archlinuxarm-keyring).
+# Ships the repository signing key as /usr/share/pacman/keyrings/omarchy-sl7.{gpg,-trusted,-revoked};
+# `pacman-key --populate` (run by the .install script, and by Omarchy's installer
+# for every keyring) imports it and locally signs the keys listed in -trusted.
+#
+# Key: 6387C619EF246F6F20C536B72C3331C78353BA04 (CI secret REPO_SIGNING_KEY). Rotate with
+#   tools/repo/make-keyring-files.sh <FINGERPRINT> [GNUPGHOME | PUBKEY.asc]
+# and bump pkgrel. If the key files were ever empty the package would build inert
+# (no key files installed) instead of breaking `pacman-key --populate`.
+
+pkgname=omarchy-sl7-keyring
+pkgver=1
+pkgrel=1
+pkgdesc='Omarchy Surface Laptop 7 (omarchy-sl7) repository signing keyring'
+arch=('any')
+url='https://github.com/qBitnaut/omarchy-dragon-sl7'
+license=('MIT')
+depends=('pacman')
+install=omarchy-sl7-keyring.install
+# Local files; checked in with the PKGBUILD, so no checksum churn when the key changes.
+source=('omarchy-sl7.gpg'
+        'omarchy-sl7-trusted'
+        'omarchy-sl7-revoked'
+        'README.md'
+        'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  if [[ -s omarchy-sl7.gpg && -s omarchy-sl7-trusted ]]; then
+    install -Dm644 omarchy-sl7.gpg "$pkgdir/usr/share/pacman/keyrings/omarchy-sl7.gpg"
+    install -Dm644 omarchy-sl7-trusted "$pkgdir/usr/share/pacman/keyrings/omarchy-sl7-trusted"
+    install -Dm644 omarchy-sl7-revoked "$pkgdir/usr/share/pacman/keyrings/omarchy-sl7-revoked"
+  else
+    warning '*** omarchy-sl7.gpg / omarchy-sl7-trusted are empty (no signing key yet): building an INERT keyring ***'
+  fi
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

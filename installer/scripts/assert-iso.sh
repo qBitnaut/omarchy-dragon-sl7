@@ -82,7 +82,7 @@ mirror="var/cache/omarchy/mirror/offline"
 unsquashfs -no-progress -d "$work/mirror" "$work/airootfs.sfs" "$mirror" >"$work/unsquashfs.log" 2>&1 ||
 	{ tail -n 20 "$work/unsquashfs.log" >&2; die "could not extract the offline mirror"; }
 mdir="$work/mirror/$mirror"
-for p in linux-sl7 linux-sl7-headers omarchy-surface-sl7 iptsd-sl7 linux-firmware-qcom \
+for p in linux-sl7 linux-sl7-headers omarchy-surface-sl7 omarchy-sl7-keyring iptsd-sl7 linux-firmware-qcom \
 	qcom-firmware-extract linux-aarch64-pkgbase-shim; do
 	found="$(find "$mdir" -maxdepth 1 -name "$p-[0-9]*.pkg.tar.*" ! -name '*.sig')"
 	[ -n "$found" ] || bad "offline mirror has no $p"

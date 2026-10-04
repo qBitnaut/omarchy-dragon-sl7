@@ -9,7 +9,7 @@
 #   SL7_PREBUILT  directory holding the downloaded *.pkg.tar.* (default /prebuilt)
 #   SL7_SOURCES   directories to build, one PKGBUILD directory each, in
 #                 sub-directories (default /src: /src/omarchy-surface-sl7,
-#                 /src/pr/qcom-firmware-extract, /src/pr/linux-aarch64-pkgbase-shim)
+#                 /src/omarchy-sl7-keyring, /src/pr/qcom-firmware-extract, /src/pr/linux-aarch64-pkgbase-shim)
 #   ARCHINSTALL_VERSION, ARCHINSTALL_SHA256  pinned archinstall (upstream.lock)
 #   SL7_REPO      output repository directory (default /repo)
 set -euo pipefail
@@ -18,7 +18,7 @@ prebuilt="${SL7_PREBUILT:-/prebuilt}"
 src="${SL7_SOURCES:-/src}"
 repo="${SL7_REPO:-/repo}"
 work=/build
-expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
+expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 omarchy-sl7-keyring qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
 
 grep -q '^DisableSandbox' /etc/pacman.conf ||
 	sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
@@ -44,6 +44,7 @@ build_pkg() { # directory
 		bash -c "cd '$work/$name' && makepkg --nodeps --noconfirm --force --cleanbuild"
 }
 
+build_pkg "$src/omarchy-sl7-keyring"
 build_pkg "$src/omarchy-surface-sl7"
 build_pkg "$src/pr/qcom-firmware-extract"
 build_pkg "$src/pr/linux-aarch64-pkgbase-shim"

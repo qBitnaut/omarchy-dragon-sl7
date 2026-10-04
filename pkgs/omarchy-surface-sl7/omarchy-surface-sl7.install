@@ -31,7 +31,20 @@ _sl7_rebuild() {
   fi
 }
 
+# Keep the omarchy-sl7 repository Included in /etc/pacman.conf (only once its key is
+# trusted) and give existing users the `omarchy refresh pacman` hook. Skipped while
+# an image build runs in a chroot: the installer's offline pacman.conf defines
+# [omarchy-sl7] itself and the boot service (omarchy-sl7-repo.service) applies the
+# online configuration after the installer replaced it.
+_sl7_repo() {
+  if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --chroot; then
+    return 0
+  fi
+  /usr/bin/omarchy-sl7-repo-ensure --hook --provision-users || true
+}
+
 _sl7_setup() {
+  _sl7_repo
   "$_sl7_dir/neutralize-surface-keyboard" || true
   "$_sl7_dir/ath12k-board-update" || true
   "$_sl7_dir/update-uki-dtbs" || true

@@ -1,0 +1,16 @@
+# omarchy / omarchy-settings (or pacman itself) can ship or rewrite /etc/pacman.conf.
+# Re-insert the Include of /etc/pacman.d/omarchy-sl7.conf above [core] afterwards.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy
+Target = omarchy-dev
+Target = omarchy-settings
+Target = omarchy-settings-dev
+Target = pacman
+
+[Action]
+Description = Keeping the omarchy-sl7 repository in /etc/pacman.conf (omarchy-surface-sl7)...
+When = PostTransaction
+Exec = /usr/bin/omarchy-sl7-repo-ensure --hook

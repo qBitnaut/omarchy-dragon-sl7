@@ -1,0 +1,31 @@
+#!/bin/bash
+# TEMPORARY shim for omacom/omarchy#13029: Omarchy's omarchy-battery-status and
+# omarchy-battery-present only look for BAT*, but the Snapdragon battery is
+# qcom-battmgr-bat (UPower: battery_qcom_battmgr_bat). Edits the two scripts in
+# place and only when the exact upstream line is still there, so it is
+# idempotent and a no-op once #13029 (or any fix) lands. Drop this file, its
+# pacman hook and the PKGBUILD lines when #13029 is in the pinned Omarchy.
+# SL7_BATTERY_PATCH_BIN_DIR overrides /usr/bin (tests).
+set -u
+
+bin=${SL7_BATTERY_PATCH_BIN_DIR:-/usr/bin}
+
+replace() { # file, old line fragment, new fragment (literal, no regex)
+  local f=$1 old=$2 new=$3 body
+  [[ -w $f ]] || return 0
+  body=$(<"$f") || return 1
+  [[ $body == *"$old"* ]] || return 0
+  printf '%s\n' "${body/"$old"/"$new"}" >"$f"
+}
+
+replace "$bin/omarchy-battery-status" \
+  'grep BAT | head -n 1' \
+  "grep -E 'BAT|battmgr_bat' | head -n 1"
+replace "$bin/omarchy-battery-present" \
+  'for bat in /sys/class/power_supply/BAT*; do' \
+  'for bat in /sys/class/power_supply/BAT* /sys/class/power_supply/*battmgr-bat; do'
+# qcom-battmgr reports power_now negative while discharging; Omarchy shows the
+# raw value and its "idle" test (rate <= 0.2) then fires while discharging.
+replace "$bin/omarchy-battery-status" \
+  'BEGIN { print microwatts / 1000000 }' \
+  'BEGIN { if (microwatts < 0) microwatts = -microwatts; print microwatts / 1000000 }'
