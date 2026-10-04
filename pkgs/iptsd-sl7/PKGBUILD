@@ -1,0 +1,96 @@
+# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+#
+# iptsd with Surface Laptop 7 touchpad support (HID-over-SPI 045E:0C77), built
+# from the alex-lentz/iptsd fork pinned to an exact commit.
+
+pkgname=iptsd-sl7
+# SL7 calibration (iptsd-calibrate output) by Oliver White, from bryce-hoehn's
+# linux-surface-laptop-7 repo. Upstream has no license; fetched at build time,
+# not redistributed in this repo.
+_calcommit=e60938dcf707d37d24e782e0029b9c9a567d67b8  # 2026-06-03
+_commit=3663e96e758145801c3cb1ce7c72f362d0d4a5f5  # 2026-07-17 00:26 UTC (2026-07-16 20:26 -0400)
+pkgver=3.1.0.r20260717
+pkgrel=1
+pkgdesc='Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)'
+arch=('aarch64')
+url='https://github.com/alex-lentz/iptsd'
+license=('GPL-2.0-or-later')
+depends=('fmt' 'libinih' 'spdlog' 'systemd-libs')
+# Header-only libraries (cli11, eigen, microsoft-gsl) are build-time only.
+# cmake is required: meson locates Microsoft.GSL through its CMake config.
+makedepends=('meson' 'ninja' 'cmake' 'cli11' 'eigen' 'microsoft-gsl' 'systemd')
+checkdepends=('binutils')
+provides=('iptsd')
+conflicts=('iptsd')
+backup=('etc/iptsd.conf'
+        'etc/iptsd.d/91-calibration-045E-0C77.conf')
+options=('!lto')  # LTO is handled by meson (b_lto), not makepkg's flag injection
+source=("iptsd-$_commit.tar.gz::https://github.com/alex-lentz/iptsd/archive/$_commit.tar.gz"
+        "91-calibration-045E-0C77.conf::https://raw.githubusercontent.com/bryce-hoehn/linux-surface-laptop-7/$_calcommit/config/touchpad/91-calibration-045E-0C77.conf"
+        '61-iptsd-sl7-hide-raw-touchpad.rules')
+sha256sums=('ce9935fb7c38365f4fa65070e819bf901e10082c5fb2ea67e49b3a60b225ed92'
+            '2c1ffc2088dd9e65f18e79f1e1b6d3fbcb815e75843ebed8142da6f96f89bbb0'
+            'c58408721cd808a51c4970d6e2a8397a136b899bcf6904069646c8f4ea6b86ef')
+
+_bp='-mbranch-protection=standard'
+
+prepare() {
+  # Fail early if the unpacked tree is not the commit we pinned.
+  test -f "iptsd-$_commit/meson.build"
+}
+
+build() {
+  # BTI/PAC consistency. A mixed build (some objects/libs with BTI+PAC
+  # landing pads, others without, or a link step that drops the property)
+  # yields a binary whose .note.gnu.property disagrees with its code and dies
+  # with SIGILL even on --help (linux-surface/iptsd#1590). With LTO the final
+  # code generation happens at link time, so LDFLAGS must carry the flag too.
+  local v
+  for v in CFLAGS CXXFLAGS LDFLAGS; do
+    case "${!v}" in
+      *-mbranch-protection=*) ;;
+      *) export "$v=${!v} $_bp" ;;
+    esac
+  done
+  echo "CFLAGS=$CFLAGS"
+  echo "CXXFLAGS=$CXXFLAGS"
+  echo "LDFLAGS=$LDFLAGS"
+
+  # Use system libraries only (nofallback): no vendored static copies built
+  # with whatever flags the wrap happens to pick.
+  arch-meson "iptsd-$_commit" build \
+    --wrap-mode=nofallback \
+    -Dwerror=false \
+    -Ddebug_tools=calibrate,dump
+  meson compile -C build
+}
+
+check() {
+  # Verify the AArch64 BTI/PAC property note is present on every binary.
+  local f bad=0
+  for f in build/src/iptsd*; do
+    [[ -f $f && -x $f ]] || continue
+    if ! readelf -n "$f" | grep -q 'AArch64 feature:.*BTI'; then
+      echo "missing BTI property: $f" >&2
+      bad=1
+    fi
+    if ! readelf -n "$f" | grep -q 'AArch64 feature:.*PAC'; then
+      echo "missing PAC property: $f" >&2
+      bad=1
+    fi
+  done
+  return $bad
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+
+  # SL7 additions
+  install -Dm644 91-calibration-045E-0C77.conf \
+    "$pkgdir/etc/iptsd.d/91-calibration-045E-0C77.conf"
+  install -Dm644 61-iptsd-sl7-hide-raw-touchpad.rules \
+    "$pkgdir/usr/lib/udev/rules.d/61-iptsd-sl7-hide-raw-touchpad.rules"
+
+  install -Dm644 "iptsd-$_commit/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

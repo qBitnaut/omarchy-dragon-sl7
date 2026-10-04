@@ -1,0 +1,18 @@
+# Hide ONLY the raw heatmap touchpad input node from libinput. iptsd reads the
+# hidraw node and emits "IPTSD Virtual Touchpad 045E:0C77", which libinput
+# must use instead. The click button arrives on a separate "spi 045E:0C77
+# Mouse" node, which must stay visible, hence the ID_INPUT_TOUCHPAD match.
+#
+# Bound by bus path (88c000.spi = QUP2 SE3, spi19) because hidraw/event
+# numbers change between boots. The virtual iptsd device is uinput and has no
+# platform-88c000.spi path, so it is unaffected.
+#
+# Runs after 60-input-id.rules / 60-persistent-input.rules (ID_PATH and
+# ID_INPUT_TOUCHPAD are set there).
+ACTION=="remove", GOTO="iptsd_sl7_end"
+SUBSYSTEM!="input", GOTO="iptsd_sl7_end"
+KERNEL!="event[0-9]*", GOTO="iptsd_sl7_end"
+
+ENV{ID_PATH}=="platform-88c000.spi-cs-0", ENV{ID_INPUT_TOUCHPAD}=="1", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+
+LABEL="iptsd_sl7_end"

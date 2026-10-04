@@ -1,0 +1,67 @@
+name: iptsd-sl7
+
+on:
+  push:
+    paths:
+      - 'pkgs/iptsd-sl7/**'
+      - '.github/workflows/iptsd-sl7.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner is native aarch64; Arch Linux ARM has no official Docker
+      # image, so import the ALARM root filesystem tarball as one.
+      - name: Bootstrap ALARM container image
+        run: |
+          set -euo pipefail
+          base=http://os.archlinuxarm.org/os
+          curl -fsSL -O "$base/ArchLinuxARM-aarch64-latest.tar.gz"
+          curl -fsSL -O "$base/ArchLinuxARM-aarch64-latest.tar.gz.md5"
+          md5sum -c ArchLinuxARM-aarch64-latest.tar.gz.md5
+          docker import ArchLinuxARM-aarch64-latest.tar.gz alarm:latest
+          rm -f ArchLinuxARM-aarch64-latest.tar.gz
+
+      - name: Build package in ALARM container
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm \
+            -v "$PWD/pkgs/iptsd-sl7:/src:ro" \
+            -v "$PWD/out:/out" \
+            alarm:latest bash -euxc '
+              sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+              pacman-key --init
+              pacman-key --populate archlinuxarm
+              pacman -Syu --noconfirm --needed base-devel git
+              useradd -m builder
+              echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+              cp -r /src /home/builder/build
+              chown -R builder:builder /home/builder/build
+              cd /home/builder/build
+              su builder -c "makepkg --syncdeps --noconfirm --cleanbuild"
+              cp /home/builder/build/*.pkg.tar.* /out/
+            '
+
+      - name: Verify BTI/PAC on packaged binaries
+        run: |
+          set -euo pipefail
+          pkg=$(ls out/*.pkg.tar.* | head -n1)
+          mkdir x && tar -C x -xf "$pkg"
+          for f in x/usr/bin/iptsd x/usr/bin/iptsd-calibrate; do
+            readelf -n "$f" | grep -E 'AArch64 feature:.*BTI.*PAC|AArch64 feature:.*PAC.*BTI'
+          done
+          tar -tf "$pkg" | grep -E 'etc/iptsd.d/91-calibration|61-iptsd-sl7|iptsd@.service|50-iptsd.rules'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iptsd-sl7-aarch64
+          path: out/*.pkg.tar.*
+          if-no-files-found: error
