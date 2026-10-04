@@ -1,14 +1,24 @@
 #!/bin/bash
-# iptsd-sl7-calibrate: measure this touchpad's contact sizes with iptsd-calibrate
-# and write /etc/iptsd.d/93-local-calibration.conf. Use --revert to undo.
+# iptsd-sl7-calibrate: measure this touchpad's fingertip contact sizes with
+# iptsd-calibrate and write /etc/iptsd.d/93-local-calibration.conf. Use
+# --revert to undo.
+#
+# Guardrails: SizeMax/AspectMax are never installed above the 92 tuning caps
+# (they gate DisableOnPalm, which masks firmware clicks on palm-sized
+# contacts), and a run whose maxima dwarf the mean is treated as polluted.
 set -euo pipefail
 
 CONF=/etc/iptsd.d/93-local-calibration.conf
+CONF_DIR=/etc/iptsd.d
 HID_ID='001C:0000045E:00000C77'
 
-die() { echo "error: $*" >&2; exit 1; }
+# Keep in sync with [Contacts] in 92-iptsd-sl7-tuning.conf.
+CAP_SIZE_MAX=4.0
+CAP_ASPECT_MAX=4.0
+SIZE_MIN_FLOOR=0.5
+POLLUTION_RATIO=2.5
 
-[[ $EUID -eq 0 ]] || exec sudo -- "$0" "$@"
+die() { echo "error: $*" >&2; exit 1; }
 
 find_hidraw() {
   local d
@@ -22,52 +32,195 @@ find_hidraw() {
   return 1
 }
 
-node=$(find_hidraw) || die "touchpad (HID_ID $HID_ID) not found"
-unit="iptsd@dev-$node.service"
+# parse_stats LOG: last "Size:" / "Aspect:" lines of iptsd-calibrate output.
+# Prints: size_mean size_min size_max aspect_mean aspect_min aspect_max
+parse_stats() {
+  local n='([0-9]+([.][0-9]+)?)'
+  local re="^(Size|Aspect):?[[:space:]]+(mean[[:space:]]+)?${n}[[:space:]]*\\(Min:?[[:space:]]+${n}[;,][[:space:]]*Max:?[[:space:]]+${n}\\)"
+  local line size='' aspect=''
+  while IFS= read -r line; do
+    line=${line#"${line%%[![:space:]]*}"}
+    # shellcheck disable=SC2154  # BASH_REMATCH set by =~
+    if [[ $line =~ $re ]]; then
+      if [[ ${BASH_REMATCH[1]} == Size ]]; then
+        size="${BASH_REMATCH[3]} ${BASH_REMATCH[5]} ${BASH_REMATCH[7]}"
+      else
+        aspect="${BASH_REMATCH[3]} ${BASH_REMATCH[5]} ${BASH_REMATCH[7]}"
+      fi
+    fi
+  done < <(tr '\r' '\n' <"$1" | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/^\[[^]]*\][[:space:]]*(\[[^]]*\][[:space:]]*)*//')
+  [[ -n $size && -n $aspect ]] || return 1
+  echo "$size $aspect"
+}
 
-case "${1:-}" in
-  --revert)
-    rm -fv "$CONF"
-    systemctl restart "$unit"
-    echo "Reverted; $unit restarted."
-    exit 0
-    ;;
-  ''|--run) ;;
-  *) die "usage: ${0##*/} [--revert]" ;;
-esac
+# compute_limits SMEAN SMIN SMAX AMEAN AMIN AMAX
+# 0.1 slack like iptsd's 2mm snippet, then clamped. Prints:
+#   SizeMin SizeMax AspectMin AspectMax polluted(0|1) clamped(0|1)
+compute_limits() {
+  awk -v sm="$1" -v sn="$2" -v sx="$3" -v am="$4" -v an="$5" -v ax="$6" \
+      -v capS="$CAP_SIZE_MAX" -v capA="$CAP_ASPECT_MAX" \
+      -v floorS="$SIZE_MIN_FLOOR" -v ratio="$POLLUTION_RATIO" '
+    function fl(x) { x = x * 10 + 1e-9; return int(x) / 10 }
+    function ce(x) { x = x * 10 - 1e-9; return (x == int(x) ? x : int(x) + 1) / 10 }
+    BEGIN {
+      smin = fl(sn - 0.1); if (smin < 0) smin = 0
+      amin = fl(an - 0.1); if (amin < 1) amin = 1
+      smax = ce(sx + 0.1); amax = ce(ax + 0.1)
+      clamped = 0
+      if (smax > capS) { smax = capS; clamped = 1 }
+      if (amax > capA) { amax = capA; clamped = 1 }
+      if (smin < floorS) { smin = floorS; clamped = 1 }
+      if (smin > sm) { smin = sm; clamped = 1 }
+      if (amin > am) { amin = (am < 1 ? 1 : am); clamped = 1 }
+      polluted = (sx > ratio * sm || ax > ratio * am) ? 1 : 0
+      printf "%.3f %.3f %.3f %.3f %d %d\n", smin, smax, amin, amax, polluted, clamped
+    }'
+}
 
-workdir=$(mktemp -d)
-trap 'rm -rf "$workdir"; systemctl start "$unit" || true' EXIT
+# effective_contacts DIR: last-wins [Contacts] keys across DIR/*.conf (and
+# /etc/iptsd.conf first). Prints "Key value" lines.
+effective_contacts() {
+  local files=() f
+  [[ -f /etc/iptsd.conf ]] && files+=(/etc/iptsd.conf)
+  for f in "$1"/*.conf; do [[ -f $f ]] && files+=("$f"); done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  awk '
+    FNR == 1 { sec = "" }
+    /^[[:space:]]*\[/ { gsub(/[][[:space:]]/, ""); sec = $0; next }
+    sec == "Contacts" && /^[[:space:]]*(SizeMin|SizeMax|AspectMin|AspectMax)[[:space:]]*=/ {
+      k = $1; sub(/=.*/, "", k); gsub(/[[:space:]]/, "", k)
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v)
+      val[k] = v
+    }
+    END { for (k in val) print k, val[k] }
+  ' "${files[@]}"
+}
 
-cat <<MSG
+show_diff() {
+  local dir=$1 smin=$2 smax=$3 amin=$4 amax=$5 cur k new
+  cur=$(effective_contacts "$dir")
+  printf '%-10s %-12s %s\n' Key current new
+  for k in SizeMin SizeMax AspectMin AspectMax; do
+    case $k in
+      SizeMin) new=$smin ;; SizeMax) new=$smax ;;
+      AspectMin) new=$amin ;; AspectMax) new=$amax ;;
+    esac
+    printf '%-10s %-12s %s\n' "$k" "$(awk -v k="$k" '$1 == k { print $2 }' <<<"$cur" | grep . || echo '(default)')" "$new"
+  done
+}
+
+write_conf() {
+  local out=$1 stats=$2 smin=$3 smax=$4 amin=$5 amax=$6 note=$7
+  local s_mean s_min s_max a_mean a_min a_max
+  read -r s_mean s_min s_max a_mean a_min a_max <<<"$stats"
+  {
+    echo "#"
+    echo "# Written by iptsd-sl7-calibrate, $(date -Is)"
+    echo "# Measured Size:   mean $s_mean  min $s_min  max $s_max"
+    echo "# Measured Aspect: mean $a_mean  min $a_min  max $a_max"
+    echo "# Caps: SizeMax <= $CAP_SIZE_MAX, AspectMax <= $CAP_ASPECT_MAX, SizeMin >= $SIZE_MIN_FLOOR"
+    [[ -z $note ]] || echo "# $note"
+    echo "#"
+    echo
+    echo "[Device]"
+    echo "Vendor = 0x045E"
+    echo "Product = 0x0C77"
+    echo
+    echo "[Contacts]"
+    echo "SizeMin = $smin"
+    echo "SizeMax = $smax"
+    echo "AspectMin = $amin"
+    echo "AspectMax = $amax"
+  } >"$out"
+}
+
+main() {
+  [[ $EUID -eq 0 ]] || exec sudo -- "$0" "$@"
+
+  local node unit
+  node=$(find_hidraw) || die "touchpad (HID_ID $HID_ID) not found"
+  unit="iptsd@dev-$node.service"
+
+  case "${1:-}" in
+    --revert)
+      rm -fv "$CONF"
+      systemctl restart "$unit"
+      echo "Reverted; $unit restarted."
+      exit 0
+      ;;
+    ''|--run) ;;
+    *) die "usage: ${0##*/} [--revert]" ;;
+  esac
+
+  local workdir
+  workdir=$(mktemp -d)
+  trap 'rm -rf "$workdir"; systemctl start "$unit" || true' EXIT
+
+  local stats limits smin smax amin amax polluted clamped ans note
+  while true; do
+    rm -f "$workdir"/iptsd_calib_* "$workdir/calib.log"
+    cat <<MSG
 Touchpad: /dev/$node  (unit $unit)
 
 iptsd will be stopped, so the touchpad is dead while this runs. Use the
-keyboard. Start the calibration, then for about 60 seconds, using only
-fingers (no palm):
-  1. one finger: slow circles, then fast swipes, covering the whole pad
-     including the edges and corners
-  2. one finger pressed flat, then the pad of the finger, then the tip
-  3. two fingers: scroll and pinch motions
-  4. thumb and other fingers you normally use
-Do not click. Press Ctrl-C when done.
+keyboard. Start the calibration, then for about 40 seconds touch the pad
+with ONE FINGERTIP only:
+  1. slow circles, then fast swipes, covering the whole pad including the
+     edges and corners
+  2. normal two-finger scrolling (two fingertips)
+Do NOT use a thumb, palm, flat finger or resting hand, and do not click.
+Anything bigger than a fingertip pollutes the measurement.
+Press Ctrl-C when done.
 MSG
-read -r -p "Press Enter to start (Ctrl-C to abort) " _
+    read -r -p "Press Enter to start (Ctrl-C to abort) " _
 
-systemctl stop "$unit"
-cd "$workdir"
-iptsd-calibrate "/dev/$node" || true
+    systemctl stop "$unit"
+    (
+      cd "$workdir"
+      trap ':' INT
+      iptsd-calibrate "/dev/$node" 2>&1 | (trap '' INT; exec tee calib.log) || true
+    )
+    systemctl start "$unit" || true
 
-shopt -s nullglob
-out=("$workdir"/iptsd_calib_*_2mm.conf)
-[[ ${#out[@]} -eq 1 ]] || die "no calibration output (was there any touch input?)"
+    if ! stats=$(parse_stats "$workdir/calib.log"); then
+      die "could not read Size/Aspect statistics from iptsd-calibrate output (was there any touch input?); nothing installed"
+    fi
+    echo
+    echo "Measured (mean min max): Size $(cut -d' ' -f1-3 <<<"$stats"), Aspect $(cut -d' ' -f4-6 <<<"$stats")"
 
-echo
-echo "Measured (2 mm slack, recommended):"
-cat "${out[0]}"
-echo
-read -r -p "Install to $CONF? [y/N] " ans
-[[ $ans == [yY]* ]] || { echo "Not installed."; exit 0; }
+    # shellcheck disable=SC2086  # stats is six space-separated numbers
+    limits=$(compute_limits $stats)
+    read -r smin smax amin amax polluted clamped <<<"$limits"
+    note=''
+    ((clamped)) && note="Values were clamped to the guardrails above."
 
-install -Dm644 "${out[0]}" "$CONF"
-echo "Installed. Undo with: ${0##*/} --revert"
+    if ((polluted)); then
+      echo
+      echo "WARNING: the measured maximum is more than ${POLLUTION_RATIO}x the mean:" \
+           "palm/thumb samples polluted this run."
+      echo "Installing the raw maxima would disable palm rejection and make every click register."
+      read -r -p "Re-run with fingertips only [Y], install clamped values [c], or quit [n]? " ans
+      case $ans in
+        c|C) note="Run was polluted (max > ${POLLUTION_RATIO}x mean); clamped values installed by choice." ;;
+        n|N) echo "Not installed."; exit 0 ;;
+        *) continue ;;
+      esac
+    fi
+
+    echo
+    show_diff "$CONF_DIR" "$smin" "$smax" "$amin" "$amax"
+    echo
+    read -r -p "Install to $CONF? [y/N] " ans
+    [[ $ans == [yY]* ]] || { echo "Not installed."; exit 0; }
+
+    write_conf "$workdir/out.conf" "$stats" "$smin" "$smax" "$amin" "$amax" "$note"
+    install -Dm644 "$workdir/out.conf" "$CONF"
+    systemctl restart "$unit" || true
+    echo "Installed. Undo with: ${0##*/} --revert"
+    exit 0
+  done
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
