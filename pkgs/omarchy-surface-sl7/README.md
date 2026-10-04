@@ -26,6 +26,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest` |
+| 8d | optional PSR test boot entry (off by default) | `/usr/bin/omarchy-sl7-psr-entry`, `/etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
 
@@ -206,7 +207,50 @@ negative `power_now` absolute. Remove both files and their PKGBUILD lines when #
 Read-only check (`/usr/bin/sl7-doctor`): running kernel and DT, 3 cpufreq policies, SAM
 modules in the initramfs, firmware, iptsd units, `BOOT_ORDER`, uki.conf, no active
 `surface_device_modules.conf`, Pro Audio guard, and the power mode (current source, caps
-applied, whether they match the source). Exit 1 on any failure.
+applied, whether they match the source), and PSR state (`msm.psr_enabled`, whether this boot
+used the PSR test entry, PSR debugfs nodes and dmesg lines when readable; informational only).
+Exit 1 on any failure.
+
+### 11b. Optional: eDP Panel Self Refresh test entry (`omarchy-sl7-psr-entry`)
+
+The Sharp LQ138P1JX61 reports PSR1 support (eDP DPCD 0x070 = 01). `msm.psr_enabled=1` is not
+in the normal command line because PSR can flicker or freeze on some panels. This adds a
+second Limine entry, "linux-sl7 (PSR test)", that boots the same UKI with that parameter
+added; the default entry, `default_entry` and `BOOT_ORDER` are never touched. Disabled by
+default.
+
+```
+sudo omarchy-sl7-psr-entry enable    # add the entry
+omarchy-sl7-psr-entry status
+sudo omarchy-sl7-psr-entry disable   # remove it
+```
+
+How it works: limine-entry-tool has no per-entry command line variants, and it rewrites
+`limine.conf` on every UKI rebuild. So `omarchy-sl7-psr-entry` copies the live linux-sl7 entry
+(same UKI path and hash, same `cmdline:`) into a marked block
+(`### BEGIN/END omarchy-sl7-psr-entry`) directly after it, with `msm.psr_enabled=1` appended.
+`/etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry` (a limine-entry-tool post hook; it runs
+before `90-limine-enroll-config`) re-creates the block after every regeneration, so the hash
+and cmdline stay in sync. The `cmdline:` line overrides the UKI's embedded command line
+through systemd-stub load options, which it honours while Secure Boot is off (the SL7 setup).
+If the override were ignored, `sl7-doctor` shows "normal boot entry" after choosing the PSR
+entry. If `ENABLE_ENROLL_LIMINE_CONFIG=yes`, `enable`/`disable` re-enroll the config.
+
+Fallback if the entry misbehaves: in the Limine menu press `e` on the normal entry and append
+` msm.psr_enabled=1` to the cmdline for one boot (the editor is disabled when a config hash is
+enrolled).
+
+Test procedure:
+
+1. `sudo omarchy-sl7-psr-entry enable`, reboot, pick "linux-sl7 (PSR test)".
+2. `sl7-doctor` must show `msm.psr_enabled=1` (running kernel) and "booted via the PSR test entry".
+3. Use the machine normally for 10 minutes; watch for flicker, freezes, cursor lag.
+4. On battery: `sl7-powertest idle --minutes 20 --label psr`.
+5. Reboot into the normal entry and run `sl7-powertest idle --minutes 20 --label normal`, then
+   `sl7-powertest compare ~/.local/state/sl7-powertest/*-normal.jsonl ~/.local/state/sl7-powertest/*-psr.jsonl`.
+6. Good: add `KERNEL_CMDLINE[default]+=" msm.psr_enabled=1"` to a drop-in in
+   `/etc/limine-entry-tool.d/`, run `limine-mkinitcpio`, then `sudo omarchy-sl7-psr-entry disable`.
+   Not good: `sudo omarchy-sl7-psr-entry disable` and boot the normal entry.
 
 ### 12. Measuring power: `sl7-powertest`
 

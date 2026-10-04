@@ -1,0 +1,187 @@
+#!/bin/bash
+# Optional extra Limine menu entry "linux-sl7 (PSR test)": the normal linux-sl7
+# UKI entry with msm.psr_enabled=1 appended to its cmdline (eDP Panel Self
+# Refresh). The normal entry, default_entry and BOOT_ORDER are never changed;
+# pick the normal entry on the next boot to go back.
+#
+#   omarchy-sl7-psr-entry enable    add the entry (kept after every UKI rebuild)
+#   omarchy-sl7-psr-entry disable   remove the entry
+#   omarchy-sl7-psr-entry status
+#
+# limine-entry-tool has no per-entry cmdline variants and rewrites limine.conf
+# on every UKI rebuild, so the entry is generated from the live linux-sl7 entry
+# (same UKI path and hash, same cmdline) and re-inserted by
+# /etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry (a limine-entry-tool post
+# hook; it runs before 90-limine-enroll-config). Disabled by default.
+set -euo pipefail
+
+state=${OMARCHY_SL7_PSR_STATE:-/etc/omarchy-surface-sl7/psr-entry.enabled}
+limine_default=${OMARCHY_SL7_LIMINE_DEFAULT:-/etc/default/limine}
+export source_id=linux-sl7
+export entry_name="linux-sl7 (PSR test)"
+export param="msm.psr_enabled=1"
+export begin="### BEGIN omarchy-sl7-psr-entry (generated; 'omarchy-sl7-psr-entry disable' removes it)"
+export end="### END omarchy-sl7-psr-entry"
+
+usage() {
+  echo "usage: ${0##*/} {enable|disable|status}" >&2
+  exit 2
+}
+
+find_conf() {
+  local esp c
+  if [[ -n ${OMARCHY_SL7_LIMINE_CONF:-} ]]; then
+    echo "$OMARCHY_SL7_LIMINE_CONF"
+    return 0
+  fi
+  esp=$(sed -n -E 's/^[[:space:]]*ESP_PATH="?([^"]*)"?.*/\1/p' "$limine_default" 2>/dev/null | tail -n 1 || true)
+  for c in ${esp:+"$esp/limine.conf"} /boot/limine.conf /efi/limine.conf /boot/efi/limine.conf /limine/limine.conf; do
+    [[ -f $c ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# stdin: limine.conf; stdout: the same without our block.
+strip_block() {
+  awk '
+    $0 == ENVIRON["begin"] { skip = 1; next }
+    skip && $0 == ENVIRON["end"] { skip = 0; next }
+    !skip { print }'
+}
+
+# stdin: limine.conf without our block; stdout: with the PSR entry inserted
+# directly after the linux-sl7 entry, so every entry before it (and so
+# default_entry) keeps its position. Prints nothing and exits 3 when the
+# linux-sl7 entry (comment: kernel-id=linux-sl7) is absent.
+insert_block() {
+  awk '
+    function is_header(l) { return l ~ /^[ \t]*\/+[^\/]/ }
+    { line[NR] = $0; if (is_header($0)) hdr[++nh] = NR }
+    END {
+      s = 0
+      for (h = 1; h <= nh && !s; h++) {
+        last = (h < nh) ? hdr[h + 1] - 1 : NR
+        for (i = hdr[h] + 1; i <= last; i++)
+          if (line[i] ~ ("^[ \t]*comment:[ \t]*kernel-id=" ENVIRON["source_id"] "[ \t]*$")) { s = hdr[h]; e = last }
+      }
+      if (!s) exit 3
+      for (n = e; n > s && line[n] ~ /^[ \t]*$/; n--) ;
+      for (i = 1; i <= n; i++) print line[i]
+      print ENVIRON["begin"]
+      match(line[s], /^[ \t]*\/+/)
+      print substr(line[s], 1, RLENGTH) ENVIRON["entry_name"]
+      match(line[s + 1], /^[ \t]*/)
+      ind = substr(line[s + 1], 1, RLENGTH)
+      print ind "comment: Panel Self Refresh test (" ENVIRON["param"] ")"
+      cmd = 0
+      for (i = s + 1; i <= n; i++) {
+        l = line[i]
+        if (l ~ /^[ \t]*comment:[ \t]*(kernel-id=|Kernel version:)/ || l ~ /^[ \t]*###/) continue
+        if (l ~ /^[ \t]*(kernel_)?cmdline:/) { sub(/[ \t]+$/, "", l); l = l " " ENVIRON["param"]; cmd = 1 }
+        print l
+      }
+      if (!cmd) print ind "cmdline: " ENVIRON["param"]
+      print ENVIRON["end"]
+      for (i = n + 1; i <= NR; i++) print line[i]
+    }'
+}
+
+# Rewrite $1 from stdin only if the content changed (the ESP is FAT32: no
+# pointless writes). Same-directory temp file + rename.
+write_conf() {
+  local conf=$1 tmp
+  tmp=$(mktemp "$conf.XXXXXX")
+  cat >"$tmp"
+  if cmp -s "$tmp" "$conf"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod --reference="$conf" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+  mv -f "$tmp" "$conf"
+}
+
+# Apply the desired state to limine.conf. Returns 0 on success, 1 on failure.
+apply() {
+  local conf want=0 work rc=0
+  [[ -e $state ]] && want=1
+  if ! conf=$(find_conf); then
+    echo "omarchy-sl7-psr-entry: limine.conf not found; nothing to do" >&2
+    return 1
+  fi
+  work=$(mktemp)
+  strip_block <"$conf" >"$work"
+  if ((want)); then
+    insert_block <"$work" >"$work.new" || rc=$?
+    if ((rc)); then
+      rm -f "$work" "$work.new"
+      echo "omarchy-sl7-psr-entry: no linux-sl7 entry (comment: kernel-id=$source_id) in $conf; entry not added" >&2
+      return 1
+    fi
+    mv -f "$work.new" "$work"
+  fi
+  if write_conf "$conf" <"$work"; then
+    echo "omarchy-sl7-psr-entry: $conf updated ($( ((want)) && echo "'$entry_name' present" || echo "entry removed"))"
+  fi
+  rm -f "$work"
+  return 0
+}
+
+# A changed limine.conf must be re-enrolled when config enrollment is on, or
+# Limine refuses to boot. (The post hook needs no extra step: 90-limine-enroll-
+# config runs after it.)
+reenroll() {
+  if grep -Eq '^[[:space:]]*ENABLE_ENROLL_LIMINE_CONFIG="?yes' "$limine_default" 2>/dev/null &&
+    command -v limine-enroll-config >/dev/null 2>&1; then
+    limine-enroll-config
+  fi
+}
+
+need_root() {
+  if ((EUID != 0)) && [[ -z ${OMARCHY_SL7_PSR_STATE:-} ]]; then
+    exec sudo "$0" "$@"
+  fi
+}
+
+running_state() {
+  if grep -qw "$param" /proc/cmdline 2>/dev/null; then
+    echo "this boot: PSR test entry ($param on the running cmdline)"
+  else
+    echo "this boot: normal entry (no $param on the running cmdline)"
+  fi
+}
+
+case ${1:-} in
+  --hook)
+    # Called by the limine-entry-tool post hook. Never fatal (exit < 100).
+    apply || exit 1
+    ;;
+  enable)
+    need_root "$@"
+    mkdir -p "$(dirname "$state")"
+    : >"$state"
+    apply || { rm -f "$state"; exit 1; }
+    reenroll
+    echo "Reboot and choose '$entry_name' in the Limine menu. The default entry is unchanged."
+    ;;
+  disable)
+    need_root "$@"
+    rm -f "$state"
+    apply || true
+    reenroll
+    ;;
+  status)
+    if [[ -e $state ]]; then echo "PSR test entry: enabled"; else echo "PSR test entry: disabled"; fi
+    if conf=$(find_conf); then
+      if grep -qxF "$begin" "$conf" 2>/dev/null; then
+        echo "limine.conf ($conf): entry present"
+        awk '$0 == ENVIRON["end"] { exit } f && /cmdline:/ { sub(/^[ \t]+/, "  "); print } $0 == ENVIRON["begin"] { f = 1 }' "$conf"
+      else
+        echo "limine.conf ($conf): entry absent"
+      fi
+    else
+      echo "limine.conf: not found (cannot read /boot as this user?)"
+    fi
+    running_state
+    ;;
+  *) usage ;;
+esac

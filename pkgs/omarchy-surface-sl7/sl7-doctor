@@ -194,5 +194,40 @@ else
   warn "omarchy-sl7-powermode not installed; power mode check skipped"
 fi
 
+# eDP Panel Self Refresh (optional "linux-sl7 (PSR test)" boot entry, see
+# omarchy-sl7-psr-entry). Informational only: PSR off is the normal state.
+psr_param=${OMARCHY_SL7_MSM_PSR:-/sys/module/msm/parameters/psr_enabled}
+psr_cmdline=${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}
+if [[ -r $psr_param ]]; then
+  printf 'INFO  PSR: msm.psr_enabled=%s (running kernel)\n' "$(<"$psr_param")"
+else
+  printf 'INFO  PSR: msm.psr_enabled not exposed by the running kernel\n'
+fi
+if grep -qw 'msm.psr_enabled=1' "$psr_cmdline" 2>/dev/null; then
+  printf 'INFO  PSR: booted via the PSR test entry (msm.psr_enabled=1 on the cmdline)\n'
+else
+  printf 'INFO  PSR: normal boot entry (no msm.psr_enabled=1 on the cmdline)\n'
+fi
+psr_found=0
+for f in ${OMARCHY_SL7_DRI_DEBUGFS:-/sys/kernel/debug/dri}/*/eDP-1/psr_* \
+  ${OMARCHY_SL7_DRI_DEBUGFS:-/sys/kernel/debug/dri}/*/*/*psr*; do
+  [[ -f $f ]] || continue
+  psr_found=1
+  if [[ -r $f ]]; then
+    printf 'INFO  PSR: %s: %s\n' "$f" "$(head -c 200 "$f" 2>/dev/null | tr '\n' ' ')"
+  else
+    printf 'INFO  PSR: %s exists (readable as root only)\n' "$f"
+  fi
+done
+((psr_found)) || printf 'INFO  PSR: no PSR debugfs node visible (debugfs needs root, or the kernel does not expose one)\n'
+if [[ -r /dev/kmsg || -n ${OMARCHY_SL7_DMESG:-} ]]; then
+  psr_log=$(${OMARCHY_SL7_DMESG:-dmesg} 2>/dev/null | grep -i -E 'psr|self.refresh' | tail -n 3 || true)
+  [[ -n $psr_log ]] && while IFS= read -r line; do printf 'INFO  PSR dmesg: %s\n' "$line"; done <<<"$psr_log"
+fi
+psr_entry=${OMARCHY_SL7_PSR_ENTRY:-/usr/bin/omarchy-sl7-psr-entry}
+if [[ -x $psr_entry ]]; then
+  while IFS= read -r line; do printf 'INFO  PSR entry: %s\n' "$line"; done < <("$psr_entry" status 2>&1 | cut -c1-160 | head -n 4)
+fi
+
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
 ((fails == 0))
