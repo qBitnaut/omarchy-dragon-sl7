@@ -88,7 +88,7 @@ test kernel (adds boot entries "omarchy-dragon-sl7 test kernel"; the sp11 entrie
                    Image, dtbs/, SHA256SUMS)
   --from-ci RUN    download that artifact with gh (run id, or "latest" successful run
                    of linux-sl7.yml) into $SL7_WORK/ci and use it
-  --iptsd-pkg FILE iptsd-sl7 pkg.tar.zst, staged for the touchpad test in the guide
+  --iptsd-pkg FILE iptsd-sl7 pkg.tar.{zst,xz}, staged for the touchpad test in the guide
   --iptsd-from-ci RUN  download the iptsd-sl7-aarch64 artifact (run id or "latest")
 USAGE
 }
@@ -502,8 +502,9 @@ resolve_ci() {
 	fi
 	if [ -n "$IPTSD_CI_RUN" ]; then
 		fetch_ci "$IPTSD_CI_RUN" iptsd-sl7.yml 'iptsd-sl7-*' "$WORK/ci/iptsd-sl7"
-		IPTSD_PKG="$(find "$WORK/ci/iptsd-sl7" -name '*.pkg.tar.zst' | head -n 1)"
-		[ -n "$IPTSD_PKG" ] || die "downloaded iptsd artifact has no pkg.tar.zst"
+		# ALARM's makepkg defaults to .pkg.tar.xz; accept either compression
+		IPTSD_PKG="$(find "$WORK/ci/iptsd-sl7" \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) | head -n 1)"
+		[ -n "$IPTSD_PKG" ] || die "downloaded iptsd artifact has no pkg.tar.zst or pkg.tar.xz"
 	fi
 }
 
@@ -721,9 +722,14 @@ stage_kernel() {
 	cp "$kd/dtbs/x1e80100-microsoft-romulus13.dtb" "$kd/dtbs/x1e80100-microsoft-romulus15.dtb" "$STAGE/sl7boot/"
 	write_boot_entries "$ver"
 	if [ -n "$IPTSD_PKG" ]; then
-		tar --zstd -tf "$IPTSD_PKG" | grep -qx 'usr/bin/iptsd' || die "$IPTSD_PKG does not contain usr/bin/iptsd"
-		if tar --zstd -tf "$IPTSD_PKG" | grep -qE '\.(mbn|jsn)$|_dtbs\.elf$'; then die "firmware inside $IPTSD_PKG"; fi
-		cp "$IPTSD_PKG" "$STAGE/sl7test/iptsd-sl7.pkg.tar.zst"
+		# GNU tar detects the compression on read
+		tar -tf "$IPTSD_PKG" | grep -qx 'usr/bin/iptsd' || die "$IPTSD_PKG does not contain usr/bin/iptsd"
+		if tar -tf "$IPTSD_PKG" | grep -qE '\.(mbn|jsn)$|_dtbs\.elf$'; then die "firmware inside $IPTSD_PKG"; fi
+		# the guide expects a zstd package; recompress an .xz one when staging
+		case "$IPTSD_PKG" in
+		*.pkg.tar.xz) xz -dc "$IPTSD_PKG" | zstd -q -o "$STAGE/sl7test/iptsd-sl7.pkg.tar.zst" ;;
+		*) cp "$IPTSD_PKG" "$STAGE/sl7test/iptsd-sl7.pkg.tar.zst" ;;
+		esac
 	else
 		echo "    no --iptsd-pkg: the guide will skip the touchpad (iptsd) test"
 	fi
