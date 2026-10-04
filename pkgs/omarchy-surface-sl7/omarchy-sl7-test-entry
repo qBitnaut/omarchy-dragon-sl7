@@ -1,0 +1,302 @@
+#!/bin/bash
+# Optional extra Limine menu entries for kernel experiments: the normal
+# linux-sl7 UKI entry with extra kernel parameters appended to its cmdline,
+# named "linux-sl7 (<NAME> test)". The normal entry, default_entry and
+# BOOT_ORDER are never changed; pick the normal entry on the next boot to go
+# back.
+#
+#   omarchy-sl7-test-entry enable NAME [PARAMS...]   add the entry
+#   omarchy-sl7-test-entry disable NAME              remove the entry
+#   omarchy-sl7-test-entry list                      presets and entries
+#   omarchy-sl7-test-entry status [NAME]
+#
+# Presets (PARAMS default to the preset's own):
+#   psr   msm.psr_enabled=1   eDP Panel Self Refresh. KNOWN BROKEN on the
+#                             Sharp LQ138P1JX61: the panel goes black when
+#                             idle and only returns when something paints.
+#   vrr   msm.vrr_enabled=1   EXPERIMENTAL eDP variable refresh (24-120 Hz,
+#                             linux-sl7 patch 0024). Needs misc.vrr in
+#                             Hyprland at runtime (see the README).
+# Any other NAME (lowercase letters, digits, dashes) needs PARAMS.
+#
+# limine-entry-tool has no per-entry cmdline variants and rewrites limine.conf
+# on every UKI rebuild, so each entry is generated from the live linux-sl7
+# entry (same UKI path and hash, same cmdline) and re-inserted by
+# /etc/boot/hooks/post.d/80-omarchy-sl7-test-entry (a limine-entry-tool post
+# hook; it runs before 90-limine-enroll-config). All disabled by default.
+set -euo pipefail
+
+state_dir=${OMARCHY_SL7_TEST_STATE_DIR:-/etc/omarchy-surface-sl7/test-entries}
+# State file of the old omarchy-sl7-psr-entry (still honoured as "psr").
+legacy_psr=${OMARCHY_SL7_PSR_STATE:-/etc/omarchy-surface-sl7/psr-entry.enabled}
+limine_default=${OMARCHY_SL7_LIMINE_DEFAULT:-/etc/default/limine}
+export source_id=linux-sl7
+tag_new="### BEGIN omarchy-sl7-test-entry "
+tag_old="### BEGIN omarchy-sl7-psr-entry"
+export tag_new tag_old
+
+usage() {
+  echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME]" >&2
+  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), vrr (msm.vrr_enabled=1, EXPERIMENTAL)" >&2
+  exit 2
+}
+
+preset_params() {
+  case $1 in
+    psr) echo "msm.psr_enabled=1" ;;
+    vrr) echo "msm.vrr_enabled=1" ;;
+  esac
+}
+
+preset_note() {
+  case $1 in
+    psr) echo "KNOWN BROKEN: the panel turns off when idle and returns only when something paints" ;;
+    vrr) echo "EXPERIMENTAL: eDP variable refresh; also needs misc.vrr in Hyprland" ;;
+  esac
+}
+
+valid_name() { [[ ${1:-} =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
+
+entry_title() { echo "linux-sl7 ($(tr '[:lower:]' '[:upper:]' <<<"$1") test)"; }
+
+find_conf() {
+  local esp c
+  if [[ -n ${OMARCHY_SL7_LIMINE_CONF:-} ]]; then
+    echo "$OMARCHY_SL7_LIMINE_CONF"
+    return 0
+  fi
+  esp=$(sed -n -E 's/^[[:space:]]*ESP_PATH="?([^"]*)"?.*/\1/p' "$limine_default" 2>/dev/null | tail -n 1 || true)
+  for c in ${esp:+"$esp/limine.conf"} /boot/limine.conf /efi/limine.conf /boot/efi/limine.conf /limine/limine.conf; do
+    [[ -f $c ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# Enabled entries, one "NAME<TAB>PARAMS" per line, sorted by name.
+enabled_entries() {
+  {
+    local f n p
+    if [[ -d $state_dir ]]; then
+      for f in "$state_dir"/*; do
+        [[ -f $f ]] || continue
+        n=${f##*/}
+        valid_name "$n" || continue
+        p=$(head -n 1 "$f")
+        [[ -n $p ]] || p=$(preset_params "$n")
+        [[ -n $p ]] && printf '%s\t%s\n' "$n" "$p"
+      done
+    fi
+    if [[ -e $legacy_psr && ! -e $state_dir/psr ]]; then
+      printf 'psr\t%s\n' "$(preset_params psr)"
+    fi
+  } | sort
+}
+
+is_enabled() { enabled_entries | cut -f1 | grep -qx -- "$1"; }
+
+# stdin: limine.conf; stdout: the same without any of our blocks (including
+# the old omarchy-sl7-psr-entry one).
+strip_block() {
+  awk '
+    index($0, ENVIRON["tag_new"]) == 1 || index($0, ENVIRON["tag_old"]) == 1 { skip = 1; next }
+    skip && (index($0, "### END omarchy-sl7-test-entry") == 1 || index($0, "### END omarchy-sl7-psr-entry") == 1) { skip = 0; next }
+    !skip { print }'
+}
+
+# stdin: limine.conf; stdout: with the entry (env: entry_name, param, tag)
+# inserted directly after the linux-sl7 entry, so every entry before it (and
+# so default_entry) keeps its position. Prints nothing and exits 3 when the
+# linux-sl7 entry (comment: kernel-id=linux-sl7) is absent.
+insert_block() {
+  awk '
+    function is_header(l) { return l ~ /^[ \t]*\/+[^\/]/ }
+    { line[NR] = $0; if (is_header($0)) hdr[++nh] = NR }
+    END {
+      s = 0
+      for (h = 1; h <= nh && !s; h++) {
+        last = (h < nh) ? hdr[h + 1] - 1 : NR
+        # Our own generated blocks end the entry they follow.
+        for (i = hdr[h] + 1; i <= last; i++)
+          if (index(line[i], ENVIRON["tag_new"]) == 1 || index(line[i], ENVIRON["tag_old"]) == 1) { last = i - 1; break }
+        for (i = hdr[h] + 1; i <= last; i++)
+          if (line[i] ~ ("^[ \t]*comment:[ \t]*kernel-id=" ENVIRON["source_id"] "[ \t]*$")) { s = hdr[h]; e = last }
+      }
+      if (!s) exit 3
+      for (n = e; n > s && line[n] ~ /^[ \t]*$/; n--) ;
+      for (i = 1; i <= n; i++) print line[i]
+      print ENVIRON["tag_new"] ENVIRON["tag"] " (generated; omarchy-sl7-test-entry disable " ENVIRON["tag"] " removes it)"
+      match(line[s], /^[ \t]*\/+/)
+      print substr(line[s], 1, RLENGTH) ENVIRON["entry_name"]
+      match(line[s + 1], /^[ \t]*/)
+      ind = substr(line[s + 1], 1, RLENGTH)
+      print ind "comment: Kernel test entry (" ENVIRON["param"] ")"
+      cmd = 0
+      for (i = s + 1; i <= n; i++) {
+        l = line[i]
+        if (l ~ /^[ \t]*comment:[ \t]*(kernel-id=|Kernel version:)/ || l ~ /^[ \t]*###/) continue
+        if (l ~ /^[ \t]*(kernel_)?cmdline:/) { sub(/[ \t]+$/, "", l); l = l " " ENVIRON["param"]; cmd = 1 }
+        print l
+      }
+      if (!cmd) print ind "cmdline: " ENVIRON["param"]
+      print "### END omarchy-sl7-test-entry " ENVIRON["tag"]
+      for (i = n + 1; i <= NR; i++) print line[i]
+    }'
+}
+
+# Rewrite $1 from stdin only if the content changed (the ESP is FAT32: no
+# pointless writes). Same-directory temp file + rename.
+write_conf() {
+  local conf=$1 tmp
+  tmp=$(mktemp "$conf.XXXXXX")
+  cat >"$tmp"
+  if cmp -s "$tmp" "$conf"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod --reference="$conf" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+  mv -f "$tmp" "$conf"
+}
+
+# Apply the enabled set to limine.conf. Returns 0 on success, 1 on failure.
+apply() {
+  local conf work rc=0 name param entries n=0
+  if ! conf=$(find_conf); then
+    echo "omarchy-sl7-test-entry: limine.conf not found; nothing to do" >&2
+    return 1
+  fi
+  work=$(mktemp)
+  strip_block <"$conf" >"$work"
+  # Reverse name order: each block lands right after linux-sl7, so the menu
+  # ends up sorted by name.
+  entries=$(enabled_entries | sort -r)
+  while IFS=$'\t' read -r name param; do
+    [[ -n $name ]] || continue
+    rc=0
+    entry_name=$(entry_title "$name") param=$param tag=$name insert_block <"$work" >"$work.new" || rc=$?
+    if ((rc)); then
+      rm -f "$work" "$work.new"
+      echo "omarchy-sl7-test-entry: no linux-sl7 entry (comment: kernel-id=$source_id) in $conf; entries not added" >&2
+      return 1
+    fi
+    mv -f "$work.new" "$work"
+    n=$((n + 1))
+  done <<<"$entries"
+  if write_conf "$conf" <"$work"; then
+    echo "omarchy-sl7-test-entry: $conf updated ($n test entries present)"
+  fi
+  rm -f "$work"
+  return 0
+}
+
+# A changed limine.conf must be re-enrolled when config enrollment is on, or
+# Limine refuses to boot. (The post hook needs no extra step: 90-limine-enroll-
+# config runs after it.)
+reenroll() {
+  if grep -Eq '^[[:space:]]*ENABLE_ENROLL_LIMINE_CONFIG="?yes' "$limine_default" 2>/dev/null &&
+    command -v limine-enroll-config >/dev/null 2>&1; then
+    limine-enroll-config
+  fi
+}
+
+need_root() {
+  if ((EUID != 0)) && [[ -z ${OMARCHY_SL7_TEST_STATE_DIR:-} ]]; then
+    exec sudo "$0" "$@"
+  fi
+}
+
+running_state() { # NAME PARAMS
+  local p
+  for p in $2; do
+    grep -qw -- "$p" "${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}" 2>/dev/null || {
+      echo "this boot: not the $1 test entry (missing $p on the running cmdline)"
+      return
+    }
+  done
+  echo "this boot: $1 test entry ($2 on the running cmdline)"
+}
+
+status_one() { # NAME PARAMS
+  local name=$1 params=$2 conf note
+  note=$(preset_note "$name")
+  if is_enabled "$name"; then echo "$name test entry: enabled ($params)"; else echo "$name test entry: disabled"; fi
+  [[ -n $note ]] && echo "  note: $note"
+  if conf=$(find_conf); then
+    if grep -qF "$tag_new$name " "$conf" 2>/dev/null; then
+      echo "limine.conf ($conf): entry present"
+      awk -v b="$tag_new$name " -v e="### END omarchy-sl7-test-entry $name" '
+        $0 == e { exit }
+        f && /cmdline:/ { sub(/^[ \t]+/, "  "); print }
+        index($0, b) == 1 { f = 1 }' "$conf"
+    else
+      echo "limine.conf ($conf): entry absent"
+    fi
+  else
+    echo "limine.conf: not found (cannot read /boot as this user?)"
+  fi
+  [[ -n $params ]] && running_state "$name" "$params"
+  return 0
+}
+
+cmd=${1:-}
+case $cmd in
+  --hook)
+    # Called by the limine-entry-tool post hook. Never fatal (exit < 100).
+    apply || exit 1
+    ;;
+  enable)
+    need_root "$@"
+    name=${2:-}
+    valid_name "$name" || usage
+    shift 2
+    params=$*
+    [[ -n $params ]] || params=$(preset_params "$name")
+    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, vrr); give PARAMS" >&2; exit 2; }
+    [[ $params =~ ^[A-Za-z0-9._=:,/+-]+( [A-Za-z0-9._=:,/+-]+)*$ ]] || { echo "omarchy-sl7-test-entry: unsafe characters in PARAMS" >&2; exit 2; }
+    mkdir -p "$state_dir"
+    sf="${state_dir:?}/${name:?}"
+    prev=$(cat "$sf" 2>/dev/null || true)
+    printf '%s\n' "$params" >"$sf"
+    if ! apply; then
+      if [[ -n $prev ]]; then printf '%s\n' "$prev" >"$sf"; else rm -f "$sf"; fi
+      exit 1
+    fi
+    reenroll
+    note=$(preset_note "$name")
+    [[ -n $note ]] && echo "NOTE: $note"
+    echo "Reboot and choose '$(entry_title "$name")' in the Limine menu. The default entry is unchanged."
+    ;;
+  disable)
+    need_root "$@"
+    name=${2:-}
+    valid_name "$name" || usage
+    rm -f "${state_dir:?}/${name:?}"
+    [[ $name == psr ]] && rm -f "${legacy_psr:?}"
+    apply || true
+    reenroll
+    ;;
+  list)
+    for p in psr vrr; do
+      if is_enabled "$p"; then s=enabled; else s=disabled; fi
+      printf '%-4s %-8s %s  [%s]\n' "$p" "$s" "$(preset_params "$p")" "$(preset_note "$p")"
+    done
+    while IFS=$'\t' read -r name params; do
+      [[ -n $name ]] || continue
+      [[ -n $(preset_params "$name") ]] || printf '%-4s %-8s %s\n' "$name" enabled "$params"
+    done < <(enabled_entries)
+    ;;
+  status)
+    if [[ -n ${2:-} ]]; then
+      valid_name "$2" || usage
+      p=$(preset_params "$2")
+      if [[ -z $p ]]; then p=$(enabled_entries | awk -F'\t' -v n="$2" '$1 == n { print $2 }'); fi
+      status_one "$2" "${p:-}"
+    else
+      status_one psr "$(preset_params psr)"
+      status_one vrr "$(preset_params vrr)"
+      while IFS=$'\t' read -r name params; do
+        [[ -n $name && -z $(preset_params "$name") ]] && status_one "$name" "$params"
+      done < <(enabled_entries)
+    fi
+    ;;
+  *) usage ;;
+esac

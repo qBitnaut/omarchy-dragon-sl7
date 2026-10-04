@@ -39,3 +39,6 @@
 
 # 7. ath12k rfkill hack
 0023-HACK-disable-rfkill-of-ath12k_pci.patch
+
+# 8. EXPERIMENTAL eDP VRR (default off, msm.vrr_enabled=1)
+0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch

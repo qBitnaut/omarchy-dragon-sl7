@@ -1,5 +1,0 @@
-#!/bin/sh
-# limine-entry-tool post hook: re-create the optional "linux-sl7 (PSR test)"
-# entry after limine.conf was rewritten (no-op unless enabled; removes a stale
-# block when disabled). See omarchy-sl7-psr-entry.
-exec /usr/bin/omarchy-sl7-psr-entry --hook

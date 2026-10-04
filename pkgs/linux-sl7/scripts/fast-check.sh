@@ -32,6 +32,7 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/firmware/arm_scmi/perf.o \
         drivers/power/supply/qcom_battmgr.o \
         drivers/usb/typec/mux/ps883x.o \
-        drivers/net/wireless/ath/ath12k/core.o
+        drivers/net/wireless/ath/ath12k/core.o \
+        drivers/gpu/drm/msm/
 fi
 echo "fast-check: OK"

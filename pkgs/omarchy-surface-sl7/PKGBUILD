@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=6
+pkgrel=7
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -69,7 +69,8 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'power.conf'
         'sl7-powertest'
         'omarchy-sl7-psr-entry'
-        '80-omarchy-sl7-psr-entry.post-hook')
+        'omarchy-sl7-test-entry'
+        '80-omarchy-sl7-test-entry.post-hook')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -85,7 +86,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            '7094ea2df049aa8027213964b4aac5ba4d4c08ede41065313df4411739a5fbc3'
+            'e57b53c1b1e06dca43ac32b5fd7d88a0b982ea8715d9db030b8bd0003c5caee0'
             '825fad0cedd4803b3abc0116613d55380f476beec6c2f845dcac3e7a3934ffae'
             'b2b08c6b796cc43f3b807b9c083bb906577edfa7027a588867f9488fa92a439c'
             '3712c804f49d6baceed7f2c387b1ae68001ee0139ddfe76cf755558026004b15'
@@ -95,7 +96,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '8839da1c1feff46362858c78f339cb97408ced71b059e3329a851c33b1958053'
+            '1e4e0ca65a22acde76245b343a6a58b5c29140a2e85f7c027a14e81adde9becf'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -104,13 +105,14 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '796d977f39d10441bdd32a2c44377241697d7fba6a34b25cb01a4f835f709dd1'
             'd002cab0467b46cc91db61494686e21347d0d05e7be67695d387f86b3b5bae24'
             '6ac11a2da8156315c769d10df8efcaffff2a8be44cc92c830bda3a2fb1a7c588'
-            'def492a17106aa0c66f1c74087f8404bb7012144f1bdfe69295f6d8fcc9f355d'
+            '6dc205ff6d9a2b6e178e8fa35a3971ac40bd817254c02b7a03339d58c5998a28'
             '5e3c6ab285f06d1564b51f978156f9e2fe6cf21e5c25db2013720b2fe5f581d0'
             '43be05503a70fa3badf65785b9230d5997a23f1b9f93ff380a8f77fd63951d76'
-            'ad7145f730df460a8c2df826ea49125366e9105536fe6504f5116897b7ed4a98'
+            '78de7f9ba5c67160e4f65a8b622d05b192003817c279280449cadb5a6a715571'
             '1e01dc25d19bcf37ddcf5de66de3c7e2757dd0db22e0717a8ed90a99caae6170'
-            'd4f0669300a2a964740bcaca50b49afbdcdd8ba8fbd8cd7c3883393622a4e619'
-            '88ada755317fba3e84ebe74f32efcd8324b1f9b5ce0bc0656e5e0eb6c32fc710')
+            '345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff'
+            '7d581d1a019e6658c61598b5c72c6bb5c4c70fd0c9fdd1294eed652d41a558f7'
+            '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -206,11 +208,14 @@ package() {
   # 8c. measurement harness
   install -Dm755 sl7-powertest "$pkgdir/usr/bin/sl7-powertest"
 
-  # 8d. optional PSR test boot entry (disabled until `omarchy-sl7-psr-entry enable`):
-  # the post hook re-creates it after limine-entry-tool rewrites limine.conf
+  # 8d. optional kernel test boot entries (PSR: known broken, VRR: experimental;
+  # disabled until `omarchy-sl7-test-entry enable NAME`): the post hook
+  # re-creates them after limine-entry-tool rewrites limine.conf.
+  # omarchy-sl7-psr-entry is a wrapper kept for the old command name.
+  install -Dm755 omarchy-sl7-test-entry "$pkgdir/usr/bin/omarchy-sl7-test-entry"
   install -Dm755 omarchy-sl7-psr-entry "$pkgdir/usr/bin/omarchy-sl7-psr-entry"
-  install -Dm755 80-omarchy-sl7-psr-entry.post-hook \
-    "$pkgdir/etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry"
+  install -Dm755 80-omarchy-sl7-test-entry.post-hook \
+    "$pkgdir/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry"
 
   # 9. omarchy-sl7 package repository: config, the script that keeps it Included
   # above [core]/[alarm]/[omarchy], its pacman hook and boot service, and the

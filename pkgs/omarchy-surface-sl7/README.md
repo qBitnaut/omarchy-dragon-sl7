@@ -26,7 +26,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest` |
-| 8d | optional PSR test boot entry (off by default) | `/usr/bin/omarchy-sl7-psr-entry`, `/etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry` |
+| 8d | optional kernel test boot entries, PSR (known broken) and VRR (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
 
@@ -179,7 +179,9 @@ use this tool for the SL7.
   battery and back to the original rate on AC with `hyprctl eval hl.monitor(...)`
   (`hyprctl keyword` does not work with the Lua parser). It never edits `monitors.lua`. It
   re-applies after a config reload, which would otherwise undo the 60 Hz mode. Animations and
-  blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). Omarchy has no
+  blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). Only when
+  booted through the VRR test entry (section 11b) it also sets Hyprland's `misc.vrr`
+  (`HYPRLAND_VRR`). Omarchy has no
   hook for its own `omarchy-powerprofiles-set`, which only calls power-profiles-daemon (no
   backend on ARM), so this runs beside it on the same signal and does not change the PPD
   profile. Restart the user part after editing the config:
@@ -207,50 +209,81 @@ negative `power_now` absolute. Remove both files and their PKGBUILD lines when #
 Read-only check (`/usr/bin/sl7-doctor`): running kernel and DT, 3 cpufreq policies, SAM
 modules in the initramfs, firmware, iptsd units, `BOOT_ORDER`, uki.conf, no active
 `surface_device_modules.conf`, Pro Audio guard, and the power mode (current source, caps
-applied, whether they match the source), and PSR state (`msm.psr_enabled`, whether this boot
-used the PSR test entry, PSR debugfs nodes and dmesg lines when readable; informational only).
+applied, whether they match the source), PSR state (`msm.psr_enabled`, whether this boot
+used the PSR test entry, PSR debugfs nodes and dmesg lines when readable; informational only)
+and VRR state (`msm.vrr_enabled`, whether this boot used the VRR test entry, the eDP
+`vrr_capable` property from `modetest`, debugfs `vrr_enabled`, Hyprland's `vrr`; read-only).
 Exit 1 on any failure.
 
-### 11b. Optional: eDP Panel Self Refresh test entry (`omarchy-sl7-psr-entry`)
+### 11b. Optional kernel test entries (`omarchy-sl7-test-entry`)
 
-The Sharp LQ138P1JX61 reports PSR1 support (eDP DPCD 0x070 = 01). `msm.psr_enabled=1` is not
-in the normal command line because PSR can flicker or freeze on some panels. This adds a
-second Limine entry, "linux-sl7 (PSR test)", that boots the same UKI with that parameter
-added; the default entry, `default_entry` and `BOOT_ORDER` are never touched. Disabled by
-default.
+Extra Limine entries that boot the same UKI with extra kernel parameters, for experiments that
+must not be in the normal command line. The default entry, `default_entry` and `BOOT_ORDER` are
+never touched. All are disabled by default.
 
 ```
-sudo omarchy-sl7-psr-entry enable    # add the entry
-omarchy-sl7-psr-entry status
-sudo omarchy-sl7-psr-entry disable   # remove it
+sudo omarchy-sl7-test-entry enable psr|vrr|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
+sudo omarchy-sl7-test-entry disable NAME                      # remove it
+omarchy-sl7-test-entry list                                   # presets and entries
+omarchy-sl7-test-entry status [NAME]
 ```
+
+Presets: `psr` = `msm.psr_enabled=1`, `vrr` = `msm.vrr_enabled=1`. Any other NAME needs PARAMS.
+`omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset, and the
+old `psr-entry.enabled` state file is honoured).
 
 How it works: limine-entry-tool has no per-entry command line variants, and it rewrites
-`limine.conf` on every UKI rebuild. So `omarchy-sl7-psr-entry` copies the live linux-sl7 entry
-(same UKI path and hash, same `cmdline:`) into a marked block
-(`### BEGIN/END omarchy-sl7-psr-entry`) directly after it, with `msm.psr_enabled=1` appended.
-`/etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry` (a limine-entry-tool post hook; it runs
-before `90-limine-enroll-config`) re-creates the block after every regeneration, so the hash
+`limine.conf` on every UKI rebuild. So `omarchy-sl7-test-entry` copies the live linux-sl7 entry
+(same UKI path and hash, same `cmdline:`) into marked blocks
+(`### BEGIN/END omarchy-sl7-test-entry NAME`) directly after it, with the parameters appended.
+`/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` (a limine-entry-tool post hook; it runs
+before `90-limine-enroll-config`) re-creates the blocks after every regeneration, so the hash
 and cmdline stay in sync. The `cmdline:` line overrides the UKI's embedded command line
 through systemd-stub load options, which it honours while Secure Boot is off (the SL7 setup).
-If the override were ignored, `sl7-doctor` shows "normal boot entry" after choosing the PSR
+If the override were ignored, `sl7-doctor` shows "normal boot entry" after choosing a test
 entry. If `ENABLE_ENROLL_LIMINE_CONFIG=yes`, `enable`/`disable` re-enroll the config.
 
-Fallback if the entry misbehaves: in the Limine menu press `e` on the normal entry and append
-` msm.psr_enabled=1` to the cmdline for one boot (the editor is disabled when a config hash is
+Fallback if an entry misbehaves: in the Limine menu press `e` on the normal entry and append
+the parameter to the cmdline for one boot (the editor is disabled when a config hash is
 enrolled).
 
-Test procedure:
+#### PSR (`psr`): KNOWN BROKEN
 
-1. `sudo omarchy-sl7-psr-entry enable`, reboot, pick "linux-sl7 (PSR test)".
-2. `sl7-doctor` must show `msm.psr_enabled=1` (running kernel) and "booted via the PSR test entry".
-3. Use the machine normally for 10 minutes; watch for flicker, freezes, cursor lag.
-4. On battery: `sl7-powertest idle --minutes 20 --label psr`.
-5. Reboot into the normal entry and run `sl7-powertest idle --minutes 20 --label normal`, then
-   `sl7-powertest compare ~/.local/state/sl7-powertest/*-normal.jsonl ~/.local/state/sl7-powertest/*-psr.jsonl`.
-6. Good: add `KERNEL_CMDLINE[default]+=" msm.psr_enabled=1"` to a drop-in in
-   `/etc/limine-entry-tool.d/`, run `limine-mkinitcpio`, then `sudo omarchy-sl7-psr-entry disable`.
-   Not good: `sudo omarchy-sl7-psr-entry disable` and boot the normal entry.
+The Sharp LQ138P1JX61 reports PSR1 support (eDP DPCD 0x070 = 01), but with `msm.psr_enabled=1`
+the panel turns off (black) when the screen is idle and comes back only when something paints.
+Tested on real hardware via the "linux-sl7 (PSR test)" entry. Do not enable PSR in the normal
+command line. The entry stays only to retest after a kernel update.
+
+#### VRR (`vrr`): EXPERIMENTAL
+
+linux-sl7 patch 0024 (scuggo's `msm-vrr-avr.patch`, rebased) adds eDP variable refresh to the
+msm driver: the eDP connector gets `vrr_capable`, the DPU INTF Adaptive Refresh block is
+programmed for the EDID range (24-120 Hz) and the DP link sets MSA timing ignore. All of it is
+behind `msm.vrr_enabled`, default 0, so a normal boot behaves exactly as before. Needs
+linux-sl7 `7.2.8-2` or later.
+
+Test steps:
+
+1. `sudo omarchy-sl7-test-entry enable vrr`, reboot, pick "linux-sl7 (VRR test)".
+2. `sl7-doctor` must show `msm.vrr_enabled=1` (running kernel), "booted via the VRR test
+   entry" and `eDP vrr_capable=1`. With `vrr_capable=0` or missing, stop: the kernel did not
+   expose VRR (check `dmesg | grep -i -E 'dp|dpu|msm'`).
+3. Hyprland needs VRR on at runtime (`misc.vrr`: 0 off, 1 always, 2 fullscreen only). The
+   power mode user service does this by itself on this entry (`HYPRLAND_VRR=1` in `power.conf`;
+   empty or 0 to disable). By hand:
+   `hyprctl eval 'hl.config({ misc = { vrr = 1 } })'` (back: `vrr = 0`). It is a runtime
+   setting, never written to your config.
+4. Observe: `hyprctl monitors -j | jq '.[] | {name, vrr, refreshRate}'` (`vrr` is true while
+   active; `refreshRate` is the current mode rate, so it does not show the instantaneous VRR
+   rate), and as root `grep -r vrr_enabled /sys/kernel/debug/dri/*/state`. Run something that
+   renders at a varying rate (a game, `mpv` video, `glxgears` unthrottled) and watch for
+   tearing-free, steady output. `sl7-doctor` prints all of these.
+5. Look for: flicker or brightness pulsing at low rates (the panel can drop to 24 Hz), black
+   frames or blanking (link problems; check `dmesg`), cursor lag, resume failures.
+6. Power: on battery, `sl7-powertest idle --minutes 20 --label vrr`, then the same from the
+   normal entry with `--label normal`, then `sl7-powertest compare ...-normal.jsonl ...-vrr.jsonl`
+   (VRR does not lower an idle desktop's refresh by itself; the gain is for varying content).
+7. Done: `sudo omarchy-sl7-test-entry disable vrr` and boot the normal entry.
 
 ### 12. Measuring power: `sl7-powertest`
 

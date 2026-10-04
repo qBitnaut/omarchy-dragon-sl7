@@ -1,0 +1,364 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: scuggo <scuggo@users.noreply.github.com>
+Date: Fri, 29 May 2026 21:59:52 +0400
+Subject: [PATCH] EXPERIMENTAL: drm/msm: eDP variable refresh (AVR) behind msm.vrr_enabled
+
+Expose "vrr_capable" on the eDP connector and program the DPU INTF
+Adaptive Refresh (AVR) block so the panel can run its EDID monitor range
+(24-120 Hz on the Sharp LQ138P1JX61) instead of a fixed rate:
+
+ - dpu_9_2_x1e80100.h: DPU_INTF_AVR feature bit on the DP/eDP INTFs
+ - dpu_hw_intf.c/.h: setup_avr (INTF_AVR_VTOTAL from the monitor minimum
+   frequency), avr_ctrl (INTF_AVR_CONTROL/MODE), avr_trigger
+ - dpu_encoder*.c: carry vrr_enabled/vrr_min_fps to the video encoder,
+   program AVR at timing setup and trigger it at enable
+ - dpu_crtc.c: VRR_ENABLED changes force a modeset
+ - dp_ctrl.c: set MSA_TIMING_PAR_IGNORE_EN in DOWNSPREAD_CTRL when the
+   sink advertises MSA_TIMING_PAR_IGNORED (DPCD 0x007 bit 6)
+ - dp_drm.c/dp_panel.c: attach and set "vrr_capable" from the EDID range
+
+Adapted from scuggo's msm-vrr-avr.patch for Linux 7.2.8: all hunks apply,
+the dp_drm.c hunk was rebased, and everything is gated behind a new module
+parameter, msm.vrr_enabled (default 0, read-only at runtime). With the
+default the kernel behaves as before: no vrr_capable property, no MSA
+ignore, no AVR programming. The patch is untested by upstream on this
+panel; expect rough edges (see the omarchy-sl7-test-entry VRR preset).
+
+Origin: https://github.com/scuggo/x1e-nixos kernel/modules/msm-vrr/msm-vrr-avr.patch (HEAD ca7db70, 2026-07-01); scuggo (GPL-2.0 kernel patch)
+Upstream-Status: Inappropriate (experimental; mainline msm has no vrr_capable for these DPUs, the msm.vrr_enabled gate is local)
+
+---
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_9_2_x1e80100.h b/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_9_2_x1e80100.h
+index 7b3febf..6aeb398 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_9_2_x1e80100.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_9_2_x1e80100.h
+@@ -312,6 +312,7 @@ static const struct dpu_intf_cfg x1e80100_intf[] = {
+ 		.prog_fetch_lines_worst_case = 24,
+ 		.intr_underrun = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 24),
+ 		.intr_vsync = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 25),
++		.features = BIT(DPU_INTF_AVR),
+ 	}, {
+ 		.name = "intf_1", .id = INTF_1,
+ 		.base = 0x35000, .len = 0x300,
+@@ -346,6 +347,7 @@ static const struct dpu_intf_cfg x1e80100_intf[] = {
+ 		.prog_fetch_lines_worst_case = 24,
+ 		.intr_underrun = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 20),
+ 		.intr_vsync = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 21),
++		.features = BIT(DPU_INTF_AVR),
+ 	}, {
+ 		.name = "intf_5", .id = INTF_5,
+ 		.base = 0x39000, .len = 0x280,
+@@ -354,6 +356,7 @@ static const struct dpu_intf_cfg x1e80100_intf[] = {
+ 		.prog_fetch_lines_worst_case = 24,
+ 		.intr_underrun = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 22),
+ 		.intr_vsync = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 23),
++		.features = BIT(DPU_INTF_AVR),
+ 	}, {
+ 		.name = "intf_6", .id = INTF_6,
+ 		.base = 0x3A000, .len = 0x280,
+@@ -362,6 +365,7 @@ static const struct dpu_intf_cfg x1e80100_intf[] = {
+ 		.prog_fetch_lines_worst_case = 24,
+ 		.intr_underrun = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 16),
+ 		.intr_vsync = DPU_IRQ_IDX(MDP_SSPP_TOP0_INTR, 17),
++		.features = BIT(DPU_INTF_AVR),
+ 	}, {
+ 		.name = "intf_7", .id = INTF_7,
+ 		.base = 0x3b000, .len = 0x280,
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+index 42d0a52..897ddf8 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c
+@@ -1516,6 +1516,9 @@ int dpu_crtc_check_mode_changed(struct drm_crtc_state *old_crtc_state,
+ 	    (!clone_mode_requested && clone_mode_enabled))
+ 		new_crtc_state->mode_changed = true;
+ 
++	if (new_crtc_state->vrr_enabled != old_crtc_state->vrr_enabled)
++		new_crtc_state->mode_changed = true;
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 1f20695..85583d2 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -1267,6 +1267,20 @@ static void dpu_encoder_virt_atomic_mode_set(struct drm_encoder *drm_enc,
+ 		}
+ 
+ 		phys->cached_mode = crtc_state->adjusted_mode;
++
++		phys->vrr_enabled = false;
++		phys->vrr_min_fps = 0;
++		if (msm_vrr_enabled && crtc_state->vrr_enabled && conn_state->connector) {
++			const struct drm_monitor_range_info *range =
++				&conn_state->connector->display_info.monitor_range;
++			u32 mode_fps = drm_mode_vrefresh(&crtc_state->adjusted_mode);
++
++			if (range->min_vfreq && range->min_vfreq < mode_fps) {
++				phys->vrr_enabled = true;
++				phys->vrr_min_fps = range->min_vfreq;
++			}
++		}
++
+ 		if (phys->ops.atomic_mode_set)
+ 			phys->ops.atomic_mode_set(phys, crtc_state, conn_state);
+ 	}
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h
+index 61b22d9..2aa5958 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys.h
+@@ -198,6 +198,8 @@ struct dpu_encoder_phys {
+ 	wait_queue_head_t pending_kickoff_wq;
+ 	unsigned int irq[INTR_IDX_MAX];
+ 	bool has_intf_te;
++	bool vrr_enabled;
++	u32 vrr_min_fps;
+ };
+ 
+ static inline int dpu_encoder_phys_inc_pending(struct dpu_encoder_phys *phys)
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index ba810f2..ba3a766 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -316,6 +316,18 @@ static void dpu_encoder_phys_vid_setup_timing_engine(
+ 	spin_lock_irqsave(phys_enc->enc_spinlock, lock_flags);
+ 	phys_enc->hw_intf->ops.setup_timing_gen(phys_enc->hw_intf,
+ 			&timing_params, fmt);
++
++	if (phys_enc->vrr_enabled && phys_enc->hw_intf->ops.setup_avr) {
++		struct dpu_hw_intf_avr_params avr = {
++			.default_fps = drm_mode_vrefresh(&mode),
++			.min_fps = phys_enc->vrr_min_fps,
++		};
++
++		phys_enc->hw_intf->ops.setup_avr(phys_enc->hw_intf,
++				&timing_params, &avr);
++		phys_enc->hw_intf->ops.avr_ctrl(phys_enc->hw_intf, true, false);
++	}
++
+ 	phys_enc->hw_ctl->ops.setup_intf_cfg(phys_enc->hw_ctl, &intf_cfg);
+ 
+ 	/* setup which pp blk will connect to this intf */
+@@ -666,6 +678,9 @@ static void dpu_encoder_phys_vid_handle_post_kickoff(
+ 		spin_unlock_irqrestore(phys_enc->enc_spinlock, lock_flags);
+ 		phys_enc->enable_state = DPU_ENC_ENABLED;
+ 	}
++
++	if (phys_enc->vrr_enabled && phys_enc->hw_intf->ops.avr_trigger)
++		phys_enc->hw_intf->ops.avr_trigger(phys_enc->hw_intf);
+ }
+ 
+ static void dpu_encoder_phys_vid_irq_enable(struct dpu_encoder_phys *phys_enc)
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h
+index f45faf8..4a30437 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_catalog.h
+@@ -150,6 +150,11 @@ enum {
+ 	DPU_DSC_MAX
+ };
+ 
++enum {
++	DPU_INTF_AVR = 0x1,
++	DPU_INTF_MAX
++};
++
+ /**
+  * MACRO DPU_HW_BLK_INFO - information of HW blocks inside DPU
+  * @name:              string name for debug purposes
+@@ -519,6 +524,7 @@ struct dpu_intf_cfg  {
+ 	unsigned int intr_underrun;
+ 	unsigned int intr_vsync;
+ 	unsigned int intr_tear_rd_ptr;
++	unsigned long features;
+ };
+ 
+ /**
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+index ac82b69..2c65035 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+@@ -77,6 +77,9 @@
+ #define INTF_AVR_MODE                   0x274
+ #define INTF_AVR_TRIGGER                0x278
+ #define INTF_AVR_VTOTAL                 0x27C
++
++#define INTF_AVR_CONTROL_ENABLE         BIT(0)
++#define INTF_AVR_MODE_ONESHOT           (BIT(0) | BIT(8))
+ #define INTF_TEAR_MDP_VSYNC_SEL         0x280
+ #define INTF_TEAR_TEAR_CHECK_EN         0x284
+ #define INTF_TEAR_SYNC_CONFIG_VSYNC     0x288
+@@ -601,6 +604,47 @@ static void dpu_hw_intf_program_intf_cmd_cfg(struct dpu_hw_intf *intf,
+ 	DPU_REG_WRITE(&intf->hw, INTF_CONFIG2, intf_cfg2);
+ }
+ 
++static void dpu_hw_intf_setup_avr(struct dpu_hw_intf *intf,
++				  const struct dpu_hw_intf_timing_params *p,
++				  const struct dpu_hw_intf_avr_params *avr)
++{
++	struct dpu_hw_blk_reg_map *c = &intf->hw;
++	u32 hsync_period, vsync_period, add_porches = 0, avr_vtotal;
++	u32 diff_fps;
++
++	if (!avr->min_fps || !avr->default_fps || avr->min_fps > avr->default_fps)
++		return;
++
++	diff_fps = avr->default_fps - avr->min_fps;
++
++	hsync_period = p->hsync_pulse_width + p->h_back_porch +
++		       p->width + p->h_front_porch;
++	vsync_period = p->vsync_pulse_width + p->v_back_porch +
++		       p->height + p->v_front_porch;
++
++	if (diff_fps)
++		add_porches = mult_frac(vsync_period, diff_fps, avr->min_fps);
++
++	avr_vtotal = (vsync_period + add_porches) * hsync_period;
++
++	DPU_REG_WRITE(c, INTF_AVR_VTOTAL, avr_vtotal);
++}
++
++static void dpu_hw_intf_avr_ctrl(struct dpu_hw_intf *intf, bool enable, bool oneshot)
++{
++	struct dpu_hw_blk_reg_map *c = &intf->hw;
++	u32 avr_ctrl = enable ? INTF_AVR_CONTROL_ENABLE : 0;
++	u32 avr_mode = (enable && oneshot) ? INTF_AVR_MODE_ONESHOT : 0;
++
++	DPU_REG_WRITE(c, INTF_AVR_CONTROL, avr_ctrl);
++	DPU_REG_WRITE(c, INTF_AVR_MODE, avr_mode);
++}
++
++static void dpu_hw_intf_avr_trigger(struct dpu_hw_intf *intf)
++{
++	DPU_REG_WRITE(&intf->hw, INTF_AVR_TRIGGER, 0x1);
++}
++
+ /**
+  * dpu_hw_intf_init() - Initializes the INTF driver for the passed
+  * interface catalog entry.
+@@ -668,5 +712,11 @@ struct dpu_hw_intf *dpu_hw_intf_init(struct drm_device *dev,
+ 	if (mdss_rev->core_major_ver >= 7)
+ 		c->ops.program_intf_cmd_cfg = dpu_hw_intf_program_intf_cmd_cfg;
+ 
++	if (cfg->features & BIT(DPU_INTF_AVR)) {
++		c->ops.setup_avr = dpu_hw_intf_setup_avr;
++		c->ops.avr_ctrl = dpu_hw_intf_avr_ctrl;
++		c->ops.avr_trigger = dpu_hw_intf_avr_trigger;
++	}
++
+ 	return c;
+ }
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
+index badd263..734e8fc 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
+@@ -38,6 +38,11 @@ struct dpu_hw_intf_timing_params {
+ 	u32 dce_bytes_per_line;
+ };
+ 
++struct dpu_hw_intf_avr_params {
++	u32 default_fps;
++	u32 min_fps;
++};
++
+ struct dpu_hw_intf_prog_fetch {
+ 	u8 enable;
+ 	/* vsync counter for the front porch pixel line */
+@@ -112,6 +117,14 @@ struct dpu_hw_intf_ops {
+ 
+ 	void (*program_intf_cmd_cfg)(struct dpu_hw_intf *intf,
+ 				     struct dpu_hw_intf_cmd_mode_cfg *cmd_mode_cfg);
++
++	void (*setup_avr)(struct dpu_hw_intf *intf,
++			const struct dpu_hw_intf_timing_params *p,
++			const struct dpu_hw_intf_avr_params *avr);
++
++	void (*avr_ctrl)(struct dpu_hw_intf *intf, bool enable, bool oneshot);
++
++	void (*avr_trigger)(struct dpu_hw_intf *intf);
+ };
+ 
+ struct dpu_hw_intf {
+diff --git a/drivers/gpu/drm/msm/dp/dp_ctrl.c b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+index 9024abd..d042ca6 100644
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -21,6 +21,7 @@
+ #include <drm/drm_fixed.h>
+ #include <drm/drm_print.h>
+ 
++#include "msm_drv.h"
+ #include "dp_reg.h"
+ #include "dp_ctrl.h"
+ #include "dp_link.h"
+@@ -1639,6 +1640,9 @@ static int msm_dp_ctrl_link_train(struct msm_dp_ctrl_private *ctrl,
+ 	if (drm_dp_max_downspread(dpcd))
+ 		encoding[0] |= DP_SPREAD_AMP_0_5;
+ 
++	if (msm_vrr_enabled && (dpcd[DP_DOWN_STREAM_PORT_COUNT] & DP_MSA_TIMING_PAR_IGNORED))
++		encoding[0] |= DP_MSA_TIMING_PAR_IGNORE_EN;
++
+ 	/* config DOWNSPREAD_CTRL and MAIN_LINK_CHANNEL_CODING_SET */
+ 	drm_dp_dpcd_write(ctrl->aux, DP_DOWNSPREAD_CTRL, encoding, 2);
+ 
+diff --git a/drivers/gpu/drm/msm/dp/dp_drm.c b/drivers/gpu/drm/msm/dp/dp_drm.c
+index b659d22..cde2119 100644
+--- a/drivers/gpu/drm/msm/dp/dp_drm.c
++++ b/drivers/gpu/drm/msm/dp/dp_drm.c
+@@ -325,5 +325,8 @@ struct drm_connector *msm_dp_drm_connector_init(struct msm_dp *msm_dp_display,
+ 	if (!msm_dp_display->is_edp)
+ 		drm_connector_attach_dp_subconnector_property(connector);
+ 
++	if (msm_vrr_enabled && msm_dp_display->is_edp)
++		drm_connector_attach_vrr_capable_property(connector);
++
+ 	return connector;
+ }
+diff --git a/drivers/gpu/drm/msm/dp/dp_panel.c b/drivers/gpu/drm/msm/dp/dp_panel.c
+index 5b4954e..999900b 100644
+--- a/drivers/gpu/drm/msm/dp/dp_panel.c
++++ b/drivers/gpu/drm/msm/dp/dp_panel.c
+@@ -289,6 +289,17 @@ int msm_dp_panel_read_sink_caps(struct msm_dp_panel *msm_dp_panel,
+ 		}
+ 	}
+ 
++	if (connector->vrr_capable_property) {
++		const struct drm_monitor_range_info *range =
++			&connector->display_info.monitor_range;
++		bool capable = range->min_vfreq && range->max_vfreq &&
++			range->min_vfreq < range->max_vfreq &&
++			(msm_dp_panel->dpcd[DP_DOWN_STREAM_PORT_COUNT] &
++			 DP_MSA_TIMING_PAR_IGNORED);
++
++		drm_connector_set_vrr_capable_property(connector, capable);
++	}
++
+ end:
+ 	return rc;
+ }
+diff --git a/drivers/gpu/drm/msm/msm_drv.c b/drivers/gpu/drm/msm/msm_drv.c
+index fa46ab3..86fc9b2 100644
+--- a/drivers/gpu/drm/msm/msm_drv.c
++++ b/drivers/gpu/drm/msm/msm_drv.c
+@@ -50,6 +50,10 @@ bool dumpstate;
+ MODULE_PARM_DESC(dumpstate, "Dump KMS state on errors");
+ module_param(dumpstate, bool, 0600);
+ 
++bool msm_vrr_enabled;
++MODULE_PARM_DESC(vrr_enabled, "EXPERIMENTAL: eDP variable refresh (vrr_capable, DPU AVR, MSA ignore) (0=off (default), 1=on)");
++module_param_named(vrr_enabled, msm_vrr_enabled, bool, 0444);
++
+ static bool modeset = true;
+ MODULE_PARM_DESC(modeset, "Use kernel modesetting [KMS] (1=on (default), 0=disable)");
+ module_param(modeset, bool, 0600);
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+index 3d5679b..d60d174 100644
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -34,6 +34,7 @@
+ #include <drm/msm_drm.h>
+ #include <drm/drm_gem.h>
+ 
++extern bool msm_vrr_enabled;
+ extern struct fault_attr fail_gem_alloc;
+ extern struct fault_attr fail_gem_iova;
+ 

@@ -195,7 +195,8 @@ else
 fi
 
 # eDP Panel Self Refresh (optional "linux-sl7 (PSR test)" boot entry, see
-# omarchy-sl7-psr-entry). Informational only: PSR off is the normal state.
+# omarchy-sl7-test-entry). Informational only: PSR off is the normal state, and
+# PSR is KNOWN BROKEN on this panel (it turns black when idle).
 psr_param=${OMARCHY_SL7_MSM_PSR:-/sys/module/msm/parameters/psr_enabled}
 psr_cmdline=${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}
 if [[ -r $psr_param ]]; then
@@ -204,7 +205,7 @@ else
   printf 'INFO  PSR: msm.psr_enabled not exposed by the running kernel\n'
 fi
 if grep -qw 'msm.psr_enabled=1' "$psr_cmdline" 2>/dev/null; then
-  printf 'INFO  PSR: booted via the PSR test entry (msm.psr_enabled=1 on the cmdline)\n'
+  printf 'INFO  PSR: booted via the PSR test entry (msm.psr_enabled=1 on the cmdline); PSR is known broken on this panel (black screen when idle)\n'
 else
   printf 'INFO  PSR: normal boot entry (no msm.psr_enabled=1 on the cmdline)\n'
 fi
@@ -224,9 +225,49 @@ if [[ -r /dev/kmsg || -n ${OMARCHY_SL7_DMESG:-} ]]; then
   psr_log=$(${OMARCHY_SL7_DMESG:-dmesg} 2>/dev/null | grep -i -E 'psr|self.refresh' | tail -n 3 || true)
   [[ -n $psr_log ]] && while IFS= read -r line; do printf 'INFO  PSR dmesg: %s\n' "$line"; done <<<"$psr_log"
 fi
-psr_entry=${OMARCHY_SL7_PSR_ENTRY:-/usr/bin/omarchy-sl7-psr-entry}
-if [[ -x $psr_entry ]]; then
-  while IFS= read -r line; do printf 'INFO  PSR entry: %s\n' "$line"; done < <("$psr_entry" status 2>&1 | cut -c1-160 | head -n 4)
+test_entry=${OMARCHY_SL7_TEST_ENTRY:-/usr/bin/omarchy-sl7-test-entry}
+if [[ -x $test_entry ]]; then
+  while IFS= read -r line; do printf 'INFO  test entry: %s\n' "$line"; done < <("$test_entry" list 2>&1 | cut -c1-160 | head -n 6)
+fi
+
+# EXPERIMENTAL eDP variable refresh (linux-sl7 patch 0024, optional "linux-sl7
+# (VRR test)" boot entry). Read-only and informational: VRR off is the normal
+# state.
+vrr_param=${OMARCHY_SL7_MSM_VRR:-/sys/module/msm/parameters/vrr_enabled}
+if [[ -r $vrr_param ]]; then
+  printf 'INFO  VRR: msm.vrr_enabled=%s (running kernel)\n' "$(<"$vrr_param")"
+else
+  printf 'INFO  VRR: msm.vrr_enabled not exposed by the running kernel (no patch 0024)\n'
+fi
+if grep -qw 'msm.vrr_enabled=1' "$psr_cmdline" 2>/dev/null; then
+  printf 'INFO  VRR: booted via the VRR test entry (msm.vrr_enabled=1 on the cmdline)\n'
+else
+  printf 'INFO  VRR: normal boot entry (no msm.vrr_enabled=1 on the cmdline)\n'
+fi
+modetest=${OMARCHY_SL7_MODETEST:-modetest}
+if command -v "$modetest" >/dev/null 2>&1; then
+  vrr_cap=$("$modetest" -M msm -c 2>/dev/null | awk '
+    /^[0-9]+[ \t]+[0-9]+[ \t]+(connected|disconnected)/ { cur = ($0 ~ /eDP/); f = 0 }
+    cur && /vrr_capable/ { f = 1; next }
+    f && /value:/ { print $2; exit }') || true
+  if [[ -n $vrr_cap ]]; then
+    printf 'INFO  VRR: eDP vrr_capable=%s (modetest)\n' "$vrr_cap"
+  else
+    printf 'INFO  VRR: eDP connector exposes no vrr_capable property (modetest)\n'
+  fi
+else
+  printf 'INFO  VRR: modetest (libdrm) not installed; vrr_capable not checked\n'
+fi
+vrr_state=
+for f in "$dri_debugfs"/*/state; do
+  [[ -r $f ]] || continue
+  vrr_state=$(grep -h 'vrr_enabled' "$f" 2>/dev/null | sort | uniq -c | tr '\n' ' ' | tr -s ' ') || true
+  break
+done
+[[ -n $vrr_state ]] && printf 'INFO  VRR: debugfs state: %s\n' "$vrr_state"
+if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  vrr_hypr=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.name | startswith("eDP")) | "\(.name) vrr=\(.vrr) refresh=\(.refreshRate)"' 2>/dev/null | head -n 1) || true
+  [[ -n $vrr_hypr ]] && printf 'INFO  VRR: Hyprland %s (misc.vrr %s)\n' "$vrr_hypr" "$(hyprctl getoption misc:vrr -j 2>/dev/null | jq -r '.int // "?"' 2>/dev/null)"
 fi
 
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"

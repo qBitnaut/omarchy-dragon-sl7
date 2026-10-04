@@ -15,7 +15,7 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.8
-pkgrel=1
+pkgrel=2
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -52,13 +52,15 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0020-usb-typec-mux-ps883x-support-TYPEC_DP_STATE_F.patch'
         'patches/0021-usb-typec-mux-ps883x-add-a-delay-after-writing-confi.patch'
         'patches/0022-usb-typec-mux-ps883x-disable-USB4-on-incomplete-USB4.patch'
-        'patches/0023-HACK-disable-rfkill-of-ath12k_pci.patch')
+        'patches/0023-HACK-disable-rfkill-of-ath12k_pci.patch'
+        'patches/0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch')
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'b509067e26487f23795b30640bbfdff0afba0c48290f1100fe880c9bdf369776'
             'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
+         'SKIP'
          'SKIP'
          'SKIP'
          'SKIP'
