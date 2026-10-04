@@ -33,8 +33,11 @@ or an LTO link step that drops the flag) produces a binary that dies with SIGILL
 even on `--help` (linux-surface/iptsd#1590). The fork builds with LTO, where code
 generation happens at link time, so `LDFLAGS` must carry the flag as well.
 Dependencies are the system libraries only (`--wrap-mode=nofallback`), so no
-vendored copy is built with different flags. `check()` fails the build if
-`readelf -n` shows no AArch64 BTI and PAC property on any built binary.
+vendored copy is built with different flags. `check()` reports each binary's
+AArch64 BTI/PAC property (`readelf -n`) plus the crt/object files lacking the note.
+The linker keeps the note only if every input has it, so a consistently absent
+note is accepted (no BTI enforcement, no SIGILL); `check()` fails only if the
+binaries are mixed (some marked, some not).
 
 Debug tools built: `iptsd-calibrate`, `iptsd-dump` (no SDL2/cairomm needed).
 

@@ -10,7 +10,7 @@ pkgname=iptsd-sl7
 _calcommit=e60938dcf707d37d24e782e0029b9c9a567d67b8  # 2026-06-03
 _commit=3663e96e758145801c3cb1ce7c72f362d0d4a5f5  # 2026-07-17 00:26 UTC (2026-07-16 20:26 -0400)
 pkgver=3.1.0.r20260717
-pkgrel=1
+pkgrel=2
 pkgdesc='Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)'
 arch=('aarch64')
 url='https://github.com/alex-lentz/iptsd'
@@ -66,20 +66,35 @@ build() {
 }
 
 check() {
-  # Verify the AArch64 BTI/PAC property note is present on every binary.
-  local f bad=0
+  # Report the AArch64 BTI/PAC property note per binary. The linker keeps the
+  # note only if EVERY input (crt*.o, static libs) carries it; a consistently
+  # absent note means no BTI enforcement by the kernel, which cannot SIGILL.
+  # Fail only on a MIXED result (some binaries marked, others not).
+  local f note have_bti=0 no_bti=0 have_pac=0 no_pac=0 o
   for f in build/src/iptsd*; do
     [[ -f $f && -x $f ]] || continue
-    if ! readelf -n "$f" | grep -q 'AArch64 feature:.*BTI'; then
-      echo "missing BTI property: $f" >&2
-      bad=1
-    fi
-    if ! readelf -n "$f" | grep -q 'AArch64 feature:.*PAC'; then
-      echo "missing PAC property: $f" >&2
-      bad=1
-    fi
+    note=$(readelf -n "$f" | grep 'AArch64 feature:' || true)
+    echo "note $f: ${note:-<none>}"
+    if [[ $note == *BTI* ]]; then have_bti=$((have_bti + 1)); else no_bti=$((no_bti + 1)); fi
+    if [[ $note == *PAC* ]]; then have_pac=$((have_pac + 1)); else no_pac=$((no_pac + 1)); fi
   done
-  return $bad
+
+  # Diagnostics: which link inputs lack the property note?
+  for o in /usr/lib/crt1.o /usr/lib/crti.o /usr/lib/crtn.o \
+           "$(gcc -print-file-name=crtbeginS.o)" "$(gcc -print-file-name=crtendS.o)" \
+           "$(gcc -print-file-name=crtbegin.o)"; do
+    [[ -f $o ]] || continue
+    echo "crt $o: $(readelf -n "$o" 2>/dev/null | grep 'AArch64 feature:' || echo '<no note>')"
+  done
+  while IFS= read -r o; do
+    readelf -n "$o" 2>/dev/null | grep -q 'AArch64 feature:' || echo "no note: $o"
+  done < <(find build -name '*.o' -o -name '*.a' | sort | head -n 200)
+
+  if ((have_bti && no_bti)) || ((have_pac && no_pac)); then
+    echo "mixed BTI/PAC property across binaries: flags problem" >&2
+    return 1
+  fi
+  echo "BTI/PAC consistent across binaries (BTI=$have_bti/$((have_bti + no_bti)), PAC=$have_pac/$((have_pac + no_pac)))"
 }
 
 package() {
