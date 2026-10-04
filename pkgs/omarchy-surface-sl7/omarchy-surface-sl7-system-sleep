@@ -8,15 +8,15 @@
 # iptsd's own system-sleep hook only re-triggers udev "add", which does not
 # restart a unit that is already running.
 #
-# The restart is delayed a couple of seconds so spi-hid has finished
-# re-initialising the device.
+# The helper runs detached (never blocks resume) and itself waits for the
+# hidraw nodes to reappear, since their numbers can change.
 case ${1:-} in
   post)
     helper=/usr/lib/omarchy-surface-sl7/restart-iptsd
     if command -v systemd-run >/dev/null 2>&1; then
-      systemd-run --quiet --no-block --on-active=2 \
-        --unit=omarchy-surface-sl7-touch-resume "$helper" ||
-        "$helper" || true
+      systemd-run --quiet --no-block --on-active=1 \
+        "$helper" ||
+        { "$helper" >/dev/null 2>&1 & }
     else
       "$helper" || true
     fi

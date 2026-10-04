@@ -49,6 +49,8 @@ _sl7_setup() {
   "$_sl7_dir/ath12k-board-update" || true
   "$_sl7_dir/update-uki-dtbs" || true
   "$_sl7_dir/set-boot-order" || true
+  # The battery pacman hook only fires on omarchy (re)installs: apply now.
+  "$_sl7_dir/omarchy-sl7-battery-patch" || true
 
   if [[ -f /etc/default/limine ]] && grep -Eq '^[[:space:]]*ENABLE_UKI="?no' /etc/default/limine; then
     echo "omarchy-surface-sl7: WARNING: /etc/default/limine sets ENABLE_UKI=no."

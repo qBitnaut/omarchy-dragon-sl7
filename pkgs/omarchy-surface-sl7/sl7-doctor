@@ -66,14 +66,19 @@ for f in $ms/qcdxkmsuc8380.mbn $ms/Romulus/qcadsp8380.mbn $ms/Romulus/qccdsp8380
 done
 
 for id in 0C77 0C6E; do
-  active=0
+  active=0 seen=0
   for node in /sys/class/hidraw/hidraw*; do
     [[ -r $node/device/uevent ]] || continue
     grep -Eiq "^HID_ID=[0-9A-F]+:0000045E:0000$id\$" "$node/device/uevent" || continue
-    unit="iptsd@$(systemd-escape --path "/dev/${node##*/}").service"
-    systemctl is-active --quiet "$unit" && active=1
+    seen=1
+    # Name-agnostic: any active iptsd@ unit whose instance is this hidraw node.
+    for unit in $(systemctl list-units --plain --no-legend --state=active 'iptsd@*.service' | awk '{print $1}'); do
+      [[ $unit == "iptsd@dev-${node##*/}.service" ]] && active=1
+    done
   done
-  if ((active)); then pass "iptsd active for 045E:$id"; else fail "no active iptsd@ unit for 045E:$id"; fi
+  if ((active)); then pass "iptsd active for 045E:$id"
+  elif ((seen)); then fail "no active iptsd@ unit for 045E:$id (sudo /usr/lib/omarchy-surface-sl7/restart-iptsd)"
+  else fail "no hidraw node for 045E:$id (device not enumerated)"; fi
 done
 
 if grep -Eq '^[[:space:]]*BOOT_ORDER="?linux-sl7([ ,"]|$)' "$limine_default" 2>/dev/null; then

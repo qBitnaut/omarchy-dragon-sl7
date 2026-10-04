@@ -1,32 +1,51 @@
 #!/bin/bash
-# Restart the iptsd@ instances serving the Surface Laptop 7 touchpad
-# (045E:0C77, HID-over-SPI) and touchscreen (045E:0C6E).
+# (Re)start the iptsd@ instances serving the Surface Laptop 7 touchpad
+# (045E:0C77, HID-over-SPI) and touchscreen (045E:0C6E), after resume.
 #
-# iptsd's own udev rule (50-iptsd.rules, from iptsd-sl7) already starts
-# iptsd@<hidraw> for both devices at boot; this only restarts them.
+# After resume spi-hid re-creates the hid devices; the hidraw nodes can appear
+# late and under new numbers, and iptsd's own udev rule can miss them. So:
+# wait for the nodes, settle udev, re-trigger add (our 51-iptsd-sl7-start.rules
+# wants iptsd@dev-hidrawN), then restart each unit so the heatmap mode is
+# re-enabled even if iptsd survived. Matching is by the HID_ID of the parent
+# hid device, never by hidraw number.
 set -u
 
 sys_root=${OMARCHY_SL7_HIDRAW_SYS:-/sys/class/hidraw}
 dev_root=${OMARCHY_SL7_HIDRAW_DEV:-/dev}
+wait_s=${OMARCHY_SL7_WAIT:-15}
 # HID_ID is bus:vendor:product, 8 hex digits each.
 pattern='^HID_ID=[0-9A-Fa-f]+:0000045[Ee]:0000(0[Cc]77|0[Cc]6[Ee])$'
 
+nodes() {
+  local node
+  for node in "$sys_root"/hidraw*; do
+    [[ -r $node/device/uevent ]] || continue
+    grep -Eq "$pattern" "$node/device/uevent" && echo "${node##*/}"
+  done
+}
+
+# Wait (bounded) until both devices are back; proceed with what exists.
+for ((i = 0; i < wait_s * 2; i++)); do
+  (($(nodes | wc -l) >= 2)) && break
+  sleep 0.5
+done
+udevadm settle --timeout=5 2>/dev/null || true
+
 found=0
-for node in "$sys_root"/hidraw*; do
-  [[ -r $node/device/uevent ]] || continue
-  grep -Eq "$pattern" "$node/device/uevent" || continue
-  dev=$dev_root/${node##*/}
-  unit="iptsd@$(systemd-escape --path "$dev").service"
+while IFS= read -r name; do
+  [[ -n $name ]] || continue
+  udevadm trigger --action=add "$sys_root/$name" 2>/dev/null || true
+  unit="iptsd@$(systemd-escape --path "$dev_root/$name").service"
   if systemctl --no-block restart "$unit"; then
     echo "omarchy-surface-sl7: restarted $unit"
     found=1
   else
     echo "omarchy-surface-sl7: could not restart $unit" >&2
   fi
-done
+done < <(nodes)
 
 if ((!found)); then
-  # No matching hidraw node: let iptsd's udev rule start whatever appears.
+  echo "omarchy-surface-sl7: no SL7 hidraw node found; re-triggering hidraw" >&2
   udevadm trigger --action=add --subsystem-match=hidraw
 fi
 exit 0

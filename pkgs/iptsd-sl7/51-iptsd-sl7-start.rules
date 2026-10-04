@@ -1,0 +1,17 @@
+# Start iptsd@<hidraw> for the Surface Laptop 7 touchpad (045E:0C77) and
+# touchscreen (045E:0C6E), HID-over-SPI (bus 001C).
+#
+# Upstream 50-iptsd.rules gates on "iptsd-check-device", which opens the hidraw
+# node at uevent time. On resume spi-hid is still re-initialising and that
+# probe can fail, so no unit is wanted and nothing retries. We match the
+# parent hid device by name (BUS:VID:PID.ID, so hidraw numbering is
+# irrelevant) and want the unit unconditionally. iptsd itself refuses a node
+# it cannot use, and the drop-in restarts it.
+#
+# "change" is included because a plain `udevadm trigger` sends change, which
+# upstream's ACTION=="add" rule ignores. Wanting an active unit is a no-op.
+ACTION!="add|change", GOTO="iptsd_sl7_start_end"
+SUBSYSTEM!="hidraw", GOTO="iptsd_sl7_start_end"
+SUBSYSTEMS=="hid", KERNELS=="001C:045E:0C77.*|001C:045E:0C6E.*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="iptsd@dev-%k.service"
+
+LABEL="iptsd_sl7_start_end"
