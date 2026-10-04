@@ -1,0 +1,27 @@
+# NEVER commit Microsoft or Qualcomm firmware, drivers, or device captures.
+# Firmware is fetched on the target machine from Microsoft's public
+# Surface Laptop 7 driver MSI at install time and is never redistributed here.
+
+# Firmware / driver artifacts
+*.msi
+*.cab
+*.mbn
+*.elf
+*.jsn
+*.sys
+*.cat
+*.inf
+*.zip
+firmware/
+extracted/
+drivers/
+sl7-capture/
+
+# Build outputs
+out/
+work/
+*.iso
+*.img
+*.pkg.tar.*
+src/
+pkg/
