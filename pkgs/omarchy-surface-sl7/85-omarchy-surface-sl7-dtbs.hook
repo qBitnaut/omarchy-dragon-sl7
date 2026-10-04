@@ -1,0 +1,12 @@
+# Sorts before 90-mkinitcpio-install.hook (and the limine hook), so the UKI
+# built for the new kernel already lists the new DTB paths.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/dtbs/qcom/x1e80100-microsoft-romulus13.dtb
+
+[Action]
+Description = Updating UKI DeviceTreeAuto for linux-sl7 (omarchy-surface-sl7)...
+When = PostTransaction
+Exec = /usr/lib/omarchy-surface-sl7/update-uki-dtbs

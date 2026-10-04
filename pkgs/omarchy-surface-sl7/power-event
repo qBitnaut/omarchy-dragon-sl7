@@ -1,0 +1,44 @@
+#!/bin/bash
+# udev helper for 99-omarchy-surface-sl7-power.rules; runs as root on
+# "change" of qcom-battmgr-bat.
+#
+# 1. qcom_battmgr only raises power_supply_changed() for the USB supply on
+#    USB property notifications; on X1E the firmware sends battery
+#    notifications but none for plug/unplug of the charger, so UPower's
+#    OnBattery goes stale (Omarchy's shell then never switches profiles).
+#    Forward the battery event to the AC/USB supplies.
+# 2. If the user opted in (omarchy-surface-sl7-power wifi-powersave enable),
+#    apply Wi-Fi power save by power source.
+ps=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
+flag=${OMARCHY_SL7_WIFI_PS_FLAG:-/etc/omarchy-surface-sl7/wifi-powersave}
+
+targets=()
+for name in qcom-battmgr-usb qcom-battmgr-ac; do
+  [[ -d $ps/$name ]] && targets+=("$ps/$name")
+done
+if ((${#targets[@]})); then
+  udevadm trigger --action=change "${targets[@]}"
+fi
+
+[[ -e $flag ]] || exit 0
+command -v iw >/dev/null 2>&1 || exit 0
+
+on_ac=0
+have_source=0
+for supply in "$ps"/*; do
+  [[ -r $supply/type && -r $supply/online ]] || continue
+  case $(<"$supply/type") in
+    Mains | USB*)
+      have_source=1
+      [[ $(<"$supply/online") == 1 ]] && on_ac=1
+      ;;
+  esac
+done
+((have_source)) || exit 0
+
+if ((on_ac)); then state=off; else state=on; fi
+for iface in /sys/class/net/*/wireless; do
+  [[ -d $iface ]] || continue
+  iw dev "$(basename "$(dirname "$iface")")" set power_save "$state" || true
+done
+exit 0

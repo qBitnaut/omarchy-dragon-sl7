@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/share/omarchy/install/hardware/fix-surface-keyboard.sh
+Target = etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf
+
+[Action]
+Description = Disabling the x86 Surface keyboard initramfs list on Qualcomm (omarchy-surface-sl7)...
+When = PostTransaction
+Exec = /usr/lib/omarchy-surface-sl7/neutralize-surface-keyboard

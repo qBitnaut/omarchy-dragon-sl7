@@ -1,0 +1,50 @@
+#!/bin/bash
+# Toggle the optional Wi-Fi power save policy for the Surface Laptop 7.
+#
+# Omarchy forces Wi-Fi power save off everywhere
+# (/etc/NetworkManager/conf.d/omarchy-wifi-powersave.conf, wifi.powersave=2)
+# because of latency spikes and Intel BE200/BE211 link drops. On a 54 Wh ARM
+# laptop idling at 3-4 W the trade-off differs. "enable" tells NetworkManager
+# to stop managing power save (wifi.powersave=1) and has udev apply
+# "iw set power_save on" on battery and "off" on AC.
+set -euo pipefail
+
+nm_conf=${OMARCHY_SL7_NM_CONF:-/etc/NetworkManager/conf.d/zz-omarchy-surface-sl7-wifi-powersave.conf}
+flag=${OMARCHY_SL7_WIFI_PS_FLAG:-/etc/omarchy-surface-sl7/wifi-powersave}
+
+usage() {
+  echo "usage: ${0##*/} wifi-powersave enable|disable|status" >&2
+  exit 2
+}
+
+[[ ${1:-} == wifi-powersave ]] || usage
+
+case ${2:-} in
+  enable)
+    ((EUID == 0)) || { echo "run as root" >&2; exit 1; }
+    mkdir -p "$(dirname "$flag")" "$(dirname "$nm_conf")"
+    : >"$flag"
+    cat >"$nm_conf" <<'CONF'
+# Written by omarchy-surface-sl7-power: leave Wi-Fi power save to the
+# udev helper, which switches it with the power source.
+[connection]
+wifi.powersave = 1
+CONF
+    /usr/lib/omarchy-surface-sl7/power-event
+    echo "Wi-Fi power save policy enabled (on battery: on, on AC: off)."
+    echo "Restart NetworkManager or reconnect for the NetworkManager part to apply."
+    ;;
+  disable)
+    ((EUID == 0)) || { echo "run as root" >&2; exit 1; }
+    rm -f "$flag" "$nm_conf"
+    for iface in /sys/class/net/*/wireless; do
+      [[ -d $iface ]] || continue
+      iw dev "$(basename "$(dirname "$iface")")" set power_save off || true
+    done
+    echo "Wi-Fi power save policy disabled; Omarchy's setting applies again."
+    ;;
+  status)
+    if [[ -e $flag ]]; then echo "enabled"; else echo "disabled"; fi
+    ;;
+  *) usage ;;
+esac

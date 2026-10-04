@@ -1,0 +1,4 @@
+# Surface Laptop 7 (qcom-battmgr): forward battery change events to the
+# AC/USB supplies and apply the opt-in Wi-Fi power save policy. The helper
+# is a root-owned path; nothing under $HOME is ever executed.
+ACTION=="change", SUBSYSTEM=="power_supply", KERNEL=="qcom-battmgr-bat", RUN+="/usr/lib/omarchy-surface-sl7/power-event"

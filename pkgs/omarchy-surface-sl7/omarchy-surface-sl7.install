@@ -1,0 +1,67 @@
+_sl7_dir=/usr/lib/omarchy-surface-sl7
+_sl7_fw=/usr/lib/firmware
+
+_sl7_firmware_present() {
+  local suffix
+  for suffix in '' .zst .xz; do
+    [[ -f $_sl7_fw/updates/qcom/x1e80100/microsoft/qcdxkmsuc8380.mbn$suffix ||
+      -f $_sl7_fw/qcom/x1e80100/microsoft/qcdxkmsuc8380.mbn$suffix ]] && return 0
+  done
+  return 1
+}
+
+_sl7_rebuild() {
+  if [[ -n ${OMARCHY_SL7_SKIP_REBUILD:-} ]]; then
+    echo "omarchy-surface-sl7: OMARCHY_SL7_SKIP_REBUILD set; not rebuilding the initramfs/UKI."
+    return 0
+  fi
+  # Image builds (pacstrap, mkarchiso) run scriptlets in a chroot where the
+  # installer creates the boot image itself later.
+  if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --chroot; then
+    echo "omarchy-surface-sl7: chroot detected; skipping the initramfs/UKI rebuild."
+    echo "  The installer builds it, or run 'limine-mkinitcpio' after first boot."
+    return 0
+  fi
+  if command -v limine-mkinitcpio >/dev/null 2>&1; then
+    echo "omarchy-surface-sl7: rebuilding initramfs and UKI (limine-mkinitcpio)..."
+    limine-mkinitcpio || echo "omarchy-surface-sl7: limine-mkinitcpio failed; run it manually." >&2
+  elif command -v mkinitcpio >/dev/null 2>&1; then
+    echo "omarchy-surface-sl7: rebuilding initramfs (mkinitcpio -P)..."
+    mkinitcpio -P || echo "omarchy-surface-sl7: mkinitcpio failed; run it manually." >&2
+  fi
+}
+
+_sl7_setup() {
+  "$_sl7_dir/neutralize-surface-keyboard" || true
+  "$_sl7_dir/update-uki-dtbs" || true
+
+  if [[ -f /etc/default/limine ]] && grep -Eq '^[[:space:]]*ENABLE_UKI="?no' /etc/default/limine; then
+    echo "omarchy-surface-sl7: WARNING: /etc/default/limine sets ENABLE_UKI=no."
+    echo "  Without a UKI the boot entry has no device tree and the machine resets at boot."
+    echo "  /etc/limine-entry-tool.d/omarchy-surface-sl7.conf sets ENABLE_UKI=yes; remove the line in /etc/default/limine if the entry still lacks a UKI."
+  fi
+
+  if ! _sl7_firmware_present; then
+    echo "omarchy-surface-sl7: Surface Laptop 7 GPU/DSP firmware is not installed."
+    echo "  It is Microsoft/Qualcomm licensed and cannot ship in a package. Without it the"
+    echo "  panel stays black after the initramfs. Fetch the driver MSI (download id 106120):"
+    echo "    https://www.microsoft.com/en-us/download/details.aspx?id=106120"
+    echo "  then run:"
+    echo "    sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi"
+    echo "  (or --from DIR with qcom/x1e80100/microsoft/ staged). See --help."
+  fi
+
+  _sl7_rebuild
+}
+
+post_install() {
+  _sl7_setup
+}
+
+post_upgrade() {
+  _sl7_setup
+}
+
+post_remove() {
+  echo "omarchy-surface-sl7: removed. Rebuild the initramfs/UKI (limine-mkinitcpio) so the SL7 modules and DeviceTreeAuto entries are dropped."
+}

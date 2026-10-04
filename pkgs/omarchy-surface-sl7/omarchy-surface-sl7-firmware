@@ -1,0 +1,231 @@
+#!/bin/bash
+# Install the Microsoft/Qualcomm firmware the Surface Laptop 7 needs and that
+# linux-firmware does not carry: the Adreno zap shader and the ADSP/CDSP images.
+#
+# The files are licensed by Microsoft/Qualcomm and are never part of this
+# package; they come from the public driver MSI (download id 106120) or from
+# a directory you staged yourself. Every file is checked against the sha256
+# list below (MSI 26.053.36539.0) before it is installed.
+set -euo pipefail
+
+prog=${0##*/}
+msi_version="26.053.36539.0"
+msi_sha256="66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b"
+msi_url="https://download.microsoft.com/download/b7ca2c3f-d320-4795-be0f-529a0117abb4/SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi"
+
+# Plain files: linux-sl7 reads plain, .zst and .xz, but the DSP remoteproc
+# loader and the initramfs hook are simplest with uncompressed files.
+dest_root=${OMARCHY_SL7_FW_ROOT:-/usr/lib/firmware/updates/qcom/x1e80100/microsoft}
+
+# kind  sha256  path relative to qcom/x1e80100/microsoft/  msi dir under SurfaceUpdate
+# "req" files must be present; "opt" files are installed if present.
+manifest=(
+  "req b526e365b644b019b4866d0eec9544de6aa61975a7ab7086af6ea4ee4f7ef8c7 qcdxkmsuc8380.mbn qcdx8380"
+  "req 3a0240f9a1c0c43b657959b1bf10433a1a9793eb5c4af9f6beff8644c174f5a0 Romulus/qcadsp8380.mbn proextadsp8380"
+  "req b03f066e2645dbe35a33a08a91312842f5cee3676cac3e111f1f3dabd1cf4e9e Romulus/adsp_dtbs.elf proextadsp8380"
+  "req 4a67a03367f2eff2f8a0e867ca25d2bf2fcd5aee3e41e2c9f436c804e257c789 Romulus/qccdsp8380.mbn qcnspmcdmextcdsp8380"
+  "req 93941f040da14b8305d39579686d886706d22954a538b03da676c1aaa191797f Romulus/cdsp_dtbs.elf qcnspmcdmextcdsp8380"
+  "opt e9ba7199626b0c03f2ec02822d744f678ad567fe0625a28fe5f5908b7281e9db Romulus/adspr.jsn proextadsp8380"
+  "opt 19b1396b5e2c0d14fb8a4eb8e47181df7f62989f4af519b439cf0ee45a46f76e Romulus/adsps.jsn proextadsp8380"
+  "opt d65dc1aedce2c1131da8ffaed7dcffc05cc9c58da491e0c39acb2ac5b3f4bc1d Romulus/adspua.jsn proextadsp8380"
+  "opt b8aad1d149128f414eb1fd6fcbb6e0a5b7dabcd2cba001599e1ce9a0e2e291a4 Romulus/battmgr.jsn proextadsp8380"
+  "opt 7e46c515ab1bb012768be6e961eca69b1c8aad9af1cbac886b3b5ae8d4228f64 Romulus/cdspr.jsn qcnspmcdmextcdsp8380"
+)
+
+usage() {
+  cat <<USAGE
+Usage:
+  $prog --from DIR       [--no-rebuild] [--allow-unverified]
+  $prog --from-msi FILE  [--no-rebuild] [--allow-unverified]
+  $prog --status
+  $prog --list
+
+  --from DIR        DIR holds the staged layout
+                    qcom/x1e80100/microsoft/{qcdxkmsuc8380.mbn,Romulus/*}
+  --from-msi FILE   extract FILE (needs msiextract from msitools) and install
+  --no-rebuild      do not rebuild the initramfs/UKI afterwards
+  --allow-unverified
+                    install files whose sha256 differs from the embedded
+                    list (newer MSI). Not recommended: DSP firmware is signed
+                    and a wrong file only fails at boot.
+  --status          show which firmware files are installed and verified
+  --list            print the embedded sha256 list
+
+Firmware is installed to $dest_root
+Get the MSI ($msi_version, sha256 $msi_sha256):
+  $msi_url
+USAGE
+}
+
+die() {
+  echo "$prog: $*" >&2
+  exit 1
+}
+
+hash_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+status() {
+  local entry kind sum rel _dir missing=0 state
+  for entry in "${manifest[@]}"; do
+    read -r kind sum rel _dir <<<"$entry"
+    if [[ -f $dest_root/$rel ]]; then
+      if [[ $(hash_of "$dest_root/$rel") == "$sum" ]]; then state="ok"; else state="CHECKSUM MISMATCH"; fi
+    else
+      state="missing"
+      [[ $kind == req ]] && missing=1
+    fi
+    printf '%-4s %-28s %s\n' "$kind" "$rel" "$state"
+  done
+  return "$missing"
+}
+
+# check_one SRC KIND SUM REL: verify SRC; on success queue it for install.
+queue_src=()
+queue_rel=()
+check_one() {
+  local src=$1 kind=$2 sum=$3 rel=$4 actual
+  if [[ ! -f $src ]]; then
+    if [[ $kind == req ]]; then
+      echo "$prog: required file missing: $rel" >&2
+      return 1
+    fi
+    return 0
+  fi
+  actual=$(hash_of "$src")
+  if [[ $actual != "$sum" ]]; then
+    if ((allow_unverified)); then
+      echo "$prog: WARNING: $rel sha256 $actual does not match the embedded list" >&2
+    else
+      echo "$prog: $rel sha256 mismatch (got $actual, want $sum)" >&2
+      return 1
+    fi
+  fi
+  queue_src+=("$src")
+  queue_rel+=("$rel")
+}
+
+rebuild() {
+  if command -v limine-mkinitcpio >/dev/null 2>&1; then
+    echo "Rebuilding initramfs/UKI: limine-mkinitcpio"
+    limine-mkinitcpio
+  elif command -v mkinitcpio >/dev/null 2>&1; then
+    echo "Rebuilding initramfs: mkinitcpio -P"
+    mkinitcpio -P
+  else
+    echo "$prog: neither limine-mkinitcpio nor mkinitcpio found; rebuild the initramfs yourself" >&2
+  fi
+}
+
+from_dir=""
+from_msi=""
+rebuild_after=1
+allow_unverified=0
+action=install
+
+while (($#)); do
+  case $1 in
+    --from)
+      [[ $# -ge 2 ]] || die "--from needs a directory"
+      from_dir=$2
+      shift 2
+      ;;
+    --from-msi)
+      [[ $# -ge 2 ]] || die "--from-msi needs a file"
+      from_msi=$2
+      shift 2
+      ;;
+    --no-rebuild)
+      rebuild_after=0
+      shift
+      ;;
+    --allow-unverified)
+      allow_unverified=1
+      shift
+      ;;
+    --status)
+      action=status
+      shift
+      ;;
+    --list)
+      action=list
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+case $action in
+  status)
+    status
+    exit $?
+    ;;
+  list)
+    printf '%s\n' "${manifest[@]}"
+    exit 0
+    ;;
+esac
+
+if [[ -n $from_dir && -n $from_msi ]]; then die "use only one of --from and --from-msi"; fi
+if [[ -z $from_dir && -z $from_msi ]]; then
+  usage >&2
+  exit 2
+fi
+
+if ((EUID != 0)) && [[ -z ${OMARCHY_SL7_FW_ROOT:-} ]]; then
+  die "run as root (sudo $prog ...)"
+fi
+
+tmp=""
+cleanup() {
+  if [[ -n $tmp ]]; then rm -rf "$tmp"; fi
+}
+trap cleanup EXIT
+
+failed=0
+
+if [[ -n $from_dir ]]; then
+  stage=$from_dir/qcom/x1e80100/microsoft
+  [[ -d $stage ]] || die "$stage not found (expected qcom/x1e80100/microsoft/ under $from_dir)"
+  for entry in "${manifest[@]}"; do
+    read -r kind sum rel _dir <<<"$entry"
+    check_one "$stage/$rel" "$kind" "$sum" "$rel" || failed=1
+  done
+else
+  [[ -f $from_msi ]] || die "$from_msi not found"
+  command -v msiextract >/dev/null 2>&1 ||
+    die "msiextract not found; install msitools (pacman -S msitools)"
+  echo "MSI sha256: $(hash_of "$from_msi") (expected for $msi_version: $msi_sha256)"
+  tmp=$(mktemp -d "${TMPDIR:-/var/tmp}/$prog.XXXXXX")
+  msiextract -C "$tmp" "$from_msi" >/dev/null
+  surface_update=$(find "$tmp" -type d -name SurfaceUpdate -print -quit)
+  [[ -n $surface_update ]] || die "no SurfaceUpdate folder in the MSI; is this the SL7 driver package?"
+  for entry in "${manifest[@]}"; do
+    read -r kind sum rel dir <<<"$entry"
+    check_one "$surface_update/$dir/${rel##*/}" "$kind" "$sum" "$rel" || failed=1
+  done
+fi
+
+if ((failed)); then
+  die "some files were missing or failed verification; nothing installed"
+fi
+
+for i in "${!queue_src[@]}"; do
+  install -Dm644 "${queue_src[$i]}" "$dest_root/${queue_rel[$i]}"
+  echo "installed ${queue_rel[$i]}"
+done
+
+echo
+status || true
+
+if ((rebuild_after)); then
+  rebuild
+else
+  echo "Skipped the initramfs rebuild; run limine-mkinitcpio (or mkinitcpio -P) before rebooting."
+fi

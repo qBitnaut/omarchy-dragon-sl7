@@ -1,0 +1,32 @@
+#!/bin/bash
+# Restart the iptsd@ instances serving the Surface Laptop 7 touchpad
+# (045E:0C77, HID-over-SPI) and touchscreen (045E:0C6E).
+#
+# iptsd's own udev rule (50-iptsd.rules, from iptsd-sl7) already starts
+# iptsd@<hidraw> for both devices at boot; this only restarts them.
+set -u
+
+sys_root=${OMARCHY_SL7_HIDRAW_SYS:-/sys/class/hidraw}
+dev_root=${OMARCHY_SL7_HIDRAW_DEV:-/dev}
+# HID_ID is bus:vendor:product, 8 hex digits each.
+pattern='^HID_ID=[0-9A-Fa-f]+:0000045[Ee]:0000(0[Cc]77|0[Cc]6[Ee])$'
+
+found=0
+for node in "$sys_root"/hidraw*; do
+  [[ -r $node/device/uevent ]] || continue
+  grep -Eq "$pattern" "$node/device/uevent" || continue
+  dev=$dev_root/${node##*/}
+  unit="iptsd@$(systemd-escape --path "$dev").service"
+  if systemctl --no-block restart "$unit"; then
+    echo "omarchy-surface-sl7: restarted $unit"
+    found=1
+  else
+    echo "omarchy-surface-sl7: could not restart $unit" >&2
+  fi
+done
+
+if ((!found)); then
+  # No matching hidraw node: let iptsd's udev rule start whatever appears.
+  udevadm trigger --action=add --subsystem-match=hidraw
+fi
+exit 0

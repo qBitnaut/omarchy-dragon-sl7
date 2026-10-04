@@ -1,0 +1,25 @@
+#!/bin/bash
+# systemd system-sleep hook (installed as
+# /usr/lib/systemd/system-sleep/omarchy-surface-sl7).
+#
+# After resume the SL7 touchpad's virtual device goes static while the raw
+# HID node keeps sending data (recon run 5): iptsd is still running but the
+# device needs its heatmap mode re-enabled. Restarting iptsd@ does that.
+# iptsd's own system-sleep hook only re-triggers udev "add", which does not
+# restart a unit that is already running.
+#
+# The restart is delayed a couple of seconds so spi-hid has finished
+# re-initialising the device.
+case ${1:-} in
+  post)
+    helper=/usr/lib/omarchy-surface-sl7/restart-iptsd
+    if command -v systemd-run >/dev/null 2>&1; then
+      systemd-run --quiet --no-block --on-active=2 \
+        --unit=omarchy-surface-sl7-touch-resume "$helper" ||
+        "$helper" || true
+    else
+      "$helper" || true
+    fi
+    ;;
+esac
+exit 0

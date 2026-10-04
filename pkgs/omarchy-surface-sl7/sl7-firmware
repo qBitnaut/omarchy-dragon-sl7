@@ -1,0 +1,52 @@
+#!/bin/bash
+# mkinitcpio install hook: add the Adreno X1-85 firmware to the initramfs.
+#
+# The msm driver probes before the root filesystem is mounted. Without the
+# zap shader the GPU fails with "gpu hw init failed: -2" and the panel stays
+# black; without gen70500_sqe.fw the early probe misses and the GPU only
+# comes up on first use (recon run 5).
+#
+# Each file is looked up in firmware/updates first (where
+# omarchy-surface-sl7-firmware installs the Microsoft files), then in
+# firmware, as plain, .zst or .xz. Missing files are skipped, not fatal.
+
+build() {
+  local fw_root=${SL7_FIRMWARE_ROOT:-/usr/lib/firmware}
+  local rel dir suffix src found
+  local -a wanted=(
+    qcom/gen70500_sqe.fw
+    qcom/gen70500_gmu.bin
+    qcom/x1e80100/microsoft/qcdxkmsuc8380.mbn
+  )
+
+  for rel in "${wanted[@]}"; do
+    found=0
+    for dir in "$fw_root/updates" "$fw_root"; do
+      for suffix in '' .zst .xz; do
+        src="$dir/$rel$suffix"
+        if [[ -f $src ]]; then
+          add_file "$src"
+          found=1
+          break 2
+        fi
+      done
+    done
+    if ((!found)); then
+      if [[ $rel == *qcdxkmsuc8380.mbn ]]; then
+        warning "sl7-firmware: GPU zap shader $rel not found; run omarchy-surface-sl7-firmware, otherwise the panel stays black"
+      else
+        warning "sl7-firmware: $rel not found (linux-firmware-qcom installed?)"
+      fi
+    fi
+  done
+}
+
+help() {
+  cat <<'HELPEOF'
+Adds the Adreno X1-85 (gen70500) firmware and the Surface Laptop 7 GPU zap
+shader to the initramfs, for whichever of plain, .zst and .xz exists under
+/usr/lib/firmware/updates or /usr/lib/firmware. Missing files only warn.
+HELPEOF
+}
+
+# vim: set ft=sh ts=4 sw=2 et:

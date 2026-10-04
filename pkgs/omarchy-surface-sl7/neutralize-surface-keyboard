@@ -1,0 +1,38 @@
+#!/bin/bash
+# Move aside the mkinitcpio drop-in that Omarchy's fix-surface-keyboard.sh
+# generates for x86 Surface laptops, when running on a Qualcomm SoC.
+#
+# The script writes /etc/mkinitcpio.conf.d/surface_device_modules.conf with
+#   MODULES=(<pinctrl_*> surface_* surface_kbd intel_lpss_pci 8250_dw)
+# which resets MODULES and names modules that do not exist on arm64
+# (upstream issue: omacom/omarchy PR #8151 is the open fix). The file is
+# generated, not packaged, so no pacman hook can fire on it directly; this
+# runs when the script's package (omarchy) or our drop-in is installed, and
+# from the .install scriptlet. If Omarchy regenerates the file afterwards
+# (omarchy apply hardware), zz-omarchy-surface-sl7.conf still filters the
+# bad module names, so a regenerated file is harmless.
+set -euo pipefail
+
+conf_dir=${OMARCHY_SL7_MKINITCPIO_DIR:-/etc/mkinitcpio.conf.d}
+compatible=${OMARCHY_SL7_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
+file=$conf_dir/surface_device_modules.conf
+
+is_qualcomm() {
+  if command -v omarchy-hw-qualcomm-soc >/dev/null 2>&1; then
+    omarchy-hw-qualcomm-soc && return 0
+  fi
+  if [[ -r $compatible ]]; then
+    tr '\0' '\n' <"$compatible" | grep -q '^qcom,' && return 0
+    return 1
+  fi
+  # Device tree not visible (chroot without /sys, cross-built image). This
+  # package is Snapdragon-only, so assume the target is one.
+  return 0
+}
+
+[[ -f $file ]] || exit 0
+
+if is_qualcomm; then
+  mv -f "$file" "$file.disabled-by-omarchy-surface-sl7"
+  echo "omarchy-surface-sl7: moved $file aside (x86 Surface module list)"
+fi
