@@ -86,9 +86,14 @@ Needs `bc flex bison libssl-dev` and `dtc`. The individual steps are
 On an Arch Linux ARM machine (a full build takes hours; use CI if you can):
 
 ```
-cd pkgs/linux-sl7
+cp -a pkgs/linux-sl7 /path/to/build && cd /path/to/build
+cp -a scripts/check-config.sh patches/* .
 makepkg -s
 ```
+
+makepkg looks up local sources by basename in the build directory, so the
+helper script and the patches must sit next to the PKGBUILD (CI's
+`scripts/ci-build.sh` does the same).
 
 ### CI
 

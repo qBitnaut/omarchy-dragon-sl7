@@ -79,12 +79,16 @@ jobs:
           sudo docker image prune --all --force
           df -h /
 
+      # Restore and save are separate steps so a failed build still saves
+      # its ccache; the next attempt then resumes instead of starting cold.
       - name: Restore ccache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: ccache-restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .ccache
-          key: ccache-sl7-${{ hashFiles('pkgs/linux-sl7/PKGBUILD') }}-${{ hashFiles('pkgs/linux-sl7/config.alarm', 'pkgs/linux-sl7/config.sl7', 'pkgs/linux-sl7/patches/**') }}
+          key: ccache-sl7-${{ hashFiles('pkgs/linux-sl7/PKGBUILD') }}-${{ hashFiles('pkgs/linux-sl7/config.alarm', 'pkgs/linux-sl7/config.sl7', 'pkgs/linux-sl7/patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ccache-sl7-${{ hashFiles('pkgs/linux-sl7/PKGBUILD') }}-${{ hashFiles('pkgs/linux-sl7/config.alarm', 'pkgs/linux-sl7/config.sl7', 'pkgs/linux-sl7/patches/**') }}-
             ccache-sl7-${{ hashFiles('pkgs/linux-sl7/PKGBUILD') }}-
             ccache-sl7-
 
@@ -98,6 +102,13 @@ jobs:
             -e CCACHE_DIR=/ccache \
             "$BUILDER_IMAGE" \
             bash /src/scripts/ci-build.sh
+
+      - name: Save ccache (also after a failed build)
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
       - name: Guard against firmware in artifacts
         run: pkgs/linux-sl7/scripts/guard-artifacts.sh out

@@ -32,6 +32,9 @@ grep -q '^BUILDENV=.*[^!]ccache' /etc/makepkg.conf \
 
 mkdir -p "$build" "$out" "$ccache_dir"
 cp -a "$src/." "$build/"
+# makepkg looks up local sources by basename in the build dir, so the
+# entries listed as scripts/... and patches/... must also sit at the top.
+cp -a "$src/scripts/check-config.sh" "$src"/patches/* "$build/"
 chown -R builder:builder "$build" "$ccache_dir"
 chmod 0777 "$out"
 
