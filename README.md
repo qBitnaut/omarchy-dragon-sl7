@@ -16,7 +16,11 @@ Microsoft and Qualcomm firmware is never committed to or distributed from this
 repository. It is fetched on the target machine from Microsoft's public
 Surface Laptop 7 driver MSI. The .gitignore blocks firmware and captures.
 
-License: TBD
+## License
+
+- Scripts and packaging are MIT licensed (see LICENSE).
+- Kernel patches under pkgs/linux-sl7 (when added) are GPL-2.0, like the Linux kernel they modify.
+- Microsoft/Qualcomm firmware is never included and remains under its own license.
 
 ## Credits
 
