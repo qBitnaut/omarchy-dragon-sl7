@@ -178,7 +178,9 @@ use this tool for the SL7.
   to UPower's `OnBattery` over D-Bus and to Hyprland's socket, and switches `eDP-1` to 60 Hz on
   battery and back to the original rate on AC with `hyprctl eval hl.monitor(...)`
   (`hyprctl keyword` does not work with the Lua parser). It never edits `monitors.lua`. It
-  re-applies after a config reload, which would otherwise undo the 60 Hz mode. Animations and
+  re-applies after a config reload, which would otherwise undo the 60 Hz mode. The refresh
+  switch is opt-in (`REFRESH_ON_BATTERY=60`): on the SL7 a rate change is a full modeset and the
+  panel blanks for a few seconds on every plug/unplug, so the default leaves it alone. Animations and
   blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). Only when
   booted through the VRR test entry (section 11b) it also sets Hyprland's `misc.vrr`
   (`HYPRLAND_VRR`). Omarchy has no
