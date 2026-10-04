@@ -54,6 +54,8 @@ FORCE_LARGE=0
 TEST_WIPE=0
 KERNEL_DIR=""
 IPTSD_PKG=""
+IPTSD_LIBS=""
+IPTSD_LIBS_DEFAULT="${SL7_RESEARCH:-/mnt/Rocket4/Quadrant/Personal/Research/omarchy-dragon-sl7}/recon/work/iptsd-libs/stick-lib"
 CI_RUN=""
 IPTSD_CI_RUN=""
 KERNEL_MODE=0
@@ -90,6 +92,8 @@ test kernel (adds boot entries "omarchy-dragon-sl7 test kernel"; the sp11 entrie
                    of linux-sl7.yml) into $SL7_WORK/ci and use it
   --iptsd-pkg FILE iptsd-sl7 pkg.tar.{zst,xz}, staged for the touchpad test in the guide
   --iptsd-from-ci RUN  download the iptsd-sl7-aarch64 artifact (run id or "latest")
+  --iptsd-libs DIR soname-named libfmt.so.12 / libspdlog.so.1.17 copied to SL7DATA/sl7test/lib
+                   (default: $SL7_RESEARCH/recon/work/iptsd-libs/stick-lib when present)
 USAGE
 }
 
@@ -108,6 +112,7 @@ while [ $# -gt 0 ]; do
 	--iptsd-pkg) IPTSD_PKG="${2:?--iptsd-pkg needs a file}"; shift 2 ;;
 	--from-ci) CI_RUN="${2:?--from-ci needs a run id or latest}"; shift 2 ;;
 	--iptsd-from-ci) IPTSD_CI_RUN="${2:?--iptsd-from-ci needs a run id or latest}"; shift 2 ;;
+	--iptsd-libs) IPTSD_LIBS="${2:?--iptsd-libs needs a directory}"; shift 2 ;;
 	-h | --help) usage; exit 0 ;;
 	/dev/*) DEVICE="$1"; shift ;;
 	*) usage >&2; die "unknown argument: $1" ;;
@@ -130,6 +135,11 @@ elif [ -n "$IPTSD_PKG$IPTSD_CI_RUN" ]; then
 	die "--iptsd-pkg/--iptsd-from-ci only make sense together with --kernel-artifacts or --from-ci"
 fi
 [ -z "$IPTSD_PKG" ] || IPTSD_PKG="$(realpath -e "$IPTSD_PKG")" || die "--iptsd-pkg: no such file"
+if [ -n "$IPTSD_LIBS" ]; then
+	IPTSD_LIBS="$(realpath -e "$IPTSD_LIBS")" || die "--iptsd-libs: no such directory"
+elif [ -d "$IPTSD_LIBS_DEFAULT" ]; then
+	IPTSD_LIBS="$IPTSD_LIBS_DEFAULT"
+fi
 REPO_ROOT="$(cd "$KIT_DIR/../.." && pwd)"
 case "$WORK" in /tmp/* | "$REPO_ROOT"/*) die "work dir must not be under /tmp or the repo: $WORK" ;; esac
 
@@ -243,6 +253,31 @@ write_autostart() { # dest
 # .automated_script.sh on the tty1 root autologin. Re-run any time:
 #   sh /run/archiso/bootmnt/sl7-autostart.sh
 MNT=/sl7
+# Big console font for the 2304x1536 panel. Explicit target (-C), TERM forced to linux,
+# result logged to /run/sl7/font.log (the guide appends it to guide.log). The guide
+# re-applies it later: msm/fbcon or systemd-vconsole-setup can reset it after boot.
+mkdir -p /run/sl7
+sl7_font() {
+	T=/dev/tty1
+	[ -c "$T" ] || return 0
+	case "${TERM:-}" in "" | dumb | unknown) TERM=linux ;; esac
+	export TERM
+	c0="$(stty -F "$T" size 2>/dev/null)"
+	for f in ter-132b ter-v32b ter-132n ter-v32n ter-128b ter-v28b; do
+		if setfont -C "$T" "$f" >/run/sl7/font-try.txt 2>&1; then
+			echo "autostart: setfont -C $T $f ok (TERM=$TERM, console rows/cols $c0 -> $(stty -F "$T" size 2>/dev/null))" >>/run/sl7/font.log
+			return 0
+		fi
+		echo "autostart: setfont -C $T $f failed: $(head -n 1 /run/sl7/font-try.txt)" >>/run/sl7/font.log
+	done
+	if setfont -C "$T" -d >/run/sl7/font-try.txt 2>&1; then
+		echo "autostart: setfont -C $T -d (doubled default font) ok (console $c0 -> $(stty -F "$T" size 2>/dev/null))" >>/run/sl7/font.log
+	else
+		echo "autostart: setfont -d failed: $(head -n 1 /run/sl7/font-try.txt)" >>/run/sl7/font.log
+	fi
+	return 0
+}
+sl7_font
 echo "SL7 recon kit: looking for the SL7DATA partition..."
 udevadm settle 2>/dev/null
 i=0
@@ -294,6 +329,7 @@ if [ ! -f "$MNT/sl7-guide.sh" ]; then
 	echo "$MNT/sl7-guide.sh is missing from SL7DATA."
 	exit 1
 fi
+sl7_font
 bash "$MNT/sl7-guide.sh"
 echo "Guide ended. To run it again: sh /run/archiso/bootmnt/sl7-autostart.sh   (finish with: poweroff)"
 EOF
@@ -481,6 +517,10 @@ stage_data() {
 #   entry 2   = raw Image + explicit `devicetree` line (romulus13)
 # Nothing here comes from or goes to git: firmware is read from the local SL7DATA stage.
 KBUILD="$WORK/kernel-build"
+# kernel module directories (relative to usr/lib/modules/<ver>) kept out of the initramfs:
+# ath12k (Wi-Fi), the Bluetooth drivers and cfg80211/mac80211 all request firmware from the
+# live root (/usr/lib/firmware) and do not retry when the initramfs has none.
+LATE_MODULE_DIRS=(kernel/drivers/net/wireless/ath/ath12k kernel/drivers/bluetooth kernel/net/wireless kernel/net/mac80211)
 UKI_TOOLS="$WORK/ukitools"
 
 # fetch_ci RUN WORKFLOW PATTERN DEST: gh run download into DEST, sets CI_FETCHED_RUN
@@ -559,6 +599,13 @@ run_latehook() {
 		mount -t tmpfs -o size=2G,mode=0755 sl7modules "/sysroot/usr/lib/modules/$ver" &&
 			cp -a "/usr/lib/modules/$ver/." "/sysroot/usr/lib/modules/$ver/" ||
 			err "sl7test: could not copy modules into the live root"
+		# modules kept out of the initramfs (their firmware lives only in the live root):
+		# add them and the full depmod index now, so udev coldplug in the live root loads them
+		if [ -d /usr/lib/sl7late/mods ]; then
+			cp -a /usr/lib/sl7late/mods/. "/sysroot/usr/lib/modules/$ver/" &&
+				cp -a /usr/lib/sl7late/index/. "/sysroot/usr/lib/modules/$ver/" ||
+				err "sl7test: could not add the late modules to the live root"
+		fi
 	fi
 	fw=qcom/x1e80100/microsoft
 	if [ -d "/usr/lib/firmware/$fw" ]; then
@@ -639,6 +686,30 @@ build_kernel_boot() {
 	ln -s "$ov/usr/lib" "$dm/lib"
 	depmod -b "$dm" "$ver" || die "depmod failed"
 	[ -s "$ov/usr/lib/modules/$ver/modules.dep.bin" ] || die "depmod produced no modules.dep.bin"
+	# Drivers whose firmware exists only in the live root (run 4: ath12k probed at 3.9 s inside
+	# the initramfs, got -2/-110 and never retried; cfg80211 regulatory.db and the QCA Bluetooth
+	# firmware failed the same way). They are taken out of the early module tree and its index,
+	# and shipped under usr/lib/sl7late with the full index; the late hook adds both after
+	# switch_root, where udev coldplug (systemd-udev-trigger) loads them.
+	local late="$ov/usr/lib/sl7late" mp mf
+	mkdir -p "$late/mods" "$late/index"
+	for mf in modules.dep modules.dep.bin modules.alias modules.alias.bin modules.symbols modules.symbols.bin \
+		modules.devname modules.softdep modules.weakdep modules.builtin.bin modules.builtin.alias.bin; do
+		[ -f "$ov/usr/lib/modules/$ver/$mf" ] && cp "$ov/usr/lib/modules/$ver/$mf" "$late/index/$mf"
+	done
+	for mp in "${LATE_MODULE_DIRS[@]}"; do
+		if [ -d "$ov/usr/lib/modules/$ver/$mp" ]; then
+			mkdir -p "$late/mods/$(dirname "$mp")"
+			mv "$ov/usr/lib/modules/$ver/$mp" "$late/mods/$mp"
+			echo "    late (after switch_root): $mp ($(find "$late/mods/$mp" -name '*.ko.zst' | wc -l) modules)"
+		else
+			echo "    NOTE: $mp not in the package; nothing deferred for it"
+		fi
+	done
+	[ -n "$(find "$late/mods" -name 'ath12k*.ko.zst' -print -quit)" ] || die "ath12k modules were not deferred to the late tree"
+	depmod -b "$dm" "$ver" || die "depmod (early tree) failed"
+	if grep -q 'ath12k' "$ov/usr/lib/modules/$ver/modules.dep"; then die "ath12k still in the early module index"; fi
+	grep -q 'ath12k' "$late/index/modules.dep" || die "ath12k missing from the full module index"
 	echo "    modules: $(find "$ov/usr/lib/modules/$ver" -name '*.ko.zst' | wc -l), $(du -sh "$ov/usr/lib/modules/$ver" | cut -f1) compressed"
 	if [ -f "$zap" ]; then
 		mkdir -p "$ov/usr/lib/firmware/qcom/x1e80100/microsoft"
@@ -744,10 +815,27 @@ stage_kernel() {
 	else
 		echo "    no --iptsd-pkg: the guide will skip the touchpad (iptsd) test"
 	fi
+	if [ -n "$IPTSD_LIBS" ]; then
+		# soname-named copies (FAT has no symlinks); the guide puts them on LD_LIBRARY_PATH
+		local lib nlib=0
+		mkdir -p "$STAGE/sl7test/lib"
+		for lib in "$IPTSD_LIBS"/lib*.so*; do
+			[ -f "$lib" ] && [ ! -L "$lib" ] || continue
+			cp "$lib" "$STAGE/sl7test/lib/"
+			nlib=$((nlib + 1))
+		done
+		[ "$nlib" -gt 0 ] || die "--iptsd-libs $IPTSD_LIBS has no lib*.so* files"
+		[ -f "$STAGE/sl7test/lib/libfmt.so.12" ] && [ -f "$STAGE/sl7test/lib/libspdlog.so.1.17" ] ||
+			echo "    WARNING: libfmt.so.12 / libspdlog.so.1.17 not both in $IPTSD_LIBS"
+		echo "    iptsd libs staged in sl7test/lib: $(cd "$STAGE/sl7test/lib" && echo *)"
+	else
+		echo "    no --iptsd-libs directory: iptsd may need 'pacman -S fmt spdlog' (network) in the live root"
+	fi
 	{
 		echo "kernel release: $ver"
 		echo "ci run: ${KERNEL_CI_ID:-local artifact directory}"
 		echo "iptsd pkg: ${IPTSD_PKG:+$(basename "$IPTSD_PKG")}"
+		echo "iptsd libs: ${IPTSD_LIBS:+$IPTSD_LIBS}"
 		(cd "$kd" && grep -E ' \./(Image|linux-sl7-[0-9]|dtbs/)' SHA256SUMS)
 	} >"$STAGE/sl7test/kernel-info.txt"
 	cat >>"$STAGE/README.txt" <<EOF

@@ -35,6 +35,13 @@ path. It unmounts the stick's auto-mounted partitions, runs
 `dd bs=4M conv=fsync oflag=direct`, adds partition 3 (`SL7DATA`, FAT32) in the free
 space and fills it.
 
+Console font: the generated `sl7-autostart.sh` and the guide run `setfont -C /dev/tty1
+ter-132b` (fallbacks `ter-v32b`, ..., `setfont -d`) with `TERM=linux` forced if unset, log
+success or failure and the console rows/cols before and after to `guide.log`, and
+re-apply it after the firmware step and before the sl7kernel and interactive steps,
+because the msm fbdev takeover or `systemd-vconsole-setup` can reset it. `guide.log`
+also gets the vtconsole bind state and the fbcon sysfs values.
+
 Work files (ISO, remaster, staging) live in
 `/mnt/Rocket4/Quadrant/Personal/Research/omarchy-dragon-sl7/recon/work/`
 (override with `SL7_WORK`), never in `/tmp` or the repo. Needs about 4 GB (about 6 GB with the test kernel).
@@ -85,11 +92,26 @@ for 2-3 minutes while msm and firmware settle, then the guide on tty1:
    `SL7DATA` when it returns. An optional GPU re-probe (default No) is offered.
 5. `sl7-recon.sh` again into `results/<ts>-with-firmware/`.
 6. Interactive checks, each recorded in `results/answers.txt`: built-in keyboard,
-   touchpad, touchscreen, lid switch (20 s, suspend blocked meanwhile), keyboard
-   backlight key, charger plug and unplug, USB-C display.
+   touchpad, touchscreen, lid switch (SW_LID events only; 20 s, suspend blocked
+   meanwhile; in the text console nothing turns the panel off, Omarchy/Hyprland does
+   that), keyboard backlight key, charger plug and unplug, USB-C display. Touch and key
+   prompts show a live readout (about 5 updates per second): per input device the
+   running event count and the latest X/Y, read from `/dev/input/eventN`
+   (`struct input_event`, 24 bytes on aarch64). Enter ends a watch early. Chris then
+   confirms. A device with at least 20 events (`SL7_MIN_EVENTS`) and changing
+   coordinates is recorded as working even if he answers no: `answers.txt` holds both
+   `<key>` (his answer) and `<key>_auto` (the data). Kernel messages are kept off the
+   console during a watch (`dmesg -n 1`, restored after) and saved to
+   `<session>/kmsg-<key>.txt`.
 7. Optional suspend test (default No, needs the firmware step to have worked): the
    SL7 has no RTC alarm, so Chris presses the power button after about 2 minutes.
    qcom_stats and battery energy are captured before and after.
+   Optional after it: a 30+ minute suspend on battery (charger must be unplugged,
+   checked through qcom-battmgr `online=0`). It records `energy_now`, `power_now` and
+   qcom_stats, suspends, and after Chris wakes it (power button or lid) writes
+   `results/<ts>-longsleep/summary.txt`: energy delta, suspended seconds
+   (`CLOCK_BOOTTIME - CLOCK_MONOTONIC`), mWh/h and W after subtracting about 24 mWh
+   per suspend/resume cycle.
 8. Summary, then `poweroff` (not `reboot`), then bring the stick back to ramius.
 
 The guide is resumable: run it again and it offers to continue the last session.
@@ -126,6 +148,7 @@ in the artifacts.
 |---|---|---|
 | a | Initramfs for our kernel | Reuse the sp11 archiso initramfs and add to it; do not rebuild. Its init, hooks, busybox and udev are aarch64 binaries; mkinitcpio cannot assemble them on x86, Arch Linux ARM has no `archiso` package, and a CI step would still need the hooks from somewhere. cpio concatenation is architecture independent. The sp11 image is an uncompressed early cpio (sp11 modules and firmware, 206 MB) followed by one xz cpio. The result is: early cpio, then our overlay cpio (modules, zap shader), then the original main cpio with a small cpio appended in the same xz member (`/config` with `sl7test` added to `LATEHOOKS`, and `/hooks/sl7test`). No CI change is needed. |
 | b | Modules in the live root | The package's modules are compressed with zstd, `depmod`'ed on ramius (`modules.dep.bin` is not in the package) and packed into the overlay, so the initramfs can load `msm`, `qcom_q6v5_pas` and the rest of the sp11 `MODULES=` list. The late hook runs after archiso mounts the root at `/sysroot`: it mounts a tmpfs on `/sysroot/usr/lib/modules/<ver>` and copies the tree there (a separate tmpfs, so the 256 MB cow overlay stays free). Userspace modules only depend on the kernel, so the Arch Ports root is fine. |
+| b2 | Drivers kept out of the initramfs | Run 4: `ath12k` probed at 3.9 s inside the initramfs, before switch_root, so `ath12k/WCN7850/hw2.0/amss.bin.zst` (live root only) gave -2/-110 and the driver never retried. The same happened to `regulatory.db` (cfg80211) and the QCA Bluetooth firmware `qca/hmtbtfw20.tlv`. The build therefore takes `drivers/net/wireless/ath/ath12k`, `drivers/bluetooth`, `net/wireless` and `net/mac80211` out of the early module tree and its `depmod` index (`LATE_MODULE_DIRS`) and ships them under `usr/lib/sl7late` together with the index of the full tree. The late hook copies both into the tmpfs module tree after the root is mounted, so `systemd-udev-trigger` coldplug loads them in the live root, where the firmware exists. `msm` stays early (it owns the console); its `gen70500_sqe.fw` -2 at probe is retried when the GPU is first used. The other early -2 loads in run 4 (ADSP/CDSP) are Microsoft firmware the guide copies in later. |
 | c | Zap shader at boot | Only `qcom/x1e80100/microsoft/qcdxkmsuc8380.mbn` goes into the overlay and, through the hook, into the live root. `msm` loads from the initramfs, but run 1 shows the GPU firmware being requested at first use (17 s, after switch_root), so the live-root copy is the one that counts; the initramfs copy covers an early probe. It comes from the local SL7DATA stage at stick-build time, never from git or CI. The other firmware stays out of the initramfs on purpose: an ADSP started during boot resets USB-C and can drop the root stick; the guide still starts it later from RAM. |
 | d | Device tree | Both: the UKI (`ukify` with the systemd-stub, hwids and `pefile` from the ISO's own live root, systemd 262) and the explicit `devicetree` entry. The UKI carries the command line in `.cmdline`; the initramfs is passed by the loader (`initrd` line), which systemd-stub forwards. |
 | e | Where the files live | The ISO's ESP is 270 MB with about 8 MB free (`vmlinuz-linux-sp11` 49 MB plus the 223 MB initramfs), so nothing fits there. systemd-boot only reads the ESP and an XBOOTLDR partition, so SL7DATA is created with the XBOOTLDR type GUID instead of basic data and holds `loader/entries/`, `sl7boot/` and `sl7test/`. Linux ignores the type GUID; the label mount works unchanged (checked in QEMU). With that type, `systemd-gpt-auto-generator` could automount SL7DATA at `/boot` as a second mount of the same FAT, so the test-kernel build adds `systemd.gpt_auto=0` to every entry. Without `--kernel-artifacts` the partition stays basic data. |
@@ -134,7 +157,7 @@ in the artifacts.
 
 `loader/entries/20-*.conf`, `21-*.conf`; `sl7boot/` (`omarchy-dragon-sl7.efi`, `Image`,
 `initramfs-sl7-archiso.img`, the romulus13 and romulus15 DTBs); `sl7test/`
-(`iptsd-sl7.pkg.tar.zst`, `kernel-info.txt`). About 0.5 GB on top of the firmware; the
+(`iptsd-sl7.pkg.tar.zst`, `kernel-info.txt`, `lib/` with the iptsd libraries). About 0.5 GB on top of the firmware; the
 build checks that the partition has room. The boot files are rebuilt only when an input
 changes (`$SL7_WORK/kernel-build`, stamped).
 
@@ -150,14 +173,19 @@ step. Each result goes to `results/answers.txt` as `sl7_*` and to
 | SPI | `spi19.0` (touchpad) and `spi10.0` (touchscreen) exist and have a driver bound; a `045E:0C77` hidraw node exists |
 | GPU | a DRM card and render node exist and the log has no `Unable to load ...qcdxkmsuc8380.mbn` / `gpu hw init failed` |
 | Battery | a `capacity` attribute exists (needs the firmware step to have started the ADSP) |
-| Wi-Fi | an ath12k interface exists, rfkill is not blocked, and a scan finds access points (count only) |
-| Touchpad | the package from `sl7test/` is unpacked into a temp root, its `iptsd` runs on the touchpad hidraw node and creates "IPTSD Virtual Touchpad"; Chris moves, taps/clicks and scrolls |
-| Touchscreen | input events from the direct-touch device |
+| Wi-Fi | an ath12k interface exists (udev loads ath12k after switch_root; if there is no wlan the guide runs `modprobe ath12k_wifi7`, a module load only), rfkill is not blocked, and a scan finds access points (count only) |
+| Touchpad | the package from `sl7test/` is unpacked into a temp root, its `iptsd` runs on the touchpad hidraw node and creates "IPTSD Virtual Touchpad"; Chris moves, taps/clicks and scrolls with the live readout |
+| Touchscreen | the Surface "G6" digitizer (`045E:0C6E`, spi_hid) sends IPTS heatmaps and the kernel node stays silent (run 4). A second `iptsd` runs on its hidraw node; iptsd picks Touchscreen mode itself (there is no mode switch on its command line; the mode it chose is logged) and creates "IPTSD Virtual Touchscreen", whose events are counted. Stylus support is off. `iptsd-check-device` output goes to `iptsd-check.txt` |
 | After suspend | hidraw and iptsd still there, touchpad events again, GPU, battery and Wi-Fi re-checked |
 
-If the ALARM-built `iptsd` cannot run in the Arch Ports live root (library versions), the
-guide records `skip` and offers `pacman -S fmt libinih spdlog` (live RAM root only, needs
-network). Everything is read-only apart from that daemon and `ip link set up` on the
+`--iptsd-libs DIR` (default
+`$SL7_RESEARCH/recon/work/iptsd-libs/stick-lib` when it exists) copies the soname-named
+`libfmt.so.12` and `libspdlog.so.1.17` to `SL7DATA/sl7test/lib`; the guide puts them on
+`LD_LIBRARY_PATH` for iptsd. They come from the Arch Linux ARM packages `fmt-12.2.0-1` and
+`spdlog-1.17.0-2`, whose detached signatures were verified with ALARM's signing key
+(`alarm.gpg`, in the `iptsd-libs` work dir) before extraction. If `iptsd` still cannot run
+in the Arch Ports live root, the guide records `skip` and offers
+`pacman -S fmt libinih spdlog` (live RAM root only, needs network). Everything is read-only apart from that daemon and `ip link set up` on the
 Wi-Fi interface; no driver is unbound, nothing is written to disks, EFI variables,
 regulators, LEDs or rfkill.
 

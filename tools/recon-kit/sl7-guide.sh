@@ -6,10 +6,10 @@
 #
 #   a. welcome + safety   b. identity check   c. baseline recon
 #   d. firmware into RAM  e. recon again      f. interactive checks
-#   g. optional suspend   h. summary + poweroff
+#   g. optional suspend (2 min), optional 30+ min battery sleep   h. summary + poweroff
 #   (on the linux-sl7 test kernel, release contains "sl7": extra step "sl7kernel" between
 #    e. and f. - cpufreq policies, SPI touch devices, GPU/zap, battery capacity, Wi-Fi,
-#    touchpad through iptsd-sl7, and the touchpad again after the optional suspend)
+#    touchpad and touchscreen through two iptsd-sl7 instances, and again after the optional suspend)
 #
 # Safety: never touches the internal disk, never writes EFI variables, never
 # touches regulators, LEDs or rfkill. Firmware goes to /lib/firmware/updates on
@@ -50,6 +50,10 @@ SL7TEST="$DATA/sl7test"
 IPTSD_PKG="$SL7TEST/iptsd-sl7.pkg.tar.zst"
 IPTSD_LOG="$RAMDIR/iptsd.log"
 IPTSD_PID=""
+IPTSD_TS_LOG="$RAMDIR/iptsd-touchscreen.log"
+IPTSD_TS_PID=""
+IPTSD_BIN=""
+IPTSD_LDP=""
 SL7_SUMMARY=""
 
 # ---------------------------------------------------------------- basics
@@ -59,13 +63,8 @@ if [ "$(id -u)" != 0 ]; then
 	echo "(continuing anyway: SL7_UI test mode)" >&2
 fi
 
-# The SL7 panel is 2304x1536 at 13.8", so the default console font is tiny.
-# On a Linux VT, switch to the largest Terminus font the live root has.
-if [ "${TERM:-linux}" = linux ] && command -v setfont >/dev/null 2>&1; then
-	for font in ter-132b ter-v32b ter-132n ter-v32n ter-128b ter-v28b; do
-		setfont "$font" 2>/dev/null && break
-	done
-fi
+# Console font: see sl7_font below (explicit /dev/tty1 target, logged, re-applied later).
+case "${TERM:-}" in "" | dumb | unknown) [ -n "${SL7_UI:-}" ] || export TERM=linux ;; esac
 
 if [ "${TERM:-linux}" = linux ] || ! locale charmap 2>/dev/null | grep -qi 'utf-8'; then
 	OK="[OK]"
@@ -94,6 +93,58 @@ say() {
 flush_log() {
 	[ -n "$SESS" ] && [ -d "$SESS" ] && cp "$LOG" "$SESS/guide.log" 2>/dev/null
 	return 0
+}
+
+# The SL7 panel is 2304x1536 at 13.8", so the default console font is tiny. Apply the largest
+# Terminus font the live root has to /dev/tty1 (-C: explicit target, not whatever setfont
+# guesses) and log what happened. Run 4: a bare `setfont` with stderr discarded had no visible
+# effect and logged nothing; msm's fbdev takeover or systemd-vconsole-setup can also reset the
+# font after boot, so this is called again after the firmware step and before the interactive
+# checks. Success = setfont exit status 0; the console rows/cols before/after are logged.
+sl7_font() { # tag
+	local t=/dev/tty1 f ok="" err c0 c1
+	[ -z "${SL7_UI:-}" ] || return 0
+	if [ ! -c "$t" ] || ! command -v setfont >/dev/null 2>&1; then
+		log "font[$1]: no $t or no setfont: skipped"
+		return 0
+	fi
+	c0="$(stty -F "$t" size 2>/dev/null)"
+	for f in ter-132b ter-v32b ter-132n ter-v32n ter-128b ter-v28b; do
+		if err="$(setfont -C "$t" "$f" 2>&1)"; then
+			ok="$f"
+			break
+		fi
+		log "font[$1]: setfont -C $t $f failed: $err"
+	done
+	if [ -z "$ok" ]; then
+		if err="$(setfont -C "$t" -d 2>&1)"; then
+			ok="-d (doubled default font)"
+		else
+			log "font[$1]: setfont -C $t -d failed: $err"
+		fi
+	fi
+	c1="$(stty -F "$t" size 2>/dev/null)"
+	log "font[$1]: ${ok:-NO FONT APPLIED}; console rows/cols $c0 -> $c1; TERM=${TERM:-unset} tty=$(tty 2>/dev/null) fgconsole=$(fgconsole 2>/dev/null)"
+	if [ "$c0" = "$c1" ] && [ -n "$ok" ]; then
+		log "font[$1]: WARNING setfont succeeded but the console size did not change (font already active, or the console is not the fbcon one)"
+	fi
+	return 0
+}
+
+sl7_font_diag() { # tag
+	local v
+	{
+		echo "font-diag[$1]:"
+		for v in /sys/class/vtconsole/vtcon*; do
+			[ -d "$v" ] && printf '  %s name="%s" bind=%s\n' "${v##*/}" "$(cat "$v/name" 2>/dev/null)" "$(cat "$v/bind" 2>/dev/null)"
+		done
+		for v in /sys/class/graphics/fbcon/*; do
+			[ -f "$v" ] && printf '  fbcon/%s=%s\n' "${v##*/}" "$(cat "$v" 2>/dev/null)"
+		done
+		printf '  fb0 virtual_size=%s name=%s\n' "$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)" "$(cat /sys/class/graphics/fb0/name 2>/dev/null)"
+		echo "  vconsole-setup journal:"
+		journalctl -b -u systemd-vconsole-setup --no-pager -q 2>/dev/null | tail -n 4 | sed 's/^/    /'
+	} >>"$LOG" 2>&1
 }
 
 # ---------------------------------------------------------------- UI helpers
@@ -304,22 +355,31 @@ suspended_secs() {
 write_evwatch() {
 	cat >"$RAMDIR/evwatch.py" <<'PYEOF'
 #!/usr/bin/env python3
-"""evwatch.py MODE SECONDS - passive input event watcher (never grabs devices).
+"""evwatch.py MODE SECONDS [MIN_EVENTS] - passive input event watcher (never grabs devices).
 
 MODE: key | touchpad | touchscreen | lid
-Prints one line per interesting device:  RESULT|<device name>|<detail>
+Shows a live readout (~5x/s, on /dev/tty or stderr): per relevant device the running event
+count and the latest X/Y (ABS_X/ABS_MT_POSITION_X or REL_X). Enter ends the watch early.
+stdout, for the guide:
+  RESULT|<device (eventN)>|<N events, coordinates changed/static, ...>
+  AUTO|yes|<names>  or  AUTO|no     (touch modes: >= MIN_EVENTS events AND changing coordinates)
+
+struct input_event on 64-bit Linux is 24 bytes: timeval (2 x 8), u16 type, u16 code, s32 value.
 """
 import os
 import re
 import select
 import struct
 import sys
+import termios
 import time
 
 EV_KEY, EV_REL, EV_ABS, EV_SW = 1, 2, 3, 5
 FMT = "llHHi"
 SIZE = struct.calcsize(FMT)
-BTN_LEFT, BTN_TOUCH = 0x110, 0x14A
+BTN_MISC = 0x100
+REL_HWHEEL, REL_WHEEL, REL_WHEEL_HI, REL_HWHEEL_HI = 6, 8, 0xB, 0xC
+ABS_X, ABS_Y, ABS_MT_X, ABS_MT_Y = 0, 1, 0x35, 0x36
 
 
 def devices():
@@ -330,61 +390,197 @@ def devices():
         name = re.search(r'N: Name="(.*)"', blk)
         hand = re.search(r"H: Handlers=(.*)", blk)
         prop = re.search(r"B: PROP=(\S+)", blk)
+        ev = re.search(r"B: EV=(\S+)", blk)
         if name and hand:
-            for ev in re.findall(r"event\d+", hand.group(1)):
-                out[ev] = (name.group(1), int(prop.group(1), 16) if prop else 0)
+            for node in re.findall(r"event\d+", hand.group(1)):
+                out[node] = (
+                    name.group(1),
+                    int(prop.group(1), 16) if prop else 0,
+                    int(ev.group(1), 16) if ev else 0,
+                )
     return out
 
 
-def interesting(mode, props, etype, code, value):
-    direct = bool(props & 0x2)
-    if mode == "key":
-        return etype == EV_KEY and code < 0x100 and value == 1
+def is_screen(name, props):
+    return bool(props & 0x2) or "ouchscreen" in name or "0C6E" in name
+
+
+def relevant(mode, name, props, evbits):
+    """Device is shown in the readout from the start (candidate for this mode)."""
+    pointer = bool(evbits & ((1 << EV_REL) | (1 << EV_ABS)))
     if mode == "touchpad":
-        if direct:
-            return False
-        return etype in (EV_REL, EV_ABS) or (etype == EV_KEY and code in (BTN_LEFT, BTN_TOUCH))
+        return pointer and not is_screen(name, props) and "Keyboard" not in name
     if mode == "touchscreen":
-        return direct and (etype == EV_ABS or (etype == EV_KEY and code == BTN_TOUCH))
+        return pointer and is_screen(name, props)
+    return False
+
+
+def interesting(mode, name, props, etype, code, value):
+    if mode == "key":
+        return etype == EV_KEY and code < BTN_MISC and value == 1
+    if mode == "touchpad":
+        if is_screen(name, props):
+            return False
+        return etype in (EV_REL, EV_ABS) or (etype == EV_KEY and code >= BTN_MISC)
+    if mode == "touchscreen":
+        return is_screen(name, props) and (etype in (EV_ABS, EV_REL) or (etype == EV_KEY and code >= BTN_MISC))
     if mode == "lid":
         return etype == EV_SW and code == 0
     return False
 
 
+class Stat:
+    def __init__(self):
+        self.n = 0
+        self.x = self.y = None
+        self.xmin = self.xmax = self.ymin = self.ymax = None
+        self.rel_moved = False
+        self.btn = 0
+        self.wheel = 0
+        self.lid = None
+
+    def feed(self, etype, code, value):
+        self.n += 1
+        if etype == EV_ABS and code in (ABS_X, ABS_MT_X):
+            self.x = value
+            self.xmin = value if self.xmin is None else min(self.xmin, value)
+            self.xmax = value if self.xmax is None else max(self.xmax, value)
+        elif etype == EV_ABS and code in (ABS_Y, ABS_MT_Y):
+            self.y = value
+            self.ymin = value if self.ymin is None else min(self.ymin, value)
+            self.ymax = value if self.ymax is None else max(self.ymax, value)
+        elif etype == EV_REL and code in (0, 1):
+            if code == 0:
+                self.x = value
+            else:
+                self.y = value
+            self.rel_moved = self.rel_moved or value != 0
+        elif etype == EV_REL and code in (REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI, REL_HWHEEL_HI):
+            self.wheel += 1
+            self.rel_moved = self.rel_moved or value != 0
+        elif etype == EV_KEY and code >= BTN_MISC and value == 1:
+            self.btn += 1
+        elif etype == EV_SW:
+            self.lid = value
+
+    def changed(self):
+        if self.xmin is not None and self.xmax != self.xmin:
+            return True
+        if self.ymin is not None and self.ymax != self.ymin:
+            return True
+        return self.rel_moved
+
+    def detail(self, mode):
+        if mode == "lid":
+            return "%d SW_LID events, last %s" % (self.n, "closed" if self.lid else "open")
+        parts = ["%d events" % self.n]
+        if mode in ("touchpad", "touchscreen"):
+            if self.xmin is not None or self.ymin is not None:
+                parts.append(
+                    "coords %s (X %s..%s, Y %s..%s)"
+                    % ("changed" if self.changed() else "static", self.xmin, self.xmax, self.ymin, self.ymax)
+                )
+            elif self.rel_moved:
+                parts.append("coords changed (relative motion)")
+            else:
+                parts.append("coords static")
+            if self.btn:
+                parts.append("%d button/touch presses" % self.btn)
+            if self.wheel:
+                parts.append("%d wheel events" % self.wheel)
+        return ", ".join(parts)
+
+
+def open_display():
+    try:
+        return os.fdopen(os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY), "w")
+    except OSError:
+        pass
+    return sys.stderr if sys.stderr.isatty() else None
+
+
 def main():
     mode, secs = sys.argv[1], float(sys.argv[2])
+    min_events = int(sys.argv[3]) if len(sys.argv) > 3 else 20
     devs = devices()
     fds = {}
-    for ev in devs:
+    for node in devs:
         try:
-            fds[os.open("/dev/input/" + ev, os.O_RDONLY | os.O_NONBLOCK)] = ev
+            fds[os.open("/dev/input/" + node, os.O_RDONLY | os.O_NONBLOCK)] = node
         except OSError:
             pass
-    counts = {}
-    lid = []
+    stats = {}
+    for node, (name, props, evbits) in devs.items():
+        if relevant(mode, name, props, evbits):
+            stats[node] = Stat()
+    disp = open_display()
+    stdin_fd = None
+    if sys.stdin.isatty():
+        stdin_fd = sys.stdin.fileno()
+        try:
+            termios.tcflush(stdin_fd, termios.TCIFLUSH)
+        except termios.error:
+            pass
     end = time.time() + secs
-    first = None
-    while time.time() < end:
-        if first and time.time() > first + 2.5 and mode != "lid":
+    drawn = 0
+    last_draw = 0.0
+    while True:
+        now = time.time()
+        if now >= end:
             break
-        ready, _, _ = select.select(list(fds), [], [], 0.25)
+        watch = list(fds) + ([stdin_fd] if stdin_fd is not None else [])
+        ready, _, _ = select.select(watch, [], [], 0.1)
+        stop = False
         for fd in ready:
+            if fd == stdin_fd:
+                os.read(fd, 256)
+                stop = True
+                continue
             try:
                 data = os.read(fd, SIZE * 64)
             except OSError:
                 continue
+            node = fds[fd]
+            name, props, _ = devs[node]
             for off in range(0, len(data) - SIZE + 1, SIZE):
                 _, _, etype, code, value = struct.unpack(FMT, data[off:off + SIZE])
-                name, props = devs[fds[fd]]
-                if interesting(mode, props, etype, code, value):
-                    counts[name] = counts.get(name, 0) + 1
-                    first = first or time.time()
-                    if mode == "lid":
-                        lid.append("closed" if value else "open")
-    for name, n in sorted(counts.items()):
-        detail = (" ".join(lid)) if mode == "lid" else "%d events" % n
-        print("RESULT|%s|%s" % (name, detail))
-    sys.exit(0 if counts else 1)
+                if interesting(mode, name, props, etype, code, value):
+                    stats.setdefault(node, Stat()).feed(etype, code, value)
+        if stop:
+            break
+        if disp and now - last_draw >= 0.2:
+            last_draw = now
+            lines = ["  live %s: %2d s left, Enter = done" % (mode, max(0, int(end - now)))]
+            for node in sorted(stats, key=lambda k: int(k[5:])):
+                st = stats[node]
+                xs = "-" if st.x is None else str(st.x)
+                ys = "-" if st.y is None else str(st.y)
+                lines.append(
+                    "  %-7s %-26.26s n=%-5d X=%-6s Y=%-6s btn=%d wh=%d %s"
+                    % (node, devs[node][0], st.n, xs, ys, st.btn, st.wheel, "MOVING" if st.changed() else "")
+                )
+            if len(lines) == 1:
+                lines.append("  (no matching device has produced an event yet)")
+            try:
+                if drawn:
+                    disp.write("\033[%dA" % drawn)
+                for ln in lines:
+                    disp.write("\r\033[K" + ln + "\n")
+                disp.flush()
+                drawn = len(lines)
+            except OSError:
+                disp = None
+    auto = []
+    for node in sorted(stats, key=lambda k: int(k[5:])):
+        st = stats[node]
+        if st.n == 0:
+            continue
+        print("RESULT|%s (%s)|%s" % (devs[node][0], node, st.detail(mode)))
+        if mode in ("touchpad", "touchscreen") and st.n >= min_events and st.changed():
+            auto.append("%s (%s)" % (devs[node][0], node))
+    if mode in ("touchpad", "touchscreen"):
+        print("AUTO|yes|%s" % ", ".join(auto) if auto else "AUTO|no")
+    sys.exit(0 if any(st.n for st in stats.values()) else 1)
 
 
 main()
@@ -536,6 +732,7 @@ Load firmware now?" y; then
 	dmesg >"$RAMDIR/dmesg-after-fw.txt" 2>/dev/null
 	diff "$RAMDIR/dmesg-before-fw.txt" "$RAMDIR/dmesg-after-fw.txt" | grep '^>' | grep -iE 'remoteproc|adsp|cdsp|battmgr|pmic_glink|qcom_|firmware|adreno|gpu' | tail -n 40 | tee -a "$LOG"
 
+	sl7_font after-firmware
 	if is_sl7_kernel; then
 		say "GPU note: the zap shader was already provided at boot by the test initramfs; see the linux-sl7 checks."
 	else
@@ -562,22 +759,55 @@ step_withfw() {
 	run_recon with-firmware
 }
 
-record_check() { # key question hint watcher-mode seconds
-	local key="$1" question="$2" hint="$3" mode="${4:-}" secs="${5:-15}" det="" out=""
+# A device with at least this many events and changing coordinates counts as working even
+# when Chris answers "no" (both are recorded: <key> = his answer, <key>_auto = the data).
+MIN_EVENTS="${SL7_MIN_EVENTS:-20}"
+
+# record_check KEY QUESTION HINT WATCHER-MODE SECONDS
+# Live readout (event counts, latest X/Y per device) while Chris does the gesture, then he
+# confirms. Kernel messages are kept off the console during the readout (dmesg -n 1) and
+# saved to <session>/kmsg-<key>.txt: run 4 showed an error at the bottom of the screen
+# during the touchpad test that no log explained.
+record_check() {
+	local key="$1" question="$2" hint="$3" mode="${4:-}" secs="${5:-20}" det="" out="" auto="" auto_names="" n0 oldlvl
 	ui_msg "$question" "$hint
 
-Press Enter, then do it within $secs seconds."
+Press Enter, then do it. A live readout shows the event count and the latest X/Y of each input device; press Enter again when you are done (or wait $secs seconds)."
 	if [ -n "$mode" ]; then
-		say "Watching input events ($mode) for $secs s..."
-		out="$(python3 "$RAMDIR/evwatch.py" "$mode" "$secs" 2>/dev/null)"
+		say "Live input readout ($mode, up to $secs s)..."
+		oldlvl="$(cut -f1 /proc/sys/kernel/printk 2>/dev/null)"
+		n0="$(dmesg 2>/dev/null | wc -l)"
+		dmesg -n 1 2>/dev/null
+		out="$(python3 "$RAMDIR/evwatch.py" "$mode" "$secs" "$MIN_EVENTS" 2>/dev/null)"
+		[ -n "$oldlvl" ] && dmesg -n "$oldlvl" 2>/dev/null
+		if [ -d "$SESS" ]; then
+			dmesg 2>/dev/null | tail -n +"$((n0 + 1))" >"$SESS/kmsg-$key.txt"
+			if [ -s "$SESS/kmsg-$key.txt" ]; then
+				log "kernel messages during $key (also in kmsg-$key.txt):"
+				sed 's/^/    /' "$SESS/kmsg-$key.txt" >>"$LOG"
+				say "  kernel messages during this step: $(wc -l <"$SESS/kmsg-$key.txt") line(s), saved to kmsg-$key.txt"
+				grep -iE 'error|fail|warn|timeout|unknown' "$SESS/kmsg-$key.txt" | head -n 3 | while read -r line; do say "    $line"; done
+			fi
+		fi
 		det="$(echo "$out" | sed -n 's/^RESULT|//p' | tr '\n' ';')"
 		[ -n "$det" ] || det="no events seen"
+		auto="$(echo "$out" | sed -n 's/^AUTO|\([a-z]*\)|\{0,1\}\(.*\)$/\1/p' | head -n 1)"
+		auto_names="$(echo "$out" | sed -n 's/^AUTO|[a-z]*|\{0,1\}//p' | head -n 1)"
 		say "  detected: $det"
+		[ -n "$auto" ] && say "  working by event data (>= $MIN_EVENTS events, changing coordinates): $auto${auto_names:+ ($auto_names)}"
 	fi
-	ui_menu "$question" "Detected: $det
+	ui_menu "$question" "Detected: $det${auto:+
 
-What did you observe?" yes "Yes, it worked" no "No / nothing happened" skip "Skip / not applicable"
+Event data says working: $auto (needs >= $MIN_EVENTS events with changing coordinates)}
+
+Did it work as you expected (cursor / contacts followed your finger)?" yes "Yes, it worked" no "No / nothing happened" skip "Skip / not applicable"
 	answer "$key" "$REPLY" "$det"
+	if [ -n "$auto" ]; then
+		answer "${key}_auto" "$auto" "min_events=$MIN_EVENTS; ${auto_names:-none}"
+		if [ "$auto" = yes ] && [ "$REPLY" = no ]; then
+			say "  Note: you answered no, but the event data shows working input; both are recorded."
+		fi
+	fi
 }
 
 ps_snapshot() {
@@ -598,6 +828,8 @@ step_checks() {
 	local before after ev out start
 	mkdir -p "$RES"
 	write_evwatch
+	sl7_font before-interactive
+	sl7_font_diag before-interactive
 	{
 		echo "# /proc/bus/input/devices names"
 		grep -E '^(N: Name|H: Handlers)' /proc/bus/input/devices
@@ -613,10 +845,12 @@ step_checks() {
 		record_check touchscreen "Touchscreen" "Touch and drag on the screen with a finger." touchscreen 15
 	fi
 
-	# lid: block logind from suspending while we watch
+	# lid: block logind from suspending while we watch; record SW_LID events only
 	ui_msg "Lid switch" "Next: close the lid, wait 2 seconds, then open it again.
 
-The guide blocks suspend while it watches (20 s). The screen may go dark while closed."
+This only records SW_LID events from the lid switch. In this text console nothing turns the panel off when the lid closes: that is done by Omarchy/Hyprland (or logind), so a screen that stays on is expected here.
+
+The guide blocks suspend while it watches (20 s)."
 	say "Watching SW_LID for 20 s..."
 	if command -v systemd-inhibit >/dev/null 2>&1; then
 		out="$(systemd-inhibit --what=handle-lid-switch --who=sl7-guide --why="lid test" --mode=block python3 "$RAMDIR/evwatch.py" lid 20 2>/dev/null)"
@@ -626,10 +860,14 @@ The guide blocks suspend while it watches (20 s). The screen may go dark while c
 	out="$(echo "$out" | sed -n 's/^RESULT|//p' | tr '\n' ';')"
 	[ -n "$out" ] || out="no SW_LID events"
 	say "  detected: $out"
-	ui_menu "Lid" "Detected: $out
+	case "$out" in
+	*SW_LID*) answer lid_events yes "$out" ;;
+	*) answer lid_events no "$out" ;;
+	esac
+	ui_menu "Lid" "SW_LID: $out
 
-Did the screen react to the lid (or did you see lid events above)?" yes "Yes" no "No" skip "Skip"
-	answer lid "$REPLY" "$out"
+Did you close and open the lid during the watch? (The panel not turning off is expected, see above.)" yes "Yes, I closed and opened it" no "No, I did not" skip "Skip"
+	answer lid "$REPLY" "SW_LID events only; $out"
 
 	ui_msg "Keyboard backlight" "Press the keyboard backlight key (Fn + the backlight key, or the dedicated key) a few times.
 
@@ -703,7 +941,7 @@ This system has no RTC alarm, so it cannot wake itself. The guide will:
 
 RISKS: resume on this machine is experimental. If it does not wake after 5 minutes, hold the power button 10 s; everything already saved on the stick stays.
 
-Run the suspend test?" n; then
+Run the suspend test? (An optional 30+ minute battery test follows.)" n; then
 		answer suspend skip "declined"
 		return 0
 	fi
@@ -746,6 +984,150 @@ Did the screen, keyboard and touchpad all come back?" yes "Yes, everything came 
 	if is_sl7_kernel; then
 		sl7_post_resume
 	fi
+	flush_log
+}
+
+# charger_online: 1 when any Mains/USB supply reports online=1 (qcom-battmgr ac/usb), else 0
+charger_online() {
+	local p t any=0
+	for p in /sys/class/power_supply/*; do
+		t="$(cat "$p/type" 2>/dev/null)"
+		case "$t" in
+		Mains | USB | USB_C | USB_PD | USB_PD_DRP | USB_DCP | USB_CDP | USB_ACA | Wireless)
+			[ "$(cat "$p/online" 2>/dev/null)" = 1 ] && any=1
+			;;
+		esac
+	done
+	echo "$any"
+}
+
+# battery_now: "energy_now_uWh power_now_uW status capacity" of the first battery
+battery_now() {
+	local p
+	for p in /sys/class/power_supply/*; do
+		[ "$(cat "$p/type" 2>/dev/null)" = Battery ] || continue
+		echo "$(cat "$p/energy_now" 2>/dev/null || echo na) $(cat "$p/power_now" 2>/dev/null || echo na) $(cat "$p/status" 2>/dev/null || echo na) $(cat "$p/capacity" 2>/dev/null || echo na)"
+		return
+	done
+	echo "na na na na"
+}
+
+# Optional 30+ minute suspend on battery: measures the idle drain in suspend.
+# ~24 mWh per suspend/resume cycle is overhead (entry/exit, the awake seconds around it), so
+# it is subtracted before the mWh/h and W figures are computed.
+LONGSLEEP_CYCLE_MWH=24
+step_longsleep() {
+	local fwr dir tries ok=0 bn0 bn1 e0 e1 p0 p1 u0 u1 s0 s1 ac1
+	fwr="$(prog_get fw_result)"
+	if [ ! -r /sys/power/mem_sleep ] || [ "$fwr" != ok ]; then
+		say "Long sleep test skipped (needs mem_sleep and the firmware step: fw_result=${fwr:-none})."
+		return 0
+	fi
+	if ! ui_yesno "Long sleep test (optional, 30+ minutes)" "Measures how much the battery drains in suspend (mWh/h and W).
+
+You must UNPLUG the charger for this one. The guide:
+ 1. checks the charger is unplugged (qcom-battmgr ac/usb online = 0)
+ 2. records energy_now, power_now and qcom_stats
+ 3. runs 'systemctl suspend'
+ 4. YOU wake it with the power button (or the lid) after AT LEAST 30 minutes
+ 5. it records the energy delta and the suspended seconds and writes a summary
+
+A per-cycle constant of about $LONGSLEEP_CYCLE_MWH mWh is subtracted. Stay on battery only for this test; plug the charger back in afterwards. If it does not wake after the time you chose, hold the power button 10 s; everything already saved on the stick stays.
+
+Run the 30+ minute test?" n; then
+		answer longsleep skip "declined"
+		return 0
+	fi
+	ensure_data
+	for ((tries = 0; tries < 4; tries++)); do
+		if [ "$(charger_online)" = 0 ]; then
+			ok=1
+			break
+		fi
+		ui_msg "Unplug the charger" "A charger is still online:
+$(ps_snapshot)
+
+Unplug the USB-C charger (all USB-C ports), wait 5 seconds, then press Enter."
+		sleep 3
+	done
+	if [ "$ok" != 1 ]; then
+		answer longsleep skip "charger stayed online"
+		say "Long sleep test skipped: the charger is still online."
+		return 0
+	fi
+	dir="$RES/$TS-longsleep"
+	mkdir -p "$dir"
+	if ! mountpoint -q /sys/kernel/debug 2>/dev/null; then
+		mount -t debugfs nodev /sys/kernel/debug 2>/dev/null
+	fi
+	stats_dump "$dir/qcom_stats-before.txt"
+	ps_snapshot >"$dir/power_supply-before.txt"
+	bn0="$(battery_now)"
+	read -r e0 p0 _ <<<"$bn0"
+	echo "energy_now_uWh power_now_uW status capacity: $bn0" >"$dir/battery-before.txt"
+	if ! [[ "$e0" =~ ^[0-9]+$ ]]; then
+		answer longsleep skip "battery has no energy_now (got: $bn0)"
+		say "Long sleep test skipped: no energy_now on the battery ($bn0)."
+		return 0
+	fi
+	s0="$(date +%s)"
+	u0="$(suspended_secs)"
+	sync
+	say "Battery before: $bn0. Suspending now; wake it after at least 30 minutes (power button or lid)."
+	flush_log
+	sleep 2
+	systemctl suspend
+	sleep 10
+	s1="$(date +%s)"
+	u1="$(suspended_secs)"
+	bn1="$(battery_now)"
+	read -r e1 p1 _ <<<"$bn1"
+	ac1="$(charger_online)"
+	ensure_data
+	mkdir -p "$dir"
+	echo "energy_now_uWh power_now_uW status capacity: $bn1" >"$dir/battery-after.txt"
+	ps_snapshot >"$dir/power_supply-after.txt"
+	stats_dump "$dir/qcom_stats-after.txt"
+	diff "$dir/qcom_stats-before.txt" "$dir/qcom_stats-after.txt" >"$dir/qcom_stats.diff" 2>&1
+	{
+		dmesg | grep -E 'PM: suspend (entry|exit)' | tail -n 4
+		journalctl -k -b --no-pager -q 2>/dev/null | grep -E 'PM: suspend (entry|exit)' | tail -n 4
+	} >"$dir/suspend-markers.txt" 2>&1
+	dmesg | tail -n 200 >"$dir/dmesg-tail.txt" 2>&1
+	python3 - "$e0" "$e1" "$p0" "$p1" "$u0" "$u1" "$s0" "$s1" "$ac1" "$LONGSLEEP_CYCLE_MWH" >"$dir/summary.txt" <<'PYSUM'
+import sys
+
+e0, e1 = int(sys.argv[1]), (int(sys.argv[2]) if sys.argv[2].isdigit() else None)
+p0, p1 = sys.argv[3], sys.argv[4]
+susp = float(sys.argv[6]) - float(sys.argv[5])
+wall = int(sys.argv[8]) - int(sys.argv[7])
+ac1, cyc = sys.argv[9], float(sys.argv[10])
+print("long sleep on battery (suspend, woken by hand)")
+print("wall seconds across the test: %d (%.1f min)" % (wall, wall / 60.0))
+print("suspended seconds (CLOCK_BOOTTIME - CLOCK_MONOTONIC delta): %.0f (%.1f min)" % (susp, susp / 60.0))
+print("power_now before/after: %s / %s uW (instantaneous, awake)" % (p0, p1))
+if e1 is None:
+    print("energy_now after: unreadable; no rate computed")
+    sys.exit(0)
+delta = (e0 - e1) / 1000.0
+print("energy_now before/after: %d / %d uWh" % (e0, e1))
+print("energy delta: %.1f mWh" % delta)
+print("per-cycle constant subtracted: %.0f mWh" % cyc)
+net = delta - cyc
+print("net energy: %.1f mWh" % net)
+if susp > 0:
+    hours = susp / 3600.0
+    print("drain: %.1f mWh/h = %.3f W (net energy over suspended time)" % (net / hours, net / hours / 1000.0))
+if susp < 1800:
+    print("WARNING: suspended less than 30 minutes: the rate is dominated by gauge granularity and the constant")
+if ac1 != "0":
+    print("WARNING: a charger was online after resume: the energy figures are not valid")
+PYSUM
+	cat "$dir/summary.txt" | tee -a "$LOG"
+	answer longsleep yes "$(grep -E '^drain|^suspended seconds' "$dir/summary.txt" | tr '\n' ';')"
+	ui_msg "Long sleep result" "$(cat "$dir/summary.txt")
+
+Plug the charger back in. Details: $dir"
 	flush_log
 }
 
@@ -891,6 +1273,9 @@ sl7_check_gpu() { # outdir
 	else
 		detail="$cards card(s), $render render node(s), no zap error${name:+, dri name: $name}"
 	fi
+	if echo "$k" | grep -qi 'failed to load gen70500_sqe'; then
+		detail="$detail; note: gen70500_sqe.fw was missing at the early probe (-2), the GPU retries at first use"
+	fi
 	sl7_result "sl7_gpu$2" "$rc" "GPU initialised (zap shader loaded at boot)" "$detail"
 }
 
@@ -914,15 +1299,41 @@ sl7_check_battery() { # outdir suffix
 	fi
 }
 
-sl7_check_wifi() { # outdir suffix
-	local p ifc="" st soft="" hard="" r n="" rc=0 detail
+sl7_wifi_iface() {
+	local p
 	for p in /sys/class/net/*; do
 		if [ -d "$p/wireless" ]; then
-			ifc="${p##*/}"
-			break
+			echo "${p##*/}"
+			return 0
 		fi
 	done
-	kmsg_all | grep -iE 'ath12k|rfkill' | sort -u >"$1/wifi-dmesg.txt" 2>&1
+	return 1
+}
+
+sl7_check_wifi() { # outdir suffix
+	local ifc="" st soft="" hard="" r n="" rc=0 detail how="" i
+	ifc="$(sl7_wifi_iface)"
+	if [ -z "$ifc" ]; then
+		# The test initramfs keeps ath12k out (its firmware is only in the live root), so udev
+		# coldplug after switch_root should have loaded it. If there is still no wlan, load
+		# the module now (a load only: nothing is unloaded or rebound).
+		{
+			echo "== no wlan yet; ath12k modules loaded: $(grep -c '^ath12k' /proc/modules 2>/dev/null)"
+			ls /usr/lib/modules/"$KREL"/kernel/drivers/net/wireless/ath/ath12k/ 2>&1
+		} >>"$LOG"
+		if ! grep -q '^ath12k' /proc/modules 2>/dev/null; then
+			say "  no wlan and ath12k is not loaded: modprobe ath12k_wifi7 (module load only)"
+			modprobe ath12k_wifi7 >>"$LOG" 2>&1 || modprobe ath12k_wifi7_pci >>"$LOG" 2>&1
+			how=", loaded by the guide's modprobe (coldplug had not loaded it)"
+		else
+			say "  ath12k is loaded but there is no wlan interface: waiting for the probe"
+		fi
+		for ((i = 0; i < 20; i++)); do
+			ifc="$(sl7_wifi_iface)" && break
+			sleep 1
+		done
+	fi
+	kmsg_all | grep -iE 'ath12k|rfkill|regulatory|cfg80211' | sort -u >"$1/wifi-dmesg.txt" 2>&1
 	if [ -z "$ifc" ]; then
 		sl7_result "sl7_wifi$2" 1 "Wi-Fi" "no wireless interface (ath12k did not probe; see wifi-dmesg.txt)"
 		return 0
@@ -938,27 +1349,39 @@ sl7_check_wifi() { # outdir suffix
 		sleep 3
 		n="$(iw dev "$ifc" scan 2>/dev/null | grep -c '^BSS')"
 	fi
-	detail="$ifc operstate=$st rfkill soft=${soft:-?} hard=${hard:-?}${n:+, scan sees $n access points}"
+	detail="$ifc operstate=$st rfkill soft=${soft:-?} hard=${hard:-?}${n:+, scan sees $n access points}$how"
 	if [ "$soft" = 1 ] || [ "$hard" = 1 ] || [ "$n" = 0 ]; then
 		rc=1
 	fi
 	sl7_result "sl7_wifi$2" "$rc" "Wi-Fi up" "$detail"
 }
 
-sl7_stop_iptsd() {
-	if [ -n "$IPTSD_PID" ] && kill -0 "$IPTSD_PID" 2>/dev/null; then
-		kill "$IPTSD_PID" 2>/dev/null
+sl7_kill_pid() { # pid
+	if [ -n "$1" ] && kill -0 "$1" 2>/dev/null; then
+		kill "$1" 2>/dev/null
 		sleep 1
 	fi
-	[ -f "$IPTSD_LOG" ] && [ -d "$SESS" ] && cp "$IPTSD_LOG" "$SESS/iptsd.log" 2>/dev/null
-	IPTSD_PID=""
 	return 0
 }
 
-# sl7_start_iptsd HIDRAW: unpack the iptsd-sl7 package into a temp root, run its binary on
-# the touchpad hidraw node, wait for the virtual touchpad. Returns 1 when it cannot run.
-sl7_start_iptsd() {
-	local hr="$1" root="$RAMDIR/iptsd-root" bin miss i f
+sl7_stop_iptsd() {
+	sl7_kill_pid "$IPTSD_PID"
+	sl7_kill_pid "$IPTSD_TS_PID"
+	if [ -d "$SESS" ]; then
+		[ -f "$IPTSD_LOG" ] && cp "$IPTSD_LOG" "$SESS/iptsd.log" 2>/dev/null
+		[ -f "$IPTSD_TS_LOG" ] && cp "$IPTSD_TS_LOG" "$SESS/iptsd-touchscreen.log" 2>/dev/null
+	fi
+	IPTSD_PID=""
+	IPTSD_TS_PID=""
+	return 0
+}
+
+# sl7_iptsd_prepare: unpack the iptsd-sl7 package into a temp root once and check that its
+# binary can run (libraries from sl7test/lib, else optionally pacman). Sets IPTSD_BIN and
+# IPTSD_LDP. Returns 1 when iptsd cannot run.
+sl7_iptsd_prepare() {
+	local root="$RAMDIR/iptsd-root" miss f
+	[ -z "$IPTSD_BIN" ] || return 0
 	if [ ! -f "$IPTSD_PKG" ]; then
 		sl7_result sl7_iptsd_start 2 "iptsd" "package not on the stick (built without --iptsd-pkg)"
 		return 1
@@ -969,23 +1392,23 @@ sl7_start_iptsd() {
 		sl7_result sl7_iptsd_start 1 "iptsd" "could not unpack $IPTSD_PKG"
 		return 1
 	fi
-	bin="$root/usr/bin/iptsd"
-	# Optional ALARM libraries staged on the stick under sl7test/lib (files named by
-	# soname; FAT has no symlinks). Copy to RAM so noexec mounts cannot matter.
-	local ldp=""
+	IPTSD_LDP=""
+	# ALARM libraries (verified against ALARM's signing key at build time) staged on the stick
+	# under sl7test/lib, named by soname because FAT has no symlinks. Copy to RAM so noexec
+	# mounts cannot matter.
 	if [ -d "$SL7TEST/lib" ]; then
 		mkdir -p "$root/sl7lib"
 		cp -a "$SL7TEST/lib/." "$root/sl7lib/"
-		ldp="$root/sl7lib"
+		IPTSD_LDP="$root/sl7lib"
 	fi
-	miss="$(LD_LIBRARY_PATH="$ldp" ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
+	miss="$(LD_LIBRARY_PATH="$IPTSD_LDP" ldd "$root/usr/bin/iptsd" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
 	if [ -n "$miss" ] && ui_yesno "iptsd needs libraries" "The iptsd-sl7 binary (built on Arch Linux ARM) cannot run in this live root:
 
 $(echo "$miss" | head -n 4)
 
 Try 'pacman -S --needed fmt libinih spdlog' now? This needs working network (Wi-Fi or Ethernet) and only changes the live RAM root, never a disk." n; then
 		pacman -S --noconfirm --needed fmt libinih spdlog >>"$LOG" 2>&1
-		miss="$(LD_LIBRARY_PATH="$ldp" ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
+		miss="$(LD_LIBRARY_PATH="$IPTSD_LDP" ldd "$root/usr/bin/iptsd" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
 	fi
 	if [ -n "$miss" ]; then
 		sl7_result sl7_iptsd_start 2 "iptsd" "binary cannot run in this live root: $(echo "$miss" | head -n 2 | tr -s '\t ' ' ')"
@@ -997,19 +1420,58 @@ Try 'pacman -S --needed fmt libinih spdlog' now? This needs working network (Wi-
 		[ -e "$root/etc/$f" ] && cp -a "$root/etc/$f" /etc/
 	done
 	[ -d "$root/usr/share/iptsd" ] && cp -a "$root/usr/share/iptsd/." /usr/share/iptsd/
-	sl7_stop_iptsd
-	LD_LIBRARY_PATH="$ldp" "$bin" "$hr" >"$IPTSD_LOG" 2>&1 &
-	IPTSD_PID=$!
+	IPTSD_BIN="$root/usr/bin/iptsd"
+	return 0
+}
+
+# sl7_iptsd_launch HIDRAW KIND(Touchpad|Touchscreen) PIDVAR LOGFILE RESULT-KEY
+# iptsd chooses its mode itself from the device (Touchpad for the 045E:0C77 precision
+# touchpad, Touchscreen otherwise); there is no mode switch on the command line, so a second
+# instance on the touchscreen hidraw runs in Touchscreen mode and creates "IPTSD Virtual
+# Touchscreen". The mode it picked is read back from its log.
+sl7_iptsd_launch() {
+	local hr="$1" kind="$2" pv="$3" lf="$4" key="$5" pid i mode
+	LD_LIBRARY_PATH="$IPTSD_LDP" "$IPTSD_BIN" "$hr" >"$lf" 2>&1 &
+	pid=$!
+	printf -v "$pv" '%s' "$pid"
 	for ((i = 0; i < 10; i++)); do
 		sleep 1
-		grep -q 'IPTSD Virtual Touchpad' /proc/bus/input/devices 2>/dev/null && break
+		grep -q "IPTSD Virtual $kind" /proc/bus/input/devices 2>/dev/null && break
 	done
-	if kill -0 "$IPTSD_PID" 2>/dev/null && grep -q 'IPTSD Virtual Touchpad' /proc/bus/input/devices 2>/dev/null; then
-		sl7_result sl7_iptsd_start 0 "iptsd on $hr" "running (pid $IPTSD_PID), virtual touchpad created"
+	mode="$(sed -n 's/.*Running in \([A-Za-z]*\) mode.*/\1/p' "$lf" | head -n 1)"
+	if kill -0 "$pid" 2>/dev/null && grep -q "IPTSD Virtual $kind" /proc/bus/input/devices 2>/dev/null; then
+		sl7_result "$key" 0 "iptsd on $hr ($kind)" "running (pid $pid, ${mode:-?} mode), virtual $kind created"
 		return 0
 	fi
-	sl7_result sl7_iptsd_start 1 "iptsd on $hr" "no virtual touchpad: $(tail -n 2 "$IPTSD_LOG" | tr '\n' ' ' | cut -c1-200)"
+	sl7_result "$key" 1 "iptsd on $hr ($kind)" "no virtual $kind (${mode:-no mode line}): $(tail -n 2 "$lf" | tr '\n' ' ' | cut -c1-200)"
 	return 1
+}
+
+# sl7_iptsd_check HIDRAW OUTFILE: iptsd-check-device output (does iptsd recognise the device?)
+sl7_iptsd_check() {
+	local chk="${IPTSD_BIN%/iptsd}/iptsd-check-device"
+	[ -x "$chk" ] || return 0
+	{
+		echo "== iptsd-check-device $1"
+		LD_LIBRARY_PATH="$IPTSD_LDP" timeout 10 "$chk" "$1" 2>&1
+		echo "exit status: $?"
+	} >>"$2"
+}
+
+# sl7_start_iptsd HIDRAW: iptsd on the touchpad hidraw node, wait for the virtual touchpad.
+sl7_start_iptsd() {
+	sl7_iptsd_prepare || return 1
+	sl7_kill_pid "$IPTSD_PID"
+	IPTSD_PID=""
+	sl7_iptsd_launch "$1" Touchpad IPTSD_PID "$IPTSD_LOG" sl7_iptsd_start
+}
+
+# sl7_start_iptsd_ts HIDRAW: second instance on the touchscreen hidraw node.
+sl7_start_iptsd_ts() {
+	sl7_iptsd_prepare || return 1
+	sl7_kill_pid "$IPTSD_TS_PID"
+	IPTSD_TS_PID=""
+	sl7_iptsd_launch "$1" Touchscreen IPTSD_TS_PID "$IPTSD_TS_LOG" sl7_iptsd_ts_start
 }
 
 sl7_touchpad_test() {
@@ -1019,9 +1481,26 @@ sl7_touchpad_test() {
 		return 0
 	fi
 	sl7_start_iptsd "$hr" || return 0
-	record_check sl7_tp_move "Touchpad: move" "Move ONE finger around the touchpad (iptsd is running)." touchpad 15
-	record_check sl7_tp_tap "Touchpad: tap and click" "Tap once, then press the pad down for a physical click." touchpad 15
-	record_check sl7_tp_scroll "Touchpad: scroll" "Two-finger scroll up and down on the touchpad." touchpad 15
+	sl7_iptsd_check "$hr" "$RES/$TS-sl7kernel/iptsd-check.txt"
+	record_check sl7_tp_move "Touchpad: move" "Move ONE finger around the touchpad (iptsd is running)." touchpad 20
+	record_check sl7_tp_tap "Touchpad: tap and click" "Tap a few times, then press the pad down for a physical click." touchpad 20
+	record_check sl7_tp_scroll "Touchpad: scroll" "Two-finger scroll up and down on the touchpad." touchpad 20
+}
+
+# Surface "G6" digitizers (045E:0C6E, spi_hid) send IPTS heatmaps, not HID touch reports, so
+# the kernel's own node stays silent (run 4: no events). iptsd translates them.
+sl7_touchscreen_test() {
+	local hr
+	if hr="$(find_hidraw 045E 0C6E)"; then
+		if sl7_start_iptsd_ts "$hr"; then
+			sl7_iptsd_check "$hr" "$RES/$TS-sl7kernel/iptsd-check.txt"
+		else
+			sl7_iptsd_check "$hr" "$RES/$TS-sl7kernel/iptsd-check.txt"
+		fi
+	else
+		sl7_result sl7_iptsd_ts_start 1 "iptsd (touchscreen)" "no hidraw 045E:0C6E (touchscreen spi_hid not bound?)"
+	fi
+	record_check sl7_touchscreen "Touchscreen" "Touch and drag on the screen with a finger (iptsd runs on the touchscreen too)." touchscreen 20
 }
 
 step_sl7kernel() {
@@ -1029,6 +1508,7 @@ step_sl7kernel() {
 	SL7_SUMMARY=""
 	mkdir -p "$dir"
 	write_evwatch
+	sl7_font before-sl7kernel
 	say "linux-sl7 checks (kernel $KREL):"
 	{
 		echo "uname: $KREL"
@@ -1047,9 +1527,10 @@ step_sl7kernel() {
 	sl7_check_battery "$dir" ""
 	sl7_check_wifi "$dir" ""
 	sl7_touchpad_test
-	record_check sl7_touchscreen "Touchscreen" "Touch and drag on the screen with a finger." touchscreen 15
+	sl7_touchscreen_test
 	ensure_data
 	[ -f "$IPTSD_LOG" ] && cp "$IPTSD_LOG" "$dir/iptsd.log" 2>/dev/null
+	[ -f "$IPTSD_TS_LOG" ] && cp "$IPTSD_TS_LOG" "$dir/iptsd-touchscreen.log" 2>/dev/null
 	ui_msg "linux-sl7 checks" "Kernel $KREL
 
 $SL7_SUMMARY
@@ -1076,7 +1557,11 @@ sl7_post_resume() {
 		sl7_result sl7_resume_iptsd 1 "iptsd after resume" "exited; restarting it for the touchpad check"
 		sl7_start_iptsd "$hr" || true
 	fi
-	record_check sl7_tp_after_suspend "Touchpad after suspend" "Move a finger on the touchpad and click it." touchpad 15
+	if [ -n "$IPTSD_TS_PID" ] && ! kill -0 "$IPTSD_TS_PID" 2>/dev/null && hr="$(find_hidraw 045E 0C6E)"; then
+		sl7_result sl7_resume_iptsd_ts 1 "touchscreen iptsd after resume" "exited; restarting it"
+		sl7_start_iptsd_ts "$hr" || true
+	fi
+	record_check sl7_tp_after_suspend "Touchpad after suspend" "Move a finger on the touchpad and click it." touchpad 20
 	sl7_check_gpu "$dir" _after_resume
 	sl7_check_battery "$dir" _after_resume
 	sl7_check_wifi "$dir" _after_resume
@@ -1092,7 +1577,7 @@ step_summary() {
 Session:  $TS
 
 Step status:"
-	for s in identity baseline firmware withfw sl7kernel checks suspend; do
+	for s in identity baseline firmware withfw sl7kernel checks suspend longsleep; do
 		if [ "$s" = sl7kernel ] && ! is_sl7_kernel; then
 			continue
 		fi
@@ -1150,6 +1635,9 @@ No  = start a fresh run (old results stay on the stick)." y; then
 	mkdir -p "$SESS"
 	[ -f "$SESS/guide.log" ] && cp "$SESS/guide.log" "$LOG"
 	log "sl7-guide start session=$TS ui=$UI resumed=$resumed"
+	[ -f /run/sl7/font.log ] && sed 's/^/autostart-font: /' /run/sl7/font.log >>"$LOG"
+	sl7_font guide-start
+	sl7_font_diag guide-start
 
 	is_done welcome || { step_welcome; step_done welcome; }
 	if ! is_done identity; then
@@ -1164,6 +1652,7 @@ No  = start a fresh run (old results stay on the stick)." y; then
 	fi
 	is_done checks || { step_checks; step_done checks; flush_log; }
 	is_done suspend || { step_suspend; step_done suspend; flush_log; }
+	is_done longsleep || { step_longsleep; step_done longsleep; flush_log; }
 	step_summary
 }
 
