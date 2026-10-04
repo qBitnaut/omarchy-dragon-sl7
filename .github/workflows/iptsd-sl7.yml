@@ -55,9 +55,22 @@ jobs:
           set -euo pipefail
           pkg=$(ls out/*.pkg.tar.* | head -n1)
           mkdir x && tar -C x -xf "$pkg"
-          for f in x/usr/bin/iptsd x/usr/bin/iptsd-calibrate; do
-            readelf -n "$f" | grep -E 'AArch64 feature:.*BTI.*PAC|AArch64 feature:.*PAC.*BTI'
+          # Same rule as the PKGBUILD check(): report each binary's BTI/PAC
+          # note and fail only on a mixed result. ALARM's crt1.o/crtbegin*.o
+          # carry no note, so a consistently absent note is expected and safe
+          # (the kernel only enforces BTI on binaries marked with it).
+          bti=0; n=0
+          for f in x/usr/bin/iptsd x/usr/bin/iptsd-calibrate x/usr/bin/iptsd-check-device x/usr/bin/iptsd-dump; do
+            n=$((n + 1))
+            if readelf -n "$f" | grep -q 'AArch64 feature:.*BTI'; then
+              bti=$((bti + 1)); echo "$f: BTI"
+            else
+              echo "$f: no BTI note"
+            fi
           done
+          if [ "$bti" -ne 0 ] && [ "$bti" -ne "$n" ]; then
+            echo "mixed BTI across binaries ($bti/$n)" >&2; exit 1
+          fi
           tar -tf "$pkg" | grep -E 'etc/iptsd.d/91-calibration|61-iptsd-sl7|iptsd@.service|50-iptsd.rules'
 
       - uses: actions/upload-artifact@v4
