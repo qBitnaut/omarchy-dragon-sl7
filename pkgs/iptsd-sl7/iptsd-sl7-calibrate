@@ -1,0 +1,73 @@
+#!/bin/bash
+# iptsd-sl7-calibrate: measure this touchpad's contact sizes with iptsd-calibrate
+# and write /etc/iptsd.d/93-local-calibration.conf. Use --revert to undo.
+set -euo pipefail
+
+CONF=/etc/iptsd.d/93-local-calibration.conf
+HID_ID='001C:0000045E:00000C77'
+
+die() { echo "error: $*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || exec sudo -- "$0" "$@"
+
+find_hidraw() {
+  local d
+  for d in /sys/class/hidraw/hidraw*; do
+    [[ -e $d/device/uevent ]] || continue
+    if grep -qx "HID_ID=$HID_ID" "$d/device/uevent"; then
+      basename "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+node=$(find_hidraw) || die "touchpad (HID_ID $HID_ID) not found"
+unit="iptsd@dev-$node.service"
+
+case "${1:-}" in
+  --revert)
+    rm -fv "$CONF"
+    systemctl restart "$unit"
+    echo "Reverted; $unit restarted."
+    exit 0
+    ;;
+  ''|--run) ;;
+  *) die "usage: ${0##*/} [--revert]" ;;
+esac
+
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"; systemctl start "$unit" || true' EXIT
+
+cat <<MSG
+Touchpad: /dev/$node  (unit $unit)
+
+iptsd will be stopped, so the touchpad is dead while this runs. Use the
+keyboard. Start the calibration, then for about 60 seconds, using only
+fingers (no palm):
+  1. one finger: slow circles, then fast swipes, covering the whole pad
+     including the edges and corners
+  2. one finger pressed flat, then the pad of the finger, then the tip
+  3. two fingers: scroll and pinch motions
+  4. thumb and other fingers you normally use
+Do not click. Press Ctrl-C when done.
+MSG
+read -r -p "Press Enter to start (Ctrl-C to abort) " _
+
+systemctl stop "$unit"
+cd "$workdir"
+iptsd-calibrate "/dev/$node" || true
+
+shopt -s nullglob
+out=("$workdir"/iptsd_calib_*_2mm.conf)
+[[ ${#out[@]} -eq 1 ]] || die "no calibration output (was there any touch input?)"
+
+echo
+echo "Measured (2 mm slack, recommended):"
+cat "${out[0]}"
+echo
+read -r -p "Install to $CONF? [y/N] " ans
+[[ $ans == [yY]* ]] || { echo "Not installed."; exit 0; }
+
+install -Dm644 "${out[0]}" "$CONF"
+echo "Installed. Undo with: ${0##*/} --revert"

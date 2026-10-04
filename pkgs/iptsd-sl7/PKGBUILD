@@ -10,7 +10,7 @@ pkgname=iptsd-sl7
 _calcommit=e60938dcf707d37d24e782e0029b9c9a567d67b8  # 2026-06-03
 _commit=3663e96e758145801c3cb1ce7c72f362d0d4a5f5  # 2026-07-17 00:26 UTC (2026-07-16 20:26 -0400)
 pkgver=3.1.0.r20260717
-pkgrel=3
+pkgrel=4
 pkgdesc='Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)'
 arch=('aarch64')
 url='https://github.com/alex-lentz/iptsd'
@@ -23,18 +23,23 @@ checkdepends=('binutils')
 provides=('iptsd')
 conflicts=('iptsd')
 backup=('etc/iptsd.conf'
-        'etc/iptsd.d/91-calibration-045E-0C77.conf')
+        'etc/iptsd.d/91-calibration-045E-0C77.conf'
+        'etc/iptsd.d/92-iptsd-sl7-tuning.conf')
 options=('!lto')  # LTO is handled by meson (b_lto), not makepkg's flag injection
 source=("iptsd-$_commit.tar.gz::https://github.com/alex-lentz/iptsd/archive/$_commit.tar.gz"
         "91-calibration-045E-0C77.conf::https://raw.githubusercontent.com/bryce-hoehn/linux-surface-laptop-7/$_calcommit/config/touchpad/91-calibration-045E-0C77.conf"
         '61-iptsd-sl7-hide-raw-touchpad.rules'
         '51-iptsd-sl7-start.rules'
-        '10-iptsd-sl7.conf')
+        '10-iptsd-sl7.conf'
+        '92-iptsd-sl7-tuning.conf'
+        'iptsd-sl7-calibrate')
 sha256sums=('ce9935fb7c38365f4fa65070e819bf901e10082c5fb2ea67e49b3a60b225ed92'
             '2c1ffc2088dd9e65f18e79f1e1b6d3fbcb815e75843ebed8142da6f96f89bbb0'
             'c58408721cd808a51c4970d6e2a8397a136b899bcf6904069646c8f4ea6b86ef'
             '6eff936368650eebe1141b502c75625b757fa195592784f7fbc3b6645a365738'
-            '6b2bab2ad225a86ef1fd31e2a2736b641a3d5a91f5723d2069c18ecf63ae2889')
+            '6b2bab2ad225a86ef1fd31e2a2736b641a3d5a91f5723d2069c18ecf63ae2889'
+            'e76fda1ad6373ae944f70d168e1cde2ea7a3645b48d550a6649094399373f5ea'
+            'eb3bdc5117185569f4b710e629e68d4ab1813ba914a25179c96dbec614b5d00f')
 
 _bp='-mbranch-protection=standard'
 
@@ -113,6 +118,10 @@ package() {
     "$pkgdir/usr/lib/udev/rules.d/51-iptsd-sl7-start.rules"
   install -Dm644 10-iptsd-sl7.conf \
     "$pkgdir/usr/lib/systemd/system/iptsd@.service.d/10-iptsd-sl7.conf"
+
+  install -Dm644 92-iptsd-sl7-tuning.conf \
+    "$pkgdir/etc/iptsd.d/92-iptsd-sl7-tuning.conf"
+  install -Dm755 iptsd-sl7-calibrate "$pkgdir/usr/bin/iptsd-sl7-calibrate"
 
   install -Dm644 "iptsd-$_commit/LICENSE" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
