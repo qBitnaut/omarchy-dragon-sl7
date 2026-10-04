@@ -5,10 +5,12 @@
 # place and only when the exact upstream line is still there, so it is
 # idempotent and a no-op once #13029 (or any fix) lands. Drop this file, its
 # pacman hook and the PKGBUILD lines when #13029 is in the pinned Omarchy.
-# SL7_BATTERY_PATCH_BIN_DIR overrides /usr/bin (tests).
+# SL7_BATTERY_PATCH_BIN_DIR (space-separated dirs) overrides the targets (tests).
 set -u
 
-bin=${SL7_BATTERY_PATCH_BIN_DIR:-/usr/bin}
+# On the dragon packages /usr/share/omarchy/bin holds real copies (not links
+# to /usr/bin), and Omarchy puts that directory first on PATH, so patch both.
+bins=${SL7_BATTERY_PATCH_BIN_DIR:-/usr/bin /usr/share/omarchy/bin}
 
 replace() { # file, old line fragment, new fragment (literal, no regex)
   local f=$1 old=$2 new=$3 body
@@ -18,14 +20,16 @@ replace() { # file, old line fragment, new fragment (literal, no regex)
   printf '%s\n' "${body/"$old"/"$new"}" >"$f"
 }
 
-replace "$bin/omarchy-battery-status" \
-  'grep BAT | head -n 1' \
-  "grep -E 'BAT|battmgr_bat' | head -n 1"
-replace "$bin/omarchy-battery-present" \
-  'for bat in /sys/class/power_supply/BAT*; do' \
-  'for bat in /sys/class/power_supply/BAT* /sys/class/power_supply/*battmgr-bat; do'
-# qcom-battmgr reports power_now negative while discharging; Omarchy shows the
-# raw value and its "idle" test (rate <= 0.2) then fires while discharging.
-replace "$bin/omarchy-battery-status" \
-  'BEGIN { print microwatts / 1000000 }' \
-  'BEGIN { if (microwatts < 0) microwatts = -microwatts; print microwatts / 1000000 }'
+for bin in $bins; do
+  replace "$bin/omarchy-battery-status" \
+    'grep BAT | head -n 1' \
+    "grep -E 'BAT|battmgr_bat' | head -n 1"
+  replace "$bin/omarchy-battery-present" \
+    'for bat in /sys/class/power_supply/BAT*; do' \
+    'for bat in /sys/class/power_supply/BAT* /sys/class/power_supply/*battmgr-bat; do'
+  # qcom-battmgr reports power_now negative while discharging; Omarchy shows the
+  # raw value and its "idle" test (rate <= 0.2) then fires while discharging.
+  replace "$bin/omarchy-battery-status" \
+    'BEGIN { print microwatts / 1000000 }' \
+    'BEGIN { if (microwatts < 0) microwatts = -microwatts; print microwatts / 1000000 }'
+done
