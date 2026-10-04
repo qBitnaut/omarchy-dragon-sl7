@@ -229,6 +229,8 @@ download_iso() {
 # initramfs copies the rootfs to RAM and unmounts the ISO partition before login,
 # which would make the script= path vanish.
 SCRIPT_PARAM="copytoram=n script=/run/archiso/bootmnt/sl7-autostart.sh"
+# systemd-boot console-mode for the boot menu (0 = 80x25, the largest text)
+LOADER_CONSOLE_MODE=0
 # With SL7DATA typed XBOOTLDR, systemd-gpt-auto-generator would automount it at /boot,
 # a second mount of the filesystem the autostart script mounts at /sl7. Turn it off.
 [ "$KERNEL_MODE" = 0 ] || SCRIPT_PARAM="$SCRIPT_PARAM systemd.gpt_auto=0"
@@ -313,7 +315,7 @@ remaster_iso() {
 
 	mkdir -p "$rm_dir"
 	write_autostart "$rm_dir/sl7-autostart.sh"
-	want="$ISO_SHA256 $SCRIPT_PARAM $(sha256sum "$rm_dir/sl7-autostart.sh" | cut -d' ' -f1)"
+	want="$ISO_SHA256 $SCRIPT_PARAM $(sha256sum "$rm_dir/sl7-autostart.sh" | cut -d' ' -f1) $LOADER_CONSOLE_MODE"
 	stamp="$WORK/remaster.stamp"
 	if [ "$REBUILD" = 0 ] && [ -f "$out" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then
 		info "Remastered ISO is current: $out"
@@ -329,6 +331,11 @@ remaster_iso() {
 		grep -q "$SCRIPT_PARAM" "$rm_dir/$e.conf" || die "could not patch $e.conf"
 		mcopy -o -i "$esp" "$rm_dir/$e.conf" "::/loader/entries/$e.conf"
 	done
+	# The 2304x1536 13.8" panel renders the systemd-boot menu unreadably small at
+	# its native mode; a low console mode makes the firmware use a larger text grid.
+	mtype -i "$esp" "::/loader/loader.conf" | sed '/^console-mode/d' >"$rm_dir/loader.conf"
+	echo "console-mode $LOADER_CONSOLE_MODE" >>"$rm_dir/loader.conf"
+	mcopy -o -i "$esp" "$rm_dir/loader.conf" "::/loader/loader.conf"
 
 	info "Rebuilding the ISO with xorriso (boot records replayed)"
 	rm -f "$out"
@@ -337,6 +344,7 @@ remaster_iso() {
 		-volume_date uuid 2026092611361300 \
 		-boot_image any replay \
 		-map "$rm_dir/sl7-autostart.sh" /sl7-autostart.sh \
+		-map "$rm_dir/loader.conf" /loader/loader.conf \
 		-map "$rm_dir/${ENTRIES[0]}.conf" "/loader/entries/${ENTRIES[0]}.conf" \
 		-map "$rm_dir/${ENTRIES[1]}.conf" "/loader/entries/${ENTRIES[1]}.conf" \
 		-append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B "$esp" \

@@ -826,16 +826,26 @@ sl7_check_spi() { # outdir
 			[ -e "$dev" ] && printf '%s modalias=%s\n' "${dev##*/}" "$(cat "$dev/modalias" 2>/dev/null)"
 		done
 	} >"$1/spi.txt" 2>&1
-	for pair in spi19.0:touchpad spi10.0:touchscreen; do
-		dev="${pair%%:*}"
+	# Linux numbers SPI buses in probe order (spi0, spi1, ...), not by QUP
+	# instance, so find each device by its controller address instead:
+	# 88c000.spi = QUP2 SE3 / spi19 (touchpad), a88000.spi = QUP1 SE2 / spi10
+	# (touchscreen).
+	local ctrl path
+	for pair in 88c000:touchpad a88000:touchscreen; do
+		ctrl="${pair%%:*}"
 		what="${pair##*:}"
-		if [ ! -e "/sys/bus/spi/devices/$dev" ]; then
-			sl7_result "sl7_$dev" 1 "$dev ($what)" "not present (device tree node missing or QSPI driver failed)"
-		elif [ -L "/sys/bus/spi/devices/$dev/driver" ]; then
-			drv="$(basename "$(readlink "/sys/bus/spi/devices/$dev/driver")")"
-			sl7_result "sl7_$dev" 0 "$dev ($what) bound" "driver $drv"
+		path=""
+		for dev in /sys/bus/spi/devices/*; do
+			[ -e "$dev" ] || continue
+			case "$(readlink -f "$dev")" in */"$ctrl".spi/*) path="$dev"; break ;; esac
+		done
+		if [ -z "$path" ]; then
+			sl7_result "sl7_spi_$what" 1 "$what ($ctrl.spi)" "not present (device tree node missing or QSPI driver failed)"
+		elif [ -L "$path/driver" ]; then
+			drv="$(basename "$(readlink "$path/driver")")"
+			sl7_result "sl7_spi_$what" 0 "$what (${path##*/} on $ctrl.spi) bound" "driver $drv"
 		else
-			sl7_result "sl7_$dev" 1 "$dev ($what)" "present but no driver bound (see dmesg: spi_hid)"
+			sl7_result "sl7_spi_$what" 1 "$what (${path##*/} on $ctrl.spi)" "present but no driver bound (see dmesg: spi_hid)"
 		fi
 	done
 	{
