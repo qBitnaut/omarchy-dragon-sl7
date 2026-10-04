@@ -7,6 +7,9 @@
 #   a. welcome + safety   b. identity check   c. baseline recon
 #   d. firmware into RAM  e. recon again      f. interactive checks
 #   g. optional suspend   h. summary + poweroff
+#   (on the linux-sl7 test kernel, release contains "sl7": extra step "sl7kernel" between
+#    e. and f. - cpufreq policies, SPI touch devices, GPU/zap, battery capacity, Wi-Fi,
+#    touchpad through iptsd-sl7, and the touchpad again after the optional suspend)
 #
 # Safety: never touches the internal disk, never writes EFI variables, never
 # touches regulators, LEDs or rfkill. Firmware goes to /lib/firmware/updates on
@@ -15,7 +18,8 @@
 # Resumable: progress lives in /sl7/results/.progress. Run it again and it
 # offers to continue. Everything is logged to /sl7/results/<ts>/guide.log.
 #
-# Test hooks (not needed on the SL7): SL7_DATA=/some/dir, SL7_UI=plain, SL7_RAMDIR=dir.
+# Test hooks (not needed on the SL7): SL7_DATA=/some/dir, SL7_UI=plain, SL7_RAMDIR=dir,
+# SL7_KERNEL_RELEASE=7.2.8-1-sl7 (pretend to run our kernel).
 
 set -u
 
@@ -41,6 +45,12 @@ EXPECT_SKU=2036
 EXPECT_DT="microsoft,romulus13"
 TS=""
 SESS=""
+KREL="${SL7_KERNEL_RELEASE:-$(uname -r)}"
+SL7TEST="$DATA/sl7test"
+IPTSD_PKG="$SL7TEST/iptsd-sl7.pkg.tar.zst"
+IPTSD_LOG="$RAMDIR/iptsd.log"
+IPTSD_PID=""
+SL7_SUMMARY=""
 
 # ---------------------------------------------------------------- basics
 if [ "$(id -u)" != 0 ]; then
@@ -518,7 +528,11 @@ Load firmware now?" y; then
 	dmesg >"$RAMDIR/dmesg-after-fw.txt" 2>/dev/null
 	diff "$RAMDIR/dmesg-before-fw.txt" "$RAMDIR/dmesg-after-fw.txt" | grep '^>' | grep -iE 'remoteproc|adsp|cdsp|battmgr|pmic_glink|qcom_|firmware|adreno|gpu' | tail -n 40 | tee -a "$LOG"
 
-	say "GPU note: the GPU needs the zap firmware present at boot; that is tested in a later build. (No driver is unbound here: on X1E the display and GPU are one msm DRM aggregate.)"
+	if is_sl7_kernel; then
+		say "GPU note: the zap shader was already provided at boot by the test initramfs; see the linux-sl7 checks."
+	else
+		say "GPU note: the GPU needs the zap firmware present at boot; that is tested in a later build. (No driver is unbound here: on X1E the display and GPU are one msm DRM aggregate.)"
+	fi
 
 	if [ "$any_running" = 1 ]; then
 		prog_set fw_result ok
@@ -585,8 +599,11 @@ step_checks() {
 	} >"$RES/$TS-input-devices.txt" 2>&1
 
 	record_check builtin_keyboard "Built-in keyboard" "Type a few keys on the BUILT-IN keyboard (not an external one)." key 15
-	record_check touchpad "Touchpad" "Move a finger on the touchpad and click it." touchpad 15
-	record_check touchscreen "Touchscreen" "Touch and drag on the screen with a finger." touchscreen 15
+	if ! is_sl7_kernel; then
+		# on our kernel the sl7kernel step already did these (touchpad through iptsd)
+		record_check touchpad "Touchpad" "Move a finger on the touchpad and click it." touchpad 15
+		record_check touchscreen "Touchscreen" "Touch and drag on the screen with a finger." touchscreen 15
+	fi
 
 	# lid: block logind from suspending while we watch
 	ui_msg "Lid switch" "Next: close the lid, wait 2 seconds, then open it again.
@@ -718,18 +735,341 @@ Run the suspend test?" n; then
 
 Did the screen, keyboard and touchpad all come back?" yes "Yes, everything came back" no "Something did not" skip "Skip"
 	answer suspend_resume "$REPLY" "wall=$((s1 - s0))s"
+	if is_sl7_kernel; then
+		sl7_post_resume
+	fi
+	flush_log
+}
+
+# ---------------------------------------------------------------- linux-sl7 test kernel
+# Runs only when the booted kernel is ours (release contains "sl7"). Read-only checks plus
+# one userspace daemon (iptsd, from the iptsd-sl7 package) in the live RAM root. Nothing
+# unbinds or rebinds a driver, nothing writes to disks, EFI variables, regulators or LEDs;
+# MAC addresses, SSIDs and serial numbers are never printed (Wi-Fi scan: a count only).
+is_sl7_kernel() {
+	case "$KREL" in *sl7*) return 0 ;; esac
+	return 1
+}
+
+# dmesg wraps early on a chatty boot (run 1 lost the fused-core lines), so add the journal.
+kmsg_all() {
+	dmesg 2>/dev/null
+	journalctl -k -b --no-pager -q 2>/dev/null
+}
+
+# sl7_result KEY RC LABEL DETAIL   (RC: 0 pass, 1 fail, 2 not testable)
+sl7_result() {
+	local key="$1" rc="$2" label="$3" detail res mark
+	detail="$(printf '%s' "$4" | tr '\n|' '; ' | cut -c1-300)"
+	case "$rc" in
+	0) res=yes; mark="$OK" ;;
+	1) res=no; mark="$BAD" ;;
+	*) res=skip; mark="[--]" ;;
+	esac
+	say "  $mark $label: $detail"
+	answer "$key" "$res" "$detail"
+	SL7_SUMMARY="$SL7_SUMMARY
+  $mark $label: $detail"
+}
+
+# find_hidraw VID PID -> /dev/hidrawN of the first hidraw device with that HID_ID
+find_hidraw() {
+	local h
+	for h in /sys/class/hidraw/hidraw*; do
+		[ -e "$h" ] || continue
+		if grep -qiE "^HID_ID=[0-9A-F]+:0*$1:0*$2\$" "$h/device/uevent" 2>/dev/null; then
+			echo "/dev/${h##*/}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+sl7_check_cpufreq() { # outdir
+	local p n=0 list="" f rc=1 leaders=""
+	for p in /sys/devices/system/cpu/cpufreq/policy*; do
+		[ -d "$p" ] || continue
+		n=$((n + 1))
+		f="$(cat "$p/scaling_cur_freq" 2>/dev/null)"
+		list="$list policy${p##*policy}[cpus $(tr ' ' ',' <"$p/related_cpus" 2>/dev/null), $(cat "$p/scaling_governor" 2>/dev/null), $((${f:-0} / 1000)) MHz]"
+		leaders="$leaders ${p##*policy}"
+	done
+	{
+		for p in /sys/devices/system/cpu/cpufreq/policy*; do
+			[ -d "$p" ] || continue
+			echo "== $p"
+			for f in related_cpus scaling_driver scaling_governor cpuinfo_min_freq cpuinfo_max_freq scaling_cur_freq; do
+				printf '%s=%s\n' "$f" "$(cat "$p/$f" 2>/dev/null)"
+			done
+		done
+		echo "== kernel log"
+		kmsg_all | grep -iE 'sustained|performance domains|scmi.*(perf|cpufreq)|cpufreq' | sort -u
+	} >"$1/cpufreq.txt" 2>&1
+	[ "$n" = 3 ] && rc=0
+	sl7_result sl7_cpufreq "$rc" "cpufreq policies (expect 3, one per cluster; the sp11 kernel shows 1)" "$n found:$list"
+	grep -iE 'sustained|performance domains' "$1/cpufreq.txt" | head -n 4 | while read -r f; do say "      $f"; done
+}
+
+sl7_check_spi() { # outdir
+	local pair dev what drv
+	{
+		ls -l /sys/bus/spi/devices/ 2>&1
+		for dev in /sys/bus/spi/devices/*; do
+			[ -e "$dev" ] && printf '%s modalias=%s\n' "${dev##*/}" "$(cat "$dev/modalias" 2>/dev/null)"
+		done
+	} >"$1/spi.txt" 2>&1
+	for pair in spi19.0:touchpad spi10.0:touchscreen; do
+		dev="${pair%%:*}"
+		what="${pair##*:}"
+		if [ ! -e "/sys/bus/spi/devices/$dev" ]; then
+			sl7_result "sl7_$dev" 1 "$dev ($what)" "not present (device tree node missing or QSPI driver failed)"
+		elif [ -L "/sys/bus/spi/devices/$dev/driver" ]; then
+			drv="$(basename "$(readlink "/sys/bus/spi/devices/$dev/driver")")"
+			sl7_result "sl7_$dev" 0 "$dev ($what) bound" "driver $drv"
+		else
+			sl7_result "sl7_$dev" 1 "$dev ($what)" "present but no driver bound (see dmesg: spi_hid)"
+		fi
+	done
+	{
+		for dev in /sys/class/hidraw/hidraw*; do
+			[ -e "$dev" ] && printf '%s %s\n' "${dev##*/}" "$(grep -E '^(HID_ID|HID_NAME)=' "$dev/device/uevent" 2>/dev/null | tr '\n' ' ')"
+		done
+	} >"$1/hidraw.txt" 2>&1
+	if drv="$(find_hidraw 045E 0C77)"; then
+		sl7_result sl7_hidraw_0c77 0 "hidraw for 045E:0C77 (touchpad)" "$drv"
+	else
+		sl7_result sl7_hidraw_0c77 1 "hidraw for 045E:0C77 (touchpad)" "none (see hidraw.txt)"
+	fi
+}
+
+sl7_check_gpu() { # outdir
+	local cards render k k2 rc=0 detail name
+	cards="$(find /sys/class/drm -maxdepth 1 -name 'card[0-9]*' ! -name 'card*-*' | wc -l)"
+	render="$(find /dev/dri -maxdepth 1 -name 'renderD*' 2>/dev/null | wc -l)"
+	if ! mountpoint -q /sys/kernel/debug 2>/dev/null; then
+		mount -t debugfs nodev /sys/kernel/debug 2>/dev/null
+	fi
+	name="$(cat /sys/kernel/debug/dri/*/name 2>/dev/null | head -n 2 | tr '\n' ' ')"
+	k="$(kmsg_all | grep -iE 'adreno|a6xx|a7xx|zap|gpu hw init|gmu|Initialized msm' | sort -u)"
+	{
+		echo "drm cards=$cards render nodes=$render"
+		echo "debugfs dri name: $name"
+		ls -l /sys/class/drm/ 2>&1
+		for k2 in /sys/class/devfreq/*gpu*; do
+			[ -d "$k2" ] && printf '%s cur=%s max=%s\n' "${k2##*/}" "$(cat "$k2/cur_freq" 2>/dev/null)" "$(cat "$k2/max_freq" 2>/dev/null)"
+		done
+		echo "== kernel log"
+		echo "$k"
+	} >"$1/gpu.txt" 2>&1
+	if echo "$k" | grep -qiE 'Unable to load .*(qcdx|zap)|gpu hw init failed|GMU OOB|zap.*(-2|failed)'; then
+		rc=1
+		detail="zap/hw-init error in the kernel log: $(echo "$k" | grep -iE 'Unable to load|hw init failed|GMU OOB' | head -n 1 | cut -c1-160)"
+	elif [ "$cards" -lt 1 ]; then
+		rc=1
+		detail="no DRM card"
+	elif [ "$render" -lt 1 ]; then
+		rc=1
+		detail="DRM card present but no render node (GPU not initialised)"
+	else
+		detail="$cards card(s), $render render node(s), no zap error${name:+, dri name: $name}"
+	fi
+	sl7_result "sl7_gpu$2" "$rc" "GPU initialised (zap shader loaded at boot)" "$detail"
+}
+
+sl7_check_battery() { # outdir suffix
+	local p cap="" fwr found=0
+	fwr="$(prog_get fw_result)"
+	for p in /sys/class/power_supply/*; do
+		[ "$(cat "$p/type" 2>/dev/null)" = Battery ] || continue
+		found=1
+		cap="$(cat "$p/capacity" 2>/dev/null)"
+		[ -n "$cap" ] && break
+	done
+	if [ -n "$cap" ]; then
+		sl7_result "sl7_battery_capacity$2" 0 "battery capacity attribute" "capacity=$cap%"
+	elif [ "$found" = 1 ]; then
+		sl7_result "sl7_battery_capacity$2" 1 "battery capacity attribute" "battery present but no capacity file (qcom_battmgr patch not effective)"
+	elif [ "$fwr" = ok ] || [ "$fwr" = loaded-no-rproc ]; then
+		sl7_result "sl7_battery_capacity$2" 1 "battery capacity attribute" "no battery device although firmware was loaded (fw_result=$fwr)"
+	else
+		sl7_result "sl7_battery_capacity$2" 2 "battery capacity attribute" "needs the ADSP (firmware step was skipped)"
+	fi
+}
+
+sl7_check_wifi() { # outdir suffix
+	local p ifc="" st soft="" hard="" r n="" rc=0 detail
+	for p in /sys/class/net/*; do
+		if [ -d "$p/wireless" ]; then
+			ifc="${p##*/}"
+			break
+		fi
+	done
+	kmsg_all | grep -iE 'ath12k|rfkill' | sort -u >"$1/wifi-dmesg.txt" 2>&1
+	if [ -z "$ifc" ]; then
+		sl7_result "sl7_wifi$2" 1 "Wi-Fi" "no wireless interface (ath12k did not probe; see wifi-dmesg.txt)"
+		return 0
+	fi
+	for r in /sys/class/rfkill/rfkill*; do
+		[ "$(cat "$r/type" 2>/dev/null)" = wlan ] || continue
+		soft="$(cat "$r/soft" 2>/dev/null)"
+		hard="$(cat "$r/hard" 2>/dev/null)"
+	done
+	st="$(cat "/sys/class/net/$ifc/operstate" 2>/dev/null)"
+	if command -v iw >/dev/null 2>&1; then
+		ip link set "$ifc" up 2>/dev/null
+		sleep 3
+		n="$(iw dev "$ifc" scan 2>/dev/null | grep -c '^BSS')"
+	fi
+	detail="$ifc operstate=$st rfkill soft=${soft:-?} hard=${hard:-?}${n:+, scan sees $n access points}"
+	if [ "$soft" = 1 ] || [ "$hard" = 1 ] || [ "$n" = 0 ]; then
+		rc=1
+	fi
+	sl7_result "sl7_wifi$2" "$rc" "Wi-Fi up" "$detail"
+}
+
+sl7_stop_iptsd() {
+	if [ -n "$IPTSD_PID" ] && kill -0 "$IPTSD_PID" 2>/dev/null; then
+		kill "$IPTSD_PID" 2>/dev/null
+		sleep 1
+	fi
+	[ -f "$IPTSD_LOG" ] && [ -d "$SESS" ] && cp "$IPTSD_LOG" "$SESS/iptsd.log" 2>/dev/null
+	IPTSD_PID=""
+	return 0
+}
+
+# sl7_start_iptsd HIDRAW: unpack the iptsd-sl7 package into a temp root, run its binary on
+# the touchpad hidraw node, wait for the virtual touchpad. Returns 1 when it cannot run.
+sl7_start_iptsd() {
+	local hr="$1" root="$RAMDIR/iptsd-root" bin miss i f
+	if [ ! -f "$IPTSD_PKG" ]; then
+		sl7_result sl7_iptsd_start 2 "iptsd" "package not on the stick (built without --iptsd-pkg)"
+		return 1
+	fi
+	rm -rf "$root"
+	mkdir -p "$root"
+	if ! tar --zstd -xf "$IPTSD_PKG" -C "$root" 2>>"$LOG"; then
+		sl7_result sl7_iptsd_start 1 "iptsd" "could not unpack $IPTSD_PKG"
+		return 1
+	fi
+	bin="$root/usr/bin/iptsd"
+	miss="$(ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
+	if [ -n "$miss" ] && ui_yesno "iptsd needs libraries" "The iptsd-sl7 binary (built on Arch Linux ARM) cannot run in this live root:
+
+$(echo "$miss" | head -n 4)
+
+Try 'pacman -S --needed fmt libinih spdlog' now? This needs working network (Wi-Fi or Ethernet) and only changes the live RAM root, never a disk." n; then
+		pacman -S --noconfirm --needed fmt libinih spdlog >>"$LOG" 2>&1
+		miss="$(ldd "$bin" 2>&1 | grep -E 'not found|not a dynamic|cannot execute')"
+	fi
+	if [ -n "$miss" ]; then
+		sl7_result sl7_iptsd_start 2 "iptsd" "binary cannot run in this live root: $(echo "$miss" | head -n 2 | tr -s '\t ' ' ')"
+		return 1
+	fi
+	# iptsd reads its configuration from the absolute /etc and /usr/share paths
+	mkdir -p /usr/share/iptsd
+	for f in iptsd.conf iptsd.d; do
+		[ -e "$root/etc/$f" ] && cp -a "$root/etc/$f" /etc/
+	done
+	[ -d "$root/usr/share/iptsd" ] && cp -a "$root/usr/share/iptsd/." /usr/share/iptsd/
+	sl7_stop_iptsd
+	"$bin" "$hr" >"$IPTSD_LOG" 2>&1 &
+	IPTSD_PID=$!
+	for ((i = 0; i < 10; i++)); do
+		sleep 1
+		grep -q 'IPTSD Virtual Touchpad' /proc/bus/input/devices 2>/dev/null && break
+	done
+	if kill -0 "$IPTSD_PID" 2>/dev/null && grep -q 'IPTSD Virtual Touchpad' /proc/bus/input/devices 2>/dev/null; then
+		sl7_result sl7_iptsd_start 0 "iptsd on $hr" "running (pid $IPTSD_PID), virtual touchpad created"
+		return 0
+	fi
+	sl7_result sl7_iptsd_start 1 "iptsd on $hr" "no virtual touchpad: $(tail -n 2 "$IPTSD_LOG" | tr '\n' ' ' | cut -c1-200)"
+	return 1
+}
+
+sl7_touchpad_test() {
+	local hr
+	if ! hr="$(find_hidraw 045E 0C77)"; then
+		sl7_result sl7_touchpad_iptsd 1 "touchpad via iptsd" "no hidraw 045E:0C77, nothing for iptsd to read"
+		return 0
+	fi
+	sl7_start_iptsd "$hr" || return 0
+	record_check sl7_tp_move "Touchpad: move" "Move ONE finger around the touchpad (iptsd is running)." touchpad 15
+	record_check sl7_tp_tap "Touchpad: tap and click" "Tap once, then press the pad down for a physical click." touchpad 15
+	record_check sl7_tp_scroll "Touchpad: scroll" "Two-finger scroll up and down on the touchpad." touchpad 15
+}
+
+step_sl7kernel() {
+	local dir="$RES/$TS-sl7kernel" dt rc=1
+	SL7_SUMMARY=""
+	mkdir -p "$dir"
+	write_evwatch
+	say "linux-sl7 checks (kernel $KREL):"
+	{
+		echo "uname: $KREL"
+		echo "cmdline: $(cat /proc/cmdline 2>/dev/null)"
+		echo "dt compatible: $(dt_compat)"
+		cat "$SL7TEST/kernel-info.txt" 2>/dev/null
+		echo "== lsmod"
+		lsmod 2>/dev/null
+	} >"$dir/kernel.txt" 2>&1
+	dt="$(dt_compat)"
+	case "$dt" in *"$EXPECT_DT"*) rc=0 ;; esac
+	sl7_result sl7_dt "$rc" "device tree compatible (expect $EXPECT_DT)" "$dt"
+	sl7_check_cpufreq "$dir"
+	sl7_check_spi "$dir"
+	sl7_check_gpu "$dir" ""
+	sl7_check_battery "$dir" ""
+	sl7_check_wifi "$dir" ""
+	sl7_touchpad_test
+	record_check sl7_touchscreen "Touchscreen" "Touch and drag on the screen with a finger." touchscreen 15
+	ensure_data
+	[ -f "$IPTSD_LOG" ] && cp "$IPTSD_LOG" "$dir/iptsd.log" 2>/dev/null
+	ui_msg "linux-sl7 checks" "Kernel $KREL
+
+$SL7_SUMMARY
+
+Details: $dir"
+	flush_log
+}
+
+# after a suspend/resume cycle on our kernel: is the touchpad (iptsd) still alive?
+sl7_post_resume() {
+	local dir="$RES/$TS-sl7kernel" hr
+	mkdir -p "$dir"
+	SL7_SUMMARY=""
+	say "linux-sl7 post-resume checks:"
+	if hr="$(find_hidraw 045E 0C77)"; then
+		sl7_result sl7_resume_hidraw 0 "hidraw 045E:0C77 after resume" "$hr"
+	else
+		sl7_result sl7_resume_hidraw 1 "hidraw 045E:0C77 after resume" "gone"
+		return 0
+	fi
+	if [ -n "$IPTSD_PID" ] && kill -0 "$IPTSD_PID" 2>/dev/null; then
+		sl7_result sl7_resume_iptsd 0 "iptsd after resume" "still running (pid $IPTSD_PID)"
+	elif [ -f "$IPTSD_PKG" ]; then
+		sl7_result sl7_resume_iptsd 1 "iptsd after resume" "exited; restarting it for the touchpad check"
+		sl7_start_iptsd "$hr" || true
+	fi
+	record_check sl7_tp_after_suspend "Touchpad after suspend" "Move a finger on the touchpad and click it." touchpad 15
+	sl7_check_gpu "$dir" _after_resume
+	sl7_check_battery "$dir" _after_resume
+	sl7_check_wifi "$dir" _after_resume
 	flush_log
 }
 
 step_summary() {
 	local txt s
+	sl7_stop_iptsd
 	sync
 	flush_log
 	txt="Results: $RES
 Session:  $TS
 
 Step status:"
-	for s in identity baseline firmware withfw checks suspend; do
+	for s in identity baseline firmware withfw sl7kernel checks suspend; do
+		if [ "$s" = sl7kernel ] && ! is_sl7_kernel; then
+			continue
+		fi
 		if is_done "$s"; then
 			txt="$txt
   $OK $s"
@@ -793,6 +1133,9 @@ No  = start a fresh run (old results stay on the stick)." y; then
 	is_done baseline || { step_baseline && step_done baseline; flush_log; }
 	is_done firmware || { step_firmware; step_done firmware; flush_log; }
 	is_done withfw || { step_withfw; step_done withfw; flush_log; }
+	if is_sl7_kernel; then
+		is_done sl7kernel || { step_sl7kernel; step_done sl7kernel; flush_log; }
+	fi
 	is_done checks || { step_checks; step_done checks; flush_log; }
 	is_done suspend || { step_suspend; step_done suspend; flush_log; }
 	step_summary
