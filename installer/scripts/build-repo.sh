@@ -10,6 +10,7 @@
 #   SL7_SOURCES   directories to build, one PKGBUILD directory each, in
 #                 sub-directories (default /src: /src/omarchy-surface-sl7,
 #                 /src/pr/qcom-firmware-extract, /src/pr/linux-aarch64-pkgbase-shim)
+#   ARCHINSTALL_VERSION, ARCHINSTALL_SHA256  pinned archinstall (upstream.lock)
 #   SL7_REPO      output repository directory (default /repo)
 set -euo pipefail
 
@@ -17,11 +18,11 @@ prebuilt="${SL7_PREBUILT:-/prebuilt}"
 src="${SL7_SOURCES:-/src}"
 repo="${SL7_REPO:-/repo}"
 work=/build
-expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 qcom-firmware-extract linux-aarch64-pkgbase-shim)
+expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
 
 grep -q '^DisableSandbox' /etc/pacman.conf ||
 	sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
-pacman -Syu --noconfirm --needed base-devel git
+pacman -Syu --noconfirm --needed base-devel git curl
 sed -i "s|^PKGEXT=.*|PKGEXT='.pkg.tar.zst'|" /etc/makepkg.conf
 id builder >/dev/null 2>&1 || useradd -m builder
 
@@ -46,6 +47,15 @@ build_pkg() { # directory
 build_pkg "$src/omarchy-surface-sl7"
 build_pkg "$src/pr/qcom-firmware-extract"
 build_pkg "$src/pr/linux-aarch64-pkgbase-shim"
+
+# archinstall: the orchestrator needs 4.4; ALARM extra has 4.5 (API break).
+# arch=any, so the Arch archive package is used as is, checksum-pinned.
+: "${ARCHINSTALL_VERSION:?ARCHINSTALL_VERSION not set (upstream.lock)}"
+: "${ARCHINSTALL_SHA256:?ARCHINSTALL_SHA256 not set (upstream.lock)}"
+ai_file="archinstall-${ARCHINSTALL_VERSION}-any.pkg.tar.zst"
+curl -fsSL --retry 3 -o "$work/out/$ai_file" \
+	"https://archive.archlinux.org/packages/a/archinstall/$ai_file"
+echo "$ARCHINSTALL_SHA256  $work/out/$ai_file" | sha256sum -c -
 
 # Debug packages are not part of the repository.
 find "$work/out" -maxdepth 1 -name '*.pkg.tar.*' ! -name '*-debug-*' -exec cp -v {} "$repo/" \;

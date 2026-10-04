@@ -23,6 +23,13 @@ OMARCHY_PKGS_SHA=075f20f401518a3a9f1d9f25ec2b9e155a226eb5
 OMARCHY_PKGS_PR221_SHA=176f3d474f9ea10a26e4125e5347d7580dc8cd32
 OMARCHY_PKGS_PR222_SHA=7762e4f46bafcbdd739fc09d844434ee752c6e10
 
+# archinstall pinned to the release omarchy-iso's orchestrator is written and
+# tested against (archinstall_adapter.py: "Tested against archinstall 4.4").
+# ALARM extra ships 4.5, which dropped Installer.sanity_check(offline=) and
+# renamed more API. Arch's archive copy (arch=any) goes into [omarchy-sl7].
+ARCHINSTALL_VERSION=4.4-1
+ARCHINSTALL_SHA256=6cb5da75c108ef2f5d25a7a20baf6c52cc927d5e06890dd10182e6eb4be815cb
+
 # Runs of this repository's own workflows whose artifacts the repo job consumes.
 # linux-sl7 (artifact linux-sl7-<sha>, expires 2026-10-18; re-run linux-sl7.yml
 # and update this ID after that). iptsd-sl7: latest successful run on main.

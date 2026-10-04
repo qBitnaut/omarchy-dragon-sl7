@@ -1,0 +1,29 @@
+Subject: [PATCH 8/8] live ISO: large console font for the Surface Laptop 7 panel
+
+The console on the 2304x1536 panel renders at the default 8x16 size. Install
+/etc/vconsole.conf with FONT=ter-132b into the snapdragon live root;
+systemd-vconsole-setup applies it at boot. terminus-font is already listed in
+configs/packages.aarch64 (ALARM extra, arch=any).
+
+diff --git c/builder/build-iso.sh i/builder/build-iso.sh
+index 16b8405..2365fc6 100755
+--- c/builder/build-iso.sh
++++ i/builder/build-iso.sh
+@@ -163,6 +163,9 @@ if [[ $ISO_ARCH == aarch64 ]]; then
+       "$build_cache_dir/airootfs/etc/systemd/system/sl7-firmware-stage.service"
+     ln -s ../sl7-firmware-stage.service \
+       "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/sl7-firmware-stage.service"
++    # 2304x1536 panel: the default console font is unreadably small.
++    install -Dm644 /configs/aarch64/vconsole.conf \
++      "$build_cache_dir/airootfs/etc/vconsole.conf"
+   fi
+   install -Dm644 /configs/aarch64/zz-aarch64-live.conf \
+     "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/zz-aarch64-live.conf"
+diff --git c/configs/aarch64/vconsole.conf i/configs/aarch64/vconsole.conf
+new file mode 100644
+index 0000000..561cd8d
+--- /dev/null
++++ i/configs/aarch64/vconsole.conf
+@@ -0,0 +1,2 @@
++# terminus-font is in packages.aarch64; ter-132b is 16x32, legible on the 2304x1536 panel.
++FONT=ter-132b

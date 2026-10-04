@@ -83,6 +83,7 @@ jobs:
             -v "$RUNNER_TEMP/pr:/src/pr:ro" \
             -v "$PWD/dl:/prebuilt:ro" \
             -v "$PWD/repo:/repo" \
+            -e ARCHINSTALL_VERSION -e ARCHINSTALL_SHA256 \
             "$BUILDER_IMAGE" \
             bash /scripts/build-repo.sh
 

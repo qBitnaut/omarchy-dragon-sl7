@@ -69,6 +69,7 @@ for f in etc/mkinitcpio.conf.d/zzz-sl7-live.conf usr/local/bin/omarchy-sl7-firmw
 	usr/share/omarchy-iso/platforms.json; do
 	grep -Fxq "squashfs-root/$f" "$work/sfs-files.txt" || bad "live root has no /$f"
 done
+grep -Fxq 'squashfs-root/etc/vconsole.conf' "$work/sfs-files.txt" || bad "live root has no /etc/vconsole.conf"
 grep -Eq '^squashfs-root/usr/lib/modules/[^/]*sl7[^/]*/vmlinuz$' "$work/sfs-files.txt" ||
 	bad "live root has no linux-sl7 kernel under /usr/lib/modules"
 if grep -E '^squashfs-root/usr/lib/modules/[^/]+/vmlinuz$' "$work/sfs-files.txt" | grep -v sl7; then
@@ -86,6 +87,12 @@ for p in linux-sl7 linux-sl7-headers omarchy-surface-sl7 iptsd-sl7 linux-firmwar
 	found="$(find "$mdir" -maxdepth 1 -name "$p-[0-9]*.pkg.tar.*" ! -name '*.sig')"
 	[ -n "$found" ] || bad "offline mirror has no $p"
 done
+# omarchy-iso's orchestrator is written against archinstall 4.4 (4.5 dropped sanity_check(offline=)).
+ai="$(find "$mdir" -maxdepth 1 -name 'archinstall-[0-9]*.pkg.tar.*' ! -name '*.sig' -printf '%f\n')"
+case "$ai" in
+archinstall-4.4-*) ;;
+*) bad "offline mirror archinstall is '$ai', the orchestrator needs 4.4" ;;
+esac
 n=0
 : >"$work/pkg-files.txt"
 while IFS= read -r -d '' pkg; do
