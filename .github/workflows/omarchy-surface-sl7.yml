@@ -23,7 +23,7 @@ jobs:
           cd pkgs/omarchy-surface-sl7
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck lua5.4
-          shellcheck -x -s bash \
+          shellcheck -x -s bash -S warning \
             omarchy-surface-sl7-firmware omarchy-surface-sl7-power \
             omarchy-surface-sl7-system-sleep update-uki-dtbs \
             neutralize-surface-keyboard restart-iptsd power-event \

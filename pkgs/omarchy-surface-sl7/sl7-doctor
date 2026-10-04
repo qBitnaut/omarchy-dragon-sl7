@@ -209,8 +209,8 @@ else
   printf 'INFO  PSR: normal boot entry (no msm.psr_enabled=1 on the cmdline)\n'
 fi
 psr_found=0
-for f in ${OMARCHY_SL7_DRI_DEBUGFS:-/sys/kernel/debug/dri}/*/eDP-1/psr_* \
-  ${OMARCHY_SL7_DRI_DEBUGFS:-/sys/kernel/debug/dri}/*/*/*psr*; do
+dri_debugfs=${OMARCHY_SL7_DRI_DEBUGFS:-/sys/kernel/debug/dri}
+for f in "$dri_debugfs"/*/eDP-1/psr_* "$dri_debugfs"/*/*/*psr*; do
   [[ -f $f ]] || continue
   psr_found=1
   if [[ -r $f ]]; then
