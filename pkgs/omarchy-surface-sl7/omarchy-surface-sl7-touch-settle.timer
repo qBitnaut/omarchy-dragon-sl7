@@ -1,0 +1,8 @@
+[Unit]
+Description=Boot-settle touchpad re-init (omarchy-surface-sl7)
+
+[Timer]
+OnBootSec=20s
+
+[Install]
+WantedBy=timers.target

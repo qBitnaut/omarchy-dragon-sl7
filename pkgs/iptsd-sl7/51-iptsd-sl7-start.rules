@@ -10,8 +10,14 @@
 #
 # "change" is included because a plain `udevadm trigger` sends change, which
 # upstream's ACTION=="add" rule ignores. Wanting an active unit is a no-op.
-ACTION!="add|change", GOTO="iptsd_sl7_start_end"
-SUBSYSTEM!="hidraw", GOTO="iptsd_sl7_start_end"
+ACTION!="add|change", GOTO="iptsd_sl7_start_hid"
+SUBSYSTEM!="hidraw", GOTO="iptsd_sl7_start_hid"
 SUBSYSTEMS=="hid", KERNELS=="001C:045E:0C77.*|001C:045E:0C6E.*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="iptsd@dev-%k.service"
+# A running iptsd survives a spi-hid reset but the device is back in mouse
+# mode, so on change restart it (debounced; no-op if the unit is not active).
+ACTION=="change", SUBSYSTEMS=="hid", KERNELS=="001C:045E:0C77.*|001C:045E:0C6E.*", RUN+="/usr/lib/iptsd-sl7/iptsd-sl7-restart %k"
 
-LABEL="iptsd_sl7_start_end"
+LABEL="iptsd_sl7_start_hid"
+# spi-hid binds a driver to the hid device after (re)creating it: same.
+ACTION=="bind", SUBSYSTEM=="hid", KERNEL=="001C:045E:0C77.*|001C:045E:0C6E.*", RUN+="/usr/lib/iptsd-sl7/iptsd-sl7-restart %S%p"
+

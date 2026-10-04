@@ -1,0 +1,7 @@
+[Unit]
+Description=Re-enable SL7 touchpad multitouch once after boot (omarchy-surface-sl7)
+ConditionPathExists=/usr/lib/omarchy-surface-sl7/restart-iptsd
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy-surface-sl7/restart-iptsd

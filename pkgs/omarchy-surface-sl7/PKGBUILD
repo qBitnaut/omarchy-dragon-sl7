@@ -6,13 +6,13 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=8
+pkgrel=9
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT' 'ISC')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7' 'iptsd-sl7>=3.1.0.r20260717-3' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
+depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7' 'iptsd-sl7>=3.1.0.r20260717-8' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'jq' 'glib2' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'
@@ -47,6 +47,8 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-doctor'
         'omarchy-surface-sl7-system-sleep'
         'restart-iptsd'
+        'omarchy-surface-sl7-touch-settle.service'
+        'omarchy-surface-sl7-touch-settle.timer'
         'omarchy-surface-sl7-firmware'
         '50-omarchy-surface-sl7-wireplumber.conf'
         'guard-pro-audio.lua'
@@ -86,9 +88,11 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            'e57b53c1b1e06dca43ac32b5fd7d88a0b982ea8715d9db030b8bd0003c5caee0'
+            'c267c6ea6bc5cce19698c3780248e834842328d2f31c8716a4ce88db8706fa8a'
             '825fad0cedd4803b3abc0116613d55380f476beec6c2f845dcac3e7a3934ffae'
             'b2b08c6b796cc43f3b807b9c083bb906577edfa7027a588867f9488fa92a439c'
+            '897147e955439937365d1ae2e44c051faada34cf75684e9f74b391c73219585a'
+            '1fef19bf2fc3eaf35be85e01c5e19d43b5cc2ae579a9495d10f496ef13162b01'
             '3712c804f49d6baceed7f2c387b1ae68001ee0139ddfe76cf755558026004b15'
             '613b94e23f0ac627758650ebd8f9e1b63c8ed0eaa04cf99d65b46db01b9d9699'
             '2c627fd5783b18ced1aa4ad199cd550ea4b9146556ffc918cf80a21366a1a84a'
@@ -156,6 +160,14 @@ package() {
 
   # 4. touch: restart iptsd@ after resume
   install -Dm755 restart-iptsd "$lib/restart-iptsd"
+  # boot-settle safety net: re-enable multitouch once after boot
+  install -Dm644 omarchy-surface-sl7-touch-settle.service \
+    "$pkgdir/usr/lib/systemd/system/omarchy-surface-sl7-touch-settle.service"
+  install -Dm644 omarchy-surface-sl7-touch-settle.timer \
+    "$pkgdir/usr/lib/systemd/system/omarchy-surface-sl7-touch-settle.timer"
+  install -dm755 "$pkgdir/usr/lib/systemd/system/timers.target.wants"
+  ln -s ../omarchy-surface-sl7-touch-settle.timer \
+    "$pkgdir/usr/lib/systemd/system/timers.target.wants/omarchy-surface-sl7-touch-settle.timer"
   install -Dm755 omarchy-surface-sl7-system-sleep \
     "$pkgdir/usr/lib/systemd/system-sleep/omarchy-surface-sl7"
 

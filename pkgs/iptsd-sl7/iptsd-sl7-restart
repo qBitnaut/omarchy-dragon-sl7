@@ -1,0 +1,27 @@
+#!/bin/bash
+# Restart the iptsd@ unit for an SL7 hidraw node after spi-hid re-created or
+# reset the device (run from udev, see 51-iptsd-sl7-start.rules).
+#
+# Argument: hidraw name (hidraw1) or the sysfs path of the parent hid device.
+# A reset drops the touchpad back to plain mouse mode; a running iptsd does not
+# notice, so the heatmap mode must be re-enabled by restarting it. Debounced:
+# a unit that (re)started less than ${IPTSD_SL7_DEBOUNCE:-3}s ago is left alone,
+# so our own start does not trigger a restart loop.
+set -u
+arg=${1:-}
+[[ -n $arg ]] || exit 0
+if [[ -d $arg ]]; then
+  name=
+  for n in "$arg"/hidraw/hidraw*; do [[ -e $n ]] && name=${n##*/}; done
+  [[ -n $name ]] || exit 0
+else
+  name=$arg
+fi
+unit="iptsd@dev-$name.service"
+systemctl --quiet is-active "$unit" || exit 0   # inactive: SYSTEMD_WANTS handles add
+ts=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$unit")
+now=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
+if [[ $ts =~ ^[0-9]+$ ]] && ((now - ts < ${IPTSD_SL7_DEBOUNCE:-3} * 1000000)); then
+  exit 0
+fi
+exec systemctl --no-block try-restart "$unit"

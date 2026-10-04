@@ -76,7 +76,17 @@ for id in 0C77 0C6E; do
       [[ $unit == "iptsd@dev-${node##*/}.service" ]] && active=1
     done
   done
-  if ((active)); then pass "iptsd active for 045E:$id"
+  if ((active)); then
+    pass "iptsd active for 045E:$id"
+    # spi-hid can reset after iptsd enabled multitouch; iptsd keeps running but
+    # the device is back in mouse mode (no 2-finger scroll).
+    n=${node##*/}
+    ats=$(systemctl show -p ActiveEnterTimestampMonotonic --value "iptsd@dev-$n.service" 2>/dev/null)
+    last=$(journalctl -k -b -o json --output-fields=__MONOTONIC_TIMESTAMP --grep 'spi_hid.*(timed out|Failed to create hid device|reset)' 2>/dev/null |
+      jq -rs 'map(.__MONOTONIC_TIMESTAMP|tonumber)|max // empty' 2>/dev/null)
+    if [[ $ats =~ ^[0-9]+$ && $last =~ ^[0-9]+$ ]] && ((last > ats)); then
+      warn "spi-hid reset after iptsd started for 045E:$id; touchpad may be in mouse mode (sudo /usr/lib/omarchy-surface-sl7/restart-iptsd)"
+    fi
   elif ((seen)); then fail "no active iptsd@ unit for 045E:$id (sudo /usr/lib/omarchy-surface-sl7/restart-iptsd)"
   else fail "no hidraw node for 045E:$id (device not enumerated)"; fi
 done
