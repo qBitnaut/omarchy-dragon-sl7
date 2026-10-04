@@ -78,3 +78,15 @@ Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package
   It is the output of `iptsd-calibrate` (measured numbers). Replace it by running
   `iptsd-calibrate /dev/hidrawN` on your own unit (find N with
   `iptsd-foreach -t touchpad -- echo {}`).
+
+## Patches and tuning
+
+- `patches/0001-daemon-require-button-hold-time.patch` (applied in `prepare()`):
+  adds `[Touchpad] ButtonHoldMs` (default 70). The firmware's click bit must be
+  held that long, with at least one contact on the pad, before `BTN_LEFT` is
+  emitted; release is immediate. 0 disables it. Two-finger (clickfinger) clicks
+  are unaffected. A spike longer than the value still passes (a 160 ms one needs
+  more than 160, at that much latency).
+- `/etc/iptsd.d/92-iptsd-sl7-tuning.conf` overrides the 91 calibration;
+  `/etc/iptsd.d/93-local-calibration.conf` (from `iptsd-sl7-calibrate`) overrides
+  both. `iptsd-sl7-calibrate --revert` removes it.

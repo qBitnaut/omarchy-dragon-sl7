@@ -1,0 +1,176 @@
+diff --git i/etc/iptsd.conf w/etc/iptsd.conf
+index 259f4f2..0f52596 100644
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -54,6 +54,13 @@
+ ##
+ # ButtonDebounceMs = 25
+ 
++##
++## How long (in milliseconds) the firmware's button bit must stay set, with at least one
++## contact on the touchpad, before a button press is emitted. Releases are immediate.
++## Rejects short pressure spikes. 0 disables the check. (Default 70)
++##
++# ButtonHoldMs = 70
++
+ [Contacts]
+ ##
+ ## How the neutral value of the heatmap will be determined.
+diff --git i/src/apps/daemon/touch.hpp w/src/apps/daemon/touch.hpp
+index d890b31..db12107 100644
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -73,6 +73,15 @@ private:
+ 	// rapid press/release flicker from the firmware's raw pressure-threshold bit.
+ 	f64 m_button_debounce_ms = 0;
+ 
++	// Minimum time the firmware button bit must be held before a press is emitted.
++	f64 m_button_hold_ms = 0;
++
++	// Whether the button bit is set and waiting for the hold time to pass.
++	bool m_button_pending = false;
++
++	// When the button bit was first seen set.
++	std::chrono::steady_clock::time_point m_button_pending_since {};
++
+ 	// The last debounced (emitted) state of the touchpad button.
+ 	bool m_button_state = false;
+ 
+@@ -127,6 +136,7 @@ public:
+ 		}
+ 
+ 		m_button_debounce_ms = config.touchpad_button_debounce_ms;
++		m_button_hold_ms = config.touchpad_button_hold_ms;
+ 
+ 		const f64 diag = std::hypot(config.width, config.height);
+ 
+@@ -170,6 +180,9 @@ public:
+ 			this->process(contacts);
+ 
+ 		this->sync();
++
++		// The button bit may have been set before the hold time was over.
++		this->confirm_button();
+ 	}
+ 
+ 	/*!
+@@ -184,15 +197,55 @@ public:
+ 		// mechanically trips the click sensor would still register a click even though
+ 		// pointer motion is correctly frozen -- this is a separate channel from the
+ 		// contact-derived BTN_LEFT emitted/lifted in process()/lift_all().
+-		if (!m_enabled || m_blocked)
++		if (!m_enabled || m_blocked) {
++			m_button_pending = false;
++			return;
++		}
++
++		// Release: immediate, and cancels a press that has not been confirmed yet.
++		if (!button.active) {
++			m_button_pending = false;
++
++			if (m_button_state)
++				this->emit_button(false);
++
++			return;
++		}
++
++		// Already pressed.
++		if (m_button_state)
+ 			return;
+ 
+-		// No state change requested, nothing to debounce or emit.
+-		if (button.active == m_button_state)
++		if (!m_button_pending) {
++			m_button_pending = true;
++			m_button_pending_since = std::chrono::steady_clock::now();
++		}
++
++		this->confirm_button();
++	}
++
++	/*!
++	 * Emits a pending button press once the bit was held long enough and a contact is present.
++	 */
++	void confirm_button()
++	{
++		if (!m_button_pending || m_button_state)
+ 			return;
+ 
++		// A press without any contact on the pad is not a click.
++		if (m_current.empty()) {
++			m_button_pending = false;
++			return;
++		}
++
+ 		const auto now = std::chrono::steady_clock::now();
+ 
++		const f64 held =
++			std::chrono::duration<f64, std::milli>(now - m_button_pending_since).count();
++
++		if (held < m_button_hold_ms)
++			return;
++
+ 		// Debounce: a state change requested too soon after the last accepted one
+ 		// is treated as contact bounce on the firmware's pressure-threshold bit
+ 		// rather than a deliberate press/release, and is dropped.
+@@ -204,12 +257,8 @@ public:
+ 				return;
+ 		}
+ 
+-		m_button_state = button.active;
+-		m_button_last_change = now;
+-		m_button_initialized = true;
+-
+-		m_uinput->emit(EV_KEY, BTN_LEFT, m_button_state ? 1 : 0);
+-		this->sync();
++		m_button_pending = false;
++		this->emit_button(true);
+ 	}
+ 
+ 	/*!
+@@ -258,6 +307,21 @@ public:
+ 	}
+ 
+ private:
++	/*!
++	 * Emits a button transition and records it for debouncing.
++	 *
++	 * @param[in] pressed The new state of the button.
++	 */
++	void emit_button(const bool pressed)
++	{
++		m_button_state = pressed;
++		m_button_last_change = std::chrono::steady_clock::now();
++		m_button_initialized = true;
++
++		m_uinput->emit(EV_KEY, BTN_LEFT, pressed ? 1 : 0);
++		this->sync();
++	}
++
+ 	/*!
+ 	 * Builds the difference between the current and the last frame.
+ 	 * Contacts that were present in the last frame but not in this one have to be lifted.
+diff --git i/src/core/generic/config.hpp w/src/core/generic/config.hpp
+index c14de83..7ef77a7 100644
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -35,6 +35,7 @@ public:
+ 	bool touchpad_disable_on_palm = false;
+ 	f64 touchpad_overshoot = 0.5;
+ 	f64 touchpad_button_debounce_ms = 25;
++	f64 touchpad_button_hold_ms = 70;
+ 
+ 	// [Contacts]
+ 	std::string contacts_neutral = "mode";
+diff --git i/src/core/linux/config-loader.hpp w/src/core/linux/config-loader.hpp
+index 2623a58..7bbaffb 100644
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -161,6 +161,7 @@ private:
+ 		this->get(ini, "Touchpad", "DisableOnPalm", m_config.touchpad_disable_on_palm);
+ 		this->get(ini, "Touchpad", "Overshoot", m_config.touchpad_overshoot);
+ 		this->get(ini, "Touchpad", "ButtonDebounceMs", m_config.touchpad_button_debounce_ms);
++		this->get(ini, "Touchpad", "ButtonHoldMs", m_config.touchpad_button_hold_ms);
+ 
+ 		this->get(ini, "Contacts", "Neutral", m_config.contacts_neutral);
+ 		this->get(ini, "Contacts", "NeutralValue", m_config.contacts_neutral_value);
