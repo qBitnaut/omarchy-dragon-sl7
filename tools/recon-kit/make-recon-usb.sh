@@ -711,7 +711,7 @@ stage_kernel() {
 	[ -f "$kd/SHA256SUMS" ] || die "$kd/SHA256SUMS missing"
 	(cd "$kd" && sha256sum -c --quiet SHA256SUMS) || die "artifact checksum mismatch in $kd"
 	echo "    artifact SHA256SUMS verified"
-	if find "$kd" -maxdepth 3 \( -name '*.mbn' -o -name '*_dtbs.elf' -o -name '*.jsn' \) | grep -q .; then
+	if [ -n "$(find "$kd" -maxdepth 3 \( -name '*.mbn' -o -name '*_dtbs.elf' -o -name '*.jsn' \) -print -quit)" ]; then
 		die "firmware files found in the artifacts: refusing (firmware must only come from the local stage)"
 	fi
 	build_kernel_boot
@@ -722,9 +722,12 @@ stage_kernel() {
 	cp "$kd/dtbs/x1e80100-microsoft-romulus13.dtb" "$kd/dtbs/x1e80100-microsoft-romulus15.dtb" "$STAGE/sl7boot/"
 	write_boot_entries "$ver"
 	if [ -n "$IPTSD_PKG" ]; then
-		# GNU tar detects the compression on read
-		tar -tf "$IPTSD_PKG" | grep -qx 'usr/bin/iptsd' || die "$IPTSD_PKG does not contain usr/bin/iptsd"
-		if tar -tf "$IPTSD_PKG" | grep -qE '\.(mbn|jsn)$|_dtbs\.elf$'; then die "firmware inside $IPTSD_PKG"; fi
+		# GNU tar detects the compression on read. List once, then search:
+		# `tar | grep -q` under pipefail fails when grep exits early (SIGPIPE).
+		local ilist
+		ilist="$(tar -tf "$IPTSD_PKG")" || die "cannot list $IPTSD_PKG"
+		grep -qx 'usr/bin/iptsd' <<<"$ilist" || die "$IPTSD_PKG does not contain usr/bin/iptsd"
+		if grep -qE '\.(mbn|jsn)$|_dtbs\.elf$' <<<"$ilist"; then die "firmware inside $IPTSD_PKG"; fi
 		# the guide expects a zstd package; recompress an .xz one when staging
 		case "$IPTSD_PKG" in
 		*.pkg.tar.xz) xz -dc "$IPTSD_PKG" | zstd -q -o "$STAGE/sl7test/iptsd-sl7.pkg.tar.zst" ;;
