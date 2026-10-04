@@ -1,0 +1,147 @@
+Subject: [PATCH 6/7] live ISO: stage firmware from the SL7DATA partition
+
+sl7-firmware-stage.service (enabled for aarch64/snapdragon media, before
+getty@tty1 and so before the installer) runs omarchy-sl7-firmware-stage, which
+mounts LABEL=SL7DATA read-only, runs
+  qcom-firmware-extract --stage /run/omarchy/firmware -d /run/sl7data/firmware
+and unmounts. The installer's own 'qcom-firmware-extract --stage' then reports
+'already staged' and copies the stage into the target. A hybrid-ISO whole-disk
+claim is handled with a loop device, as in the recon kit. It never fails the
+boot. profiledef.sh sets the script's mode.
+
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+index 3df23bb..16b8405 100755
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -156,6 +156,13 @@ if [[ $ISO_ARCH == aarch64 ]]; then
+     mkdir -p "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants"
+     ln -s ../omarchy-live-dsp.service \
+       "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/omarchy-live-dsp.service"
++    # Surface Laptop 7: stage firmware from the SL7DATA partition of the install stick.
++    install -Dm755 /configs/aarch64/omarchy-sl7-firmware-stage \
++      "$build_cache_dir/airootfs/usr/local/bin/omarchy-sl7-firmware-stage"
++    install -Dm644 /configs/aarch64/sl7-firmware-stage.service \
++      "$build_cache_dir/airootfs/etc/systemd/system/sl7-firmware-stage.service"
++    ln -s ../sl7-firmware-stage.service \
++      "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/sl7-firmware-stage.service"
+   fi
+   install -Dm644 /configs/aarch64/zz-aarch64-live.conf \
+     "$build_cache_dir/airootfs/etc/mkinitcpio.conf.d/zz-aarch64-live.conf"
+diff --git a/configs/aarch64/omarchy-sl7-firmware-stage b/configs/aarch64/omarchy-sl7-firmware-stage
+new file mode 100755
+index 0000000..393801a
+--- /dev/null
++++ b/configs/aarch64/omarchy-sl7-firmware-stage
+@@ -0,0 +1,79 @@
++#!/bin/bash
++# Stage the Surface Laptop 7 firmware from the install stick's SL7DATA
++# partition into /run/omarchy/firmware (RAM) before the installer runs, so the
++# installer copies it into the target. Windows is normally gone by then, so
++# qcom-firmware-extract's own scan of the internal disk finds nothing.
++# Never fails the boot: with no SL7DATA, or no firmware on it, it does nothing
++# and the installer falls back to scanning for a Windows driver store.
++set -uo pipefail
++
++LABEL=SL7DATA
++MNT=/run/sl7data
++STAGE=/run/omarchy/firmware
++
++log() { echo "sl7-firmware-stage: $*"; }
++
++if [[ -f $STAGE/manifest ]]; then
++  log "already staged in $STAGE"
++  exit 0
++fi
++if ! command -v qcom-firmware-extract >/dev/null; then
++  log "qcom-firmware-extract is not installed; nothing to do"
++  exit 0
++fi
++
++udevadm settle --timeout=20 2>/dev/null || true
++dev=""
++for _ in 1 2 3 4 5; do
++  if [[ -e /dev/disk/by-label/$LABEL ]]; then
++    dev="$(readlink -f "/dev/disk/by-label/$LABEL")"
++    break
++  fi
++  sleep 1
++done
++if [[ -z $dev ]]; then
++  log "no $LABEL partition; nothing to do"
++  exit 0
++fi
++
++mkdir -p "$MNT"
++loopdev=""
++# shellcheck disable=SC2329  # runs from the EXIT trap
++cleanup() {
++  mountpoint -q "$MNT" && umount "$MNT"
++  [[ -n $loopdev ]] && losetup -d "$loopdev"
++  rmdir "$MNT" 2>/dev/null
++  return 0
++}
++trap cleanup EXIT
++
++opts=ro,nosuid,nodev,noexec
++if ! mount -o "$opts" "$dev" "$MNT" 2>/dev/null; then
++  # A hybrid ISO can make archiso claim the whole disk (the same iso9660 UUID
++  # on the disk and on partition 1), and the kernel then refuses to open its
++  # partitions. Read the partition through a loop device over its byte range.
++  b="${dev##*/}"
++  if [[ -r /sys/class/block/$b/start ]]; then
++    parent="$(basename "$(readlink -f "/sys/class/block/$b/..")")"
++    loopdev="$(losetup -f --show -r \
++      -o $(($(< "/sys/class/block/$b/start") * 512)) \
++      --sizelimit $(($(< "/sys/class/block/$b/size") * 512)) "/dev/$parent")" || loopdev=""
++    if [[ -n $loopdev ]] && mount -o "$opts" "$loopdev" "$MNT"; then
++      log "whole disk /dev/$parent is claimed by archiso; read $dev through $loopdev"
++    fi
++  fi
++fi
++if ! mountpoint -q "$MNT"; then
++  log "could not mount $dev read-only; nothing staged"
++  exit 0
++fi
++
++if [[ -z $(find "$MNT/firmware" -type f -print -quit 2>/dev/null) ]]; then
++  log "no firmware/ files on $LABEL; nothing staged"
++  exit 0
++fi
++
++mkdir -p "$(dirname "$STAGE")"
++log "staging firmware from $dev"
++qcom-firmware-extract --stage "$STAGE" -d "$MNT/firmware" || log "qcom-firmware-extract failed (status $?)"
++exit 0
+diff --git a/configs/aarch64/sl7-firmware-stage.service b/configs/aarch64/sl7-firmware-stage.service
+new file mode 100644
+index 0000000..5a24b4b
+--- /dev/null
++++ b/configs/aarch64/sl7-firmware-stage.service
+@@ -0,0 +1,16 @@
++[Unit]
++Description=Stage Surface Laptop 7 firmware from the SL7DATA partition
++After=local-fs.target systemd-udev-trigger.service
++Before=getty@tty1.service
++ConditionArchitecture=arm64
++
++[Service]
++Type=oneshot
++ExecStart=/usr/local/bin/omarchy-sl7-firmware-stage
++TimeoutStartSec=90s
++RemainAfterExit=yes
++StandardOutput=journal
++StandardError=journal
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/configs/profiledef.sh b/configs/profiledef.sh
+index 19cfa34..6d4e654 100644
+--- a/configs/profiledef.sh
++++ b/configs/profiledef.sh
+@@ -72,5 +72,6 @@ if [[ $arch == aarch64 ]]; then
+   file_permissions["/root/live-uki.sh"]="0:0:755"
+   if [[ ${OMARCHY_MEDIA_TARGET:-aarch64/snapdragon} == aarch64/snapdragon ]]; then
+     file_permissions["/usr/local/bin/omarchy-live-dsp"]="0:0:755"
++    file_permissions["/usr/local/bin/omarchy-sl7-firmware-stage"]="0:0:755"
+   fi
+ fi

@@ -1,0 +1,7 @@
+0001-platforms-add-surface-laptop-7.patch
+0002-architecture-iso-kernel-linux-sl7.patch
+0003-live-boot-kernel-neutral.patch
+0004-live-initramfs-sl7-keyboard-modules.patch
+0005-local-repo-keep-edge-omarchy.patch
+0006-sl7-firmware-stage-service.patch
+0007-update-upstream-unit-tests.patch

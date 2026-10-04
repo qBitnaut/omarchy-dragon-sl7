@@ -1,0 +1,48 @@
+Subject: [PATCH 5/7] local-repo-config.sh: add [omarchy-sl7] above [omarchy], keep edge [omarchy]
+
+With --local-repo upstream deletes the [omarchy] section and serves it from
+the local directory. Our repository only holds the SL7 packages, so deleting
+edge [omarchy] loses hyprland, omarchy-keyring and limine-mkinitcpio-hook and
+the build fails at 'pacman -Sy omarchy-keyring'. The local repository now
+becomes [omarchy-sl7], listed first so its packages win, and edge stays.
+Running it on its own output changes nothing.
+bin/omarchy-iso-make still wants $LOCAL_REPO/omarchy.db; the workflow links
+omarchy.db to omarchy-sl7.db.
+
+diff --git a/builder/local-repo-config.sh b/builder/local-repo-config.sh
+index e32516d..1791df0 100644
+--- a/builder/local-repo-config.sh
++++ b/builder/local-repo-config.sh
+@@ -1,18 +1,26 @@
+ #!/bin/bash
+ set -euo pipefail
+ 
+-# Local rebuilds must take precedence over distribution packages.
++# Local rebuilds must take precedence over distribution packages. The local
++# repository is added as [omarchy-sl7] directly above the other repositories,
++# and the published [omarchy] repository stays: it still supplies hyprland,
++# aquamarine, omarchy-keyring, limine-mkinitcpio-hook and the rest of the
++# edge packages the local repository does not carry.
++
++# Already configured: leave the file as it is.
++if grep -qx '\[omarchy-sl7\]' "$1"; then
++  cat "$1"
++  exit 0
++fi
++
+ awk '
+-  /^\[omarchy\]$/ { skip = 1; next }
+-  /^\[/ { skip = 0 }
+-  skip { next }
+   /^\[/ && $0 != "[options]" && !inserted {
+-    print "[omarchy]\nSigLevel = Optional TrustAll\nServer = file:///omarchy-repo\n"
++    print "[omarchy-sl7]\nSigLevel = Optional TrustAll\nServer = file:///omarchy-repo\n"
+     inserted = 1
+   }
+   { print }
+   END {
+     if (!inserted)
+-      print "\n[omarchy]\nSigLevel = Optional TrustAll\nServer = file:///omarchy-repo"
++      print "\n[omarchy-sl7]\nSigLevel = Optional TrustAll\nServer = file:///omarchy-repo"
+   }
+ ' "$1"

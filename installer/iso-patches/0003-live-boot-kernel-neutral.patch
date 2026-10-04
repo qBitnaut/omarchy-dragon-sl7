@@ -1,0 +1,189 @@
+Subject: [PATCH 3/7] live boot: take kernel and device trees from ISO_KERNEL, not linux-aarch64
+
+customize_airootfs.sh and live-uki.sh hard-coded linux-aarch64, /boot/Image and
+/boot/dtbs. build-iso.sh now records ISO_KERNEL in /root/omarchy_iso_kernel;
+for a kernel that follows the Arch layout (linux-sl7) the scripts take the
+image from usr/lib/modules/<ver>/vmlinuz and the device trees from
+usr/lib/modules/<ver>/dtbs/qcom, with the same x1*/hamoa*/glymur*/sc8280xp*
+selection (no -el2) as before. For linux-sl7 romulus13 and romulus15 are
+required. Generic media (linux-aarch64) behaves as before.
+
+diff --git a/builder/build-iso.sh b/builder/build-iso.sh
+index 1e3f149..af91f2d 100755
+--- a/builder/build-iso.sh
++++ b/builder/build-iso.sh
+@@ -166,6 +166,7 @@ if [[ $ISO_ARCH == aarch64 ]]; then
+   install -Dm755 /configs/aarch64/live-uki.sh \
+     "$build_cache_dir/airootfs/root/live-uki.sh"
+   printf '%s\n' "$OMARCHY_MEDIA_TARGET" > "$build_cache_dir/airootfs/root/omarchy_media_target"
++  printf '%s\n' "$ISO_KERNEL" > "$build_cache_dir/airootfs/root/omarchy_iso_kernel"
+   install -Dm644 /configs/aarch64/platforms.json \
+     "$build_cache_dir/airootfs/usr/share/omarchy-iso/platforms.json"
+   python /configs/airootfs/usr/share/omarchy-iso/orchestrator/hardware.py \
+diff --git a/configs/aarch64/customize_airootfs.sh b/configs/aarch64/customize_airootfs.sh
+index 94b6168..a7d2262 100644
+--- a/configs/aarch64/customize_airootfs.sh
++++ b/configs/aarch64/customize_airootfs.sh
+@@ -6,6 +6,13 @@ if [[ $(uname -m) != aarch64 ]]; then
+   exit 0
+ fi
+ 
++# The kernel package this image boots (written by build-iso.sh from ISO_KERNEL):
++# linux-aarch64 for generic media, linux-sl7 for the Surface Laptop 7.
++iso_kernel=linux-aarch64
++if [[ -s /root/omarchy_iso_kernel ]]; then
++  iso_kernel="$(</root/omarchy_iso_kernel)"
++fi
++
+ # linux-aarch64 does not provide the thunderbolt module.
+ if [[ -f /etc/mkinitcpio.conf.d/thunderbolt_module.conf ]]; then
+   sed -i 's/^MODULES+=(thunderbolt)/#MODULES+=(thunderbolt)  # not built for aarch64/' \
+@@ -13,12 +20,28 @@ if [[ -f /etc/mkinitcpio.conf.d/thunderbolt_module.conf ]]; then
+ fi
+ 
+ # Give mkarchiso the kernel filename it copies into the ISO.
+-if [[ ! -e /boot/vmlinuz-linux-aarch64 ]]; then
+-  if [[ -e /boot/Image ]]; then
+-    cp -a /boot/Image /boot/vmlinuz-linux-aarch64
++if [[ ! -e /boot/vmlinuz-$iso_kernel ]]; then
++  if [[ $iso_kernel == linux-aarch64 ]]; then
++    # Arch Linux ARM installs the kernel as /boot/Image.
++    if [[ -e /boot/Image ]]; then
++      cp -a /boot/Image /boot/vmlinuz-linux-aarch64
++    else
++      echo "customize_airootfs: no kernel image at /boot/Image or /boot/vmlinuz-linux-aarch64" >&2
++      exit 1
++    fi
+   else
+-    echo "customize_airootfs: no kernel image at /boot/Image or /boot/vmlinuz-linux-aarch64" >&2
+-    exit 1
++    # Kernels that follow the Arch layout (linux-sl7) keep the image in their
++    # module directory and name themselves in its pkgbase file.
++    for moddir in /usr/lib/modules/*/; do
++      if [[ -s ${moddir}vmlinuz && -f ${moddir}pkgbase && $(<"${moddir}pkgbase") == "$iso_kernel" ]]; then
++        cp -a "${moddir}vmlinuz" "/boot/vmlinuz-$iso_kernel"
++        break
++      fi
++    done
++    if [[ ! -e /boot/vmlinuz-$iso_kernel ]]; then
++      echo "customize_airootfs: no vmlinuz for $iso_kernel under /usr/lib/modules/*/ (pkgbase $iso_kernel)" >&2
++      exit 1
++    fi
+   fi
+ fi
+ 
+@@ -26,36 +49,36 @@ fi
+ for preset in /etc/mkinitcpio.d/*.preset; do
+   [[ -e $preset ]] || continue
+   kname="$(basename "$preset" .preset)"
+-  if [[ $kname != linux-aarch64 && ! -e /boot/vmlinuz-$kname ]]; then
++  if [[ $kname != "$iso_kernel" && ! -e /boot/vmlinuz-$kname ]]; then
+     echo "customize_airootfs: dropping $kname.preset (no kernel image)"
+     rm -f "$preset"
+   fi
+ done
+ 
+ # Keep drop-ins enabled so the aarch64 live hooks override installed-system hooks.
+-cat > /etc/mkinitcpio.d/linux-aarch64.preset <<'PRESET'
+-# Live-ISO preset for Arch Linux ARM's linux-aarch64.
++cat > "/etc/mkinitcpio.d/$iso_kernel.preset" <<PRESET
++# Live-ISO preset for $iso_kernel.
+ PRESETS=('archiso')
+ 
+-ALL_kver='/boot/vmlinuz-linux-aarch64'
+-archiso_image="/boot/initramfs-linux-aarch64.img"
++ALL_kver='/boot/vmlinuz-$iso_kernel'
++archiso_image="/boot/initramfs-$iso_kernel.img"
+ PRESET
+ 
+ echo "customize_airootfs: building the live initramfs with aarch64 overrides"
+ rm -f /boot/initramfs-linux*.img
+ 
+-mkinitcpio -p linux-aarch64
++mkinitcpio -p "$iso_kernel"
+ 
+ # Fail the build if GRUB's initramfs was not produced.
+-if [[ ! -s /boot/initramfs-linux-aarch64.img ]]; then
++if [[ ! -s /boot/initramfs-$iso_kernel.img ]]; then
+   echo "customize_airootfs: no live initramfs was produced; the ISO would not boot" >&2
+   exit 1
+ fi
+-echo "customize_airootfs: initramfs present ($(stat -c %s /boot/initramfs-linux-aarch64.img) bytes)"
++echo "customize_airootfs: initramfs present ($(stat -c %s "/boot/initramfs-$iso_kernel.img") bytes)"
+ 
+ # Inspect the image, not just the source configuration. A package hook can
+ # successfully build an installed-system initramfs that cannot boot live media.
+-contents=$(lsinitcpio /boot/initramfs-linux-aarch64.img)
++contents=$(lsinitcpio "/boot/initramfs-$iso_kernel.img")
+ for hook in archiso archiso_loop_mnt; do
+   if ! grep -Eq "(^|/)hooks/$hook$" <<<"$contents"; then
+     echo "customize_airootfs: live initramfs is missing $hook" >&2
+diff --git a/configs/aarch64/live-uki.sh b/configs/aarch64/live-uki.sh
+index a38baea..1faed0e 100755
+--- a/configs/aarch64/live-uki.sh
++++ b/configs/aarch64/live-uki.sh
+@@ -2,11 +2,37 @@
+ # Build a live UKI with Qualcomm DTBs selected from the system SMBIOS data.
+ set -euo pipefail
+ 
+-kernel=/boot/vmlinuz-linux-aarch64
+-initrd=/boot/initramfs-linux-aarch64.img
++# The kernel package this image boots (written by build-iso.sh from ISO_KERNEL).
++iso_kernel=linux-aarch64
++if [[ -s /root/omarchy_iso_kernel ]]; then
++  iso_kernel="$(</root/omarchy_iso_kernel)"
++fi
++kernel=/boot/vmlinuz-$iso_kernel
++initrd=/boot/initramfs-$iso_kernel.img
+ uki=/boot/omarchy-live.efi
+ hwids=/usr/lib/systemd/boot/hwids/aa64
+ 
++# Device trees: Arch Linux ARM installs them in /boot/dtbs; a kernel following
++# the Arch layout (linux-sl7) keeps them in its module directory.
++dtbdir=/boot/dtbs/qcom
++required=()
++if [[ $iso_kernel != linux-aarch64 ]]; then
++  dtbdir=""
++  for moddir in /usr/lib/modules/*/; do
++    if [[ -f ${moddir}pkgbase && $(<"${moddir}pkgbase") == "$iso_kernel" && -d ${moddir}dtbs/qcom ]]; then
++      dtbdir=${moddir}dtbs/qcom
++      break
++    fi
++  done
++  if [[ -z $dtbdir ]]; then
++    echo "live-uki: no dtbs/qcom directory for $iso_kernel under /usr/lib/modules/*/" >&2
++    exit 1
++  fi
++fi
++if [[ $iso_kernel == linux-sl7 ]]; then
++  required=(x1e80100-microsoft-romulus13.dtb x1e80100-microsoft-romulus15.dtb)
++fi
++
+ for f in "$kernel" "$initrd"; do
+   if [[ ! -s $f ]]; then
+     echo "live-uki: $f is missing; customize_airootfs.sh should have produced it" >&2
+@@ -26,15 +52,21 @@ fi
+ # EL2 variants share hardware IDs with their base DTBs and would be ambiguous.
+ shopt -s nullglob
+ dtbs=()
+-for dtb in /boot/dtbs/qcom/x1*.dtb /boot/dtbs/qcom/hamoa*.dtb \
+-           /boot/dtbs/qcom/glymur*.dtb /boot/dtbs/qcom/sc8280xp*.dtb; do
++for dtb in "$dtbdir"/x1*.dtb "$dtbdir"/hamoa*.dtb \
++           "$dtbdir"/glymur*.dtb "$dtbdir"/sc8280xp*.dtb; do
+   [[ $dtb == *-el2.dtb ]] && continue
+   dtbs+=("$dtb")
+ done
+ if (( ${#dtbs[@]} == 0 )); then
+-  echo "live-uki: no Windows-on-ARM device trees under /boot/dtbs/qcom" >&2
++  echo "live-uki: no Windows-on-ARM device trees under $dtbdir" >&2
+   exit 1
+ fi
++for name in "${required[@]}"; do
++  if [[ ! -f $dtbdir/$name ]]; then
++    echo "live-uki: required device tree $name is missing from $dtbdir" >&2
++    exit 1
++  fi
++done
+ # Reserve room for the UKI's non-DTB sections.
+ if (( ${#dtbs[@]} > 90 )); then
+   echo "live-uki: ${#dtbs[@]} device trees exceed the UKI section budget; narrow the prefixes" >&2

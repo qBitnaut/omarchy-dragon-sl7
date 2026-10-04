@@ -1,0 +1,30 @@
+# Pinned inputs of the installer ISO pipeline (.github/workflows/installer-iso.yml).
+# Shell-sourceable KEY=VALUE, no spaces. Everything the ISO is built from is
+# named here; change it deliberately and re-verify installer/iso-patches
+# (installer/scripts/apply-iso-patches.sh --check) against the new SHAs.
+#
+# Resolved 2026-10-04.
+
+# omarchy (the runtime/settings source for --local-source), branch dragon.
+OMARCHY_REPO=https://github.com/omacom/omarchy.git
+OMARCHY_SHA=4a7fc7518c2f683b4d6dc3933624916171f34dc0
+
+# omarchy-iso, branch dragon, and the archiso submodule commit that SHA records.
+OMARCHY_ISO_REPO=https://github.com/omacom/omarchy-iso.git
+OMARCHY_ISO_SHA=8e4f82f6699c27973b7d2a10a9396d921c9893b3
+OMARCHY_ISO_ARCHISO_SHA=424e78130db2af6c1ceb55b442d7914b1109ff2b
+
+# omarchy-pkgs, branch master (PKGBUILDs for omarchy-dev, omarchy-settings-dev, omarchy-nvim).
+OMARCHY_PKGS_REPO=https://github.com/omacom/omarchy-pkgs.git
+OMARCHY_PKGS_SHA=075f20f401518a3a9f1d9f25ec2b9e155a226eb5
+
+# Open, unpublished omarchy-pkgs PRs built from source into the local repository.
+# #221 qcom-firmware-extract, #222 linux-aarch64-pkgbase-shim.
+OMARCHY_PKGS_PR221_SHA=176f3d474f9ea10a26e4125e5347d7580dc8cd32
+OMARCHY_PKGS_PR222_SHA=7762e4f46bafcbdd739fc09d844434ee752c6e10
+
+# Runs of this repository's own workflows whose artifacts the repo job consumes.
+# linux-sl7 (artifact linux-sl7-<sha>, expires 2026-10-18; re-run linux-sl7.yml
+# and update this ID after that). iptsd-sl7: latest successful run on main.
+LINUX_SL7_RUN_ID=37214915036
+IPTSD_SL7_RUN_ID=37173887255

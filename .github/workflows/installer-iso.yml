@@ -1,0 +1,210 @@
+name: installer-iso
+
+# Builds the Surface Laptop 7 Omarchy installer ISO (aarch64/snapdragon) from
+# the upstream commits pinned in upstream.lock plus this repository's patches
+# (installer/iso-patches) and packages. The ISO never contains Microsoft or
+# Qualcomm firmware; the install stick gets it from the local MSI extraction
+# (tools/installer-kit/make-install-usb.sh).
+
+on:
+  push:
+    paths:
+      - 'installer/**'
+      - 'upstream.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # download linux-sl7 / iptsd-sl7 artifacts of earlier runs
+
+concurrency:
+  group: installer-iso-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Arch Linux ARM build environment (omacom/omarchy-pkg-builder, aarch64),
+  # pinned by digest, as in linux-sl7.yml.
+  BUILDER_IMAGE: ghcr.io/omacom/omarchy-pkg-builder@sha256:a0cedbe8fb2f15aa34217ddd8a74a5e12003dc442f16f1825ab2b9e023488a63
+
+jobs:
+  repo:
+    name: Local package repository omarchy-sl7
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Lint installer scripts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x -P SCRIPTDIR -s bash installer/scripts/*.sh \
+            tools/lib/usb.sh tools/installer-kit/make-install-usb.sh tools/recon-kit/make-recon-usb.sh
+          if grep -rIn '[[:space:]]$' installer/scripts upstream.lock; then
+            echo "trailing whitespace found" >&2
+            exit 1
+          fi
+
+      - name: Load upstream.lock
+        run: installer/scripts/lock-env.sh >> "$GITHUB_ENV"
+
+      # The artifacts of the pinned runs are consumed as built: the kernel
+      # takes 30 to 70 minutes, so it is not rebuilt here. linux-sl7 artifacts
+      # expire after 14 days; if this step fails, re-run linux-sl7.yml and
+      # update LINUX_SL7_RUN_ID in upstream.lock.
+      - name: Download linux-sl7 and iptsd-sl7 artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl/linux-sl7 dl/iptsd-sl7
+          gh run download "$LINUX_SL7_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'linux-sl7-*' -D dl/linux-sl7
+          gh run download "$IPTSD_SL7_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'iptsd-sl7-*' -D dl/iptsd-sl7
+          sums="$(find dl/linux-sl7 -name SHA256SUMS -print -quit)"
+          [ -n "$sums" ] || { echo "linux-sl7 artifact has no SHA256SUMS" >&2; exit 1; }
+          (cd "$(dirname "$sums")" && sha256sum -c --quiet SHA256SUMS)
+          find dl -name '*.pkg.tar.*' | sort
+
+      - name: Fetch pinned omarchy-pkgs and the #221 / #222 PKGBUILDs
+        run: |
+          set -euo pipefail
+          installer/scripts/fetch-upstreams.sh "$RUNNER_TEMP/up" omarchy-pkgs
+          installer/scripts/pr-pkgbuilds.sh "$RUNNER_TEMP/up/omarchy-pkgs" "$RUNNER_TEMP/pr"
+
+      - name: Build packages and create the repository
+        run: |
+          set -euo pipefail
+          mkdir -p repo
+          docker run --rm --platform linux/arm64 --user 0 \
+            -v "$PWD/installer/scripts:/scripts:ro" \
+            -v "$PWD/pkgs/omarchy-surface-sl7:/src/omarchy-surface-sl7:ro" \
+            -v "$RUNNER_TEMP/pr:/src/pr:ro" \
+            -v "$PWD/dl:/prebuilt:ro" \
+            -v "$PWD/repo:/repo" \
+            "$BUILDER_IMAGE" \
+            bash /scripts/build-repo.sh
+
+      - name: Guard against firmware in the repository
+        run: pkgs/linux-sl7/scripts/guard-artifacts.sh repo
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omarchy-sl7-repo
+          path: repo/
+          if-no-files-found: error
+          retention-days: 14
+
+  iso:
+    name: Installer ISO (aarch64/snapdragon)
+    needs: repo
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Load upstream.lock
+        run: installer/scripts/lock-env.sh >> "$GITHUB_ENV"
+
+      - name: Runner facts
+        run: |
+          uname -a
+          nproc
+          free -h
+          df -h
+          docker info --format '{{.Driver}} {{.DockerRootDir}}'
+
+      # Leave room for the offline package mirror and the ISO staging tree.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        continue-on-error: true
+
+      - name: Disk after cleanup
+        run: df -h
+
+      - name: Fetch pinned upstreams
+        run: |
+          set -euo pipefail
+          installer/scripts/fetch-upstreams.sh "$RUNNER_TEMP/build" omarchy-iso omarchy omarchy-pkgs
+
+      - name: Download the repository artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: omarchy-sl7-repo
+          path: ${{ runner.temp }}/build/repo
+
+      - name: Apply installer/iso-patches
+        run: |
+          set -euo pipefail
+          # Artifact upload may have turned the links into copies. The extra
+          # omarchy.db name is only there to satisfy omarchy-iso-make.
+          cd "$RUNNER_TEMP/build/repo"
+          ln -sf omarchy-sl7.db.tar.gz omarchy-sl7.db
+          ln -sf omarchy-sl7.files.tar.gz omarchy-sl7.files
+          ln -sf omarchy-sl7.db omarchy.db
+          ls -l
+          cd "$GITHUB_WORKSPACE"
+          installer/scripts/apply-iso-patches.sh "$RUNNER_TEMP/build/omarchy-iso"
+
+      - name: Build ISO
+        working-directory: ${{ runner.temp }}/build/omarchy-iso
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          ./bin/omarchy-iso-make --arch aarch64 --media-target aarch64/snapdragon --edge \
+            --local-source ../omarchy ../omarchy-pkgs --local-repo ../repo \
+            --keep-pkg-cache --no-boot-offer
+          echo "ISO build wall-clock: $(( $(date +%s) - start ))s"
+          ls -l release/
+
+      - name: Assert ISO contents
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xorriso squashfs-tools libarchive-tools
+          isos=("$RUNNER_TEMP"/build/omarchy-iso/release/*.iso)
+          [ "${#isos[@]}" = 1 ] || { echo "expected exactly one ISO, got ${#isos[@]}" >&2; exit 1; }
+          installer/scripts/assert-iso.sh "${isos[0]}" "$RUNNER_TEMP/assert"
+
+      - name: Checksum
+        id: sum
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          iso="$(ls "$RUNNER_TEMP"/build/omarchy-iso/release/*.iso)"
+          mv "$iso" out/
+          cd out
+          sha256sum "$(basename "$iso")" | tee "$(basename "$iso").sha256"
+          ls -lh
+          {
+            echo '### Installer ISO'
+            echo
+            echo '```'
+            cat ./*.sha256
+            echo '```'
+            echo
+            echo '| input | pin |'
+            echo '|---|---|'
+            echo "| omarchy | \`$OMARCHY_SHA\` |"
+            echo "| omarchy-iso | \`$OMARCHY_ISO_SHA\` |"
+            echo "| omarchy-pkgs | \`$OMARCHY_PKGS_SHA\` (+ #221 \`$OMARCHY_PKGS_PR221_SHA\`, #222 \`$OMARCHY_PKGS_PR222_SHA\`) |"
+            echo "| linux-sl7 run | $LINUX_SL7_RUN_ID |"
+            echo "| iptsd-sl7 run | $IPTSD_SL7_RUN_ID |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Longer retention: GitHub release assets are limited to 2 GiB each and
+      # this ISO is larger, so it stays a 14-day artifact. Re-run to refresh.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omarchy-sl7-installer-iso
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Disk at end
+        if: ${{ !cancelled() }}
+        run: df -h

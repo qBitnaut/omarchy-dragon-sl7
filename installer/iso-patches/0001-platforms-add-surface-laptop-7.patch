@@ -1,0 +1,33 @@
+Subject: [PATCH 1/7] platforms.json: add the Microsoft Surface Laptop 7
+
+Exact DMI match. The installer installs linux-sl7 next to the stock
+linux-aarch64 rescue kernel; the packages come from the local [omarchy-sl7]
+repository, and linux-firmware-qcom from ALARM.
+
+diff --git a/configs/aarch64/platforms.json b/configs/aarch64/platforms.json
+index 0c903a5..6bbb201 100644
+--- a/configs/aarch64/platforms.json
++++ b/configs/aarch64/platforms.json
+@@ -11,6 +11,22 @@
+       "packages": ["linux-firmware-qcom"],
+       "kernel_cmdline": []
+     },
++    {
++      "id": "microsoft-surface-laptop-7",
++      "name": "Microsoft Surface Laptop 7",
++      "media_target": "aarch64/snapdragon",
++      "match": [
++        { "sys_vendor": "Microsoft Corporation", "product_name": "Microsoft Surface Laptop, 7th Edition" }
++      ],
++      "packages": [
++        "linux-sl7",
++        "linux-sl7-headers",
++        "omarchy-surface-sl7",
++        "iptsd-sl7",
++        "linux-firmware-qcom"
++      ],
++      "kernel_cmdline": []
++    },
+     {
+       "id": "nvidia-dgx-spark",
+       "name": "NVIDIA DGX Spark",
