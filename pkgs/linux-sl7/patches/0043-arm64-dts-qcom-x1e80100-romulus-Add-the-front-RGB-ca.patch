@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 19:11:31 -0500
+Subject: [PATCH] arm64: dts: qcom: x1e80100-romulus: Add the front RGB camera
+
+Front camera of the Surface Laptop 7 (ACPI CAMF, MSHW0470): an OmniVision
+OV02C10 on CCI1 master 1 (gpio235/236) at 0x36, two data lanes on CSIPHY4,
+MCLK4 (gpio100) at 19.2 MHz, reset on gpio237. Supplies are PM8010 (pmic
+id m) LDO1 1.2 V dvdd, LDO3 1.8 V dovdd and LDO5 2.8 V avdd, which the
+Windows module resources and the working ELLX tree agree on.
+
+The node follows Bryan O'Donoghue's x1e/Hamoa camera DTSI v7 (standalone
+CSIPHY nodes with in and out ports, data-lanes starting at 1,
+vdda-0p9-supply) instead of the older ELLX/bryce style.
+
+The Windows sensor-module decode confirms the wiring: reset GPIO237, L3M
+1.8 V, L1M 1.2 V, L5M 2.8 V, I2C address 0x36, chip id 0x5602 at 0x300A.
+No ovti,ov02c10 binding is in 7.2, so dtbs_check reports the compatible
+as having no schema.
+
+Origin: ELLX romulus camera nodes (557ed1f34df3), bryce-hoehn #4,
+        Oliver White v2 (patchwork 1079415), Bryan O'Donoghue v7 t14s
+        ov02c10 patch (patchwork 1167605)
+Upstream-Status: Pending (Oliver White v2 stalled, changes requested)
+---
+ .../dts/qcom/x1e80100-microsoft-romulus.dtsi  | 113 ++++++++++++++++++
+ 1 file changed, 113 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+index a849c8654..58efb2fe8 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+@@ -9,6 +9,7 @@
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/leds/common.h>
++#include <dt-bindings/media/video-interfaces.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+ 
+ #include "hamoa.dtsi"
+@@ -874,6 +875,102 @@ vreg_l3j: ldo3 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 	};
++
++	regulators-8 {
++		compatible = "qcom,pm8010-rpmh-regulators";
++		qcom,pmic-id = "m";
++
++		vdd-l1-l2-supply = <&vreg_s5j>;
++		vdd-l3-l4-supply = <&vreg_s4c>;
++
++		/* Front RGB camera (ACPI CAMF, MSHW0470): dvdd, dovdd, avdd */
++		vreg_l1m_1p2: ldo1 {
++			regulator-name = "vreg_l1m_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1260000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l3m_1p8: ldo3 {
++			regulator-name = "vreg_l3m_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1900000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l5m_2p8: ldo5 {
++			regulator-name = "vreg_l5m_2p8";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <3072000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++	};
++};
++
++&camss {
++	status = "okay";
++};
++
++&camss_csiphy4_in_port {
++	camss_csiphy4_inep: endpoint {
++		data-lanes = <1 2>;
++		remote-endpoint = <&csiphy4_out_ep>;
++	};
++};
++
++&cci1 {
++	status = "okay";
++};
++
++&cci1_i2c1 {
++	/* Front RGB camera, OmniVision OV02C10 (ACPI CAMF, MSHW0470) */
++	camera@36 {
++		compatible = "ovti,ov02c10";
++		reg = <0x36>;
++
++		reset-gpios = <&tlmm 237 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_rgb_default>;
++
++		clocks = <&camcc CAM_CC_MCLK4_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		orientation = <0>; /* front facing */
++
++		avdd-supply = <&vreg_l5m_2p8>;
++		dvdd-supply = <&vreg_l1m_1p2>;
++		dovdd-supply = <&vreg_l3m_1p8>;
++
++		port {
++			ov02c10_ep: endpoint {
++				data-lanes = <1 2>;
++				link-frequencies = /bits/ 64 <400000000>;
++				remote-endpoint = <&csiphy4_in_ep>;
++			};
++		};
++	};
++};
++
++&csiphy4 {
++	vdda-0p9-supply = <&vreg_l2c>;
++	vdda-1p2-supply = <&vreg_l1c>;
++
++	status = "okay";
++};
++
++&csiphy4_in_port {
++	csiphy4_in_ep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
++		data-lanes = <1 2>;
++		remote-endpoint = <&ov02c10_ep>;
++	};
++};
++
++&csiphy4_out_port {
++	csiphy4_out_ep: endpoint {
++		remote-endpoint = <&camss_csiphy4_inep>;
++	};
+ };
+ 
+ &gpu {
+@@ -1531,6 +1628,22 @@ wcn_sw_en: wcn-sw-en-state {
+ 		bias-disable;
+ 	};
+ 
++	cam_rgb_default: cam-rgb-default-state {
++		mclk-pins {
++			pins = "gpio100";
++			function = "cam_aon";
++			drive-strength = <16>;
++			bias-disable;
++		};
++
++		reset-n-pins {
++			pins = "gpio237";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
+ 	cam_indicator_en: cam-indicator-en-state {
+ 		pins = "gpio225";
+ 		function = "gpio";
+-- 
+2.55.0
+

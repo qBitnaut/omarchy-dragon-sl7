@@ -31,3 +31,19 @@ CONFIG_FW_LOADER_COMPRESS_ZSTD=y
 # Hardware video decode
 CONFIG_VIDEO_QCOM_IRIS=m
 CONFIG_SM_VIDEOCC_8550=m
+
+# Cameras (Phase A of IR face unlock): X1E CAMSS with the standalone CSI2 DPHY
+# driver and CCI, the front RGB OV02C10, the IR VD55G0 (vd55g replaces vd55g1)
+# and the PMIC flash LED class. The flash LED is not described in the device
+# tree yet, so nothing can fire the illuminator.
+CONFIG_VIDEO_QCOM_CAMSS=m
+CONFIG_PHY_QCOM_MIPI_CSI2=m
+CONFIG_I2C_QCOM_CCI=m
+CONFIG_CLK_X1E80100_CAMCC=m
+CONFIG_V4L2_FWNODE=m
+CONFIG_V4L2_CCI_I2C=m
+CONFIG_VIDEO_OV02C10=m
+CONFIG_VIDEO_VD55G=m
+CONFIG_LEDS_CLASS_FLASH=m
+CONFIG_LEDS_QCOM_FLASH=m
+CONFIG_V4L2_FLASH_LED_CLASS=m

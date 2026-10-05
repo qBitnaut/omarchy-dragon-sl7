@@ -33,6 +33,12 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/power/supply/qcom_battmgr.o \
         drivers/usb/typec/mux/ps883x.o \
         drivers/net/wireless/ath/ath12k/core.o \
-        drivers/gpu/drm/msm/
+        drivers/gpu/drm/msm/ \
+        drivers/media/platform/qcom/camss/ \
+        drivers/media/i2c/vd55g.o \
+        drivers/media/i2c/ov02c10.o \
+        drivers/phy/qualcomm/ \
+        drivers/i2c/busses/i2c-qcom-cci.o \
+        drivers/clk/qcom/camcc-x1e80100.o
 fi
 echo "fast-check: OK"

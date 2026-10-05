@@ -32,6 +32,9 @@ hardware yet.
 | `CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y` | battery life |
 | `ARM_SCMI_CPUFREQ=y` | built in, so the SCMI autoload series is not needed |
 | `VIDEO_QCOM_IRIS=m`, `SM_VIDEOCC_8550=m` | hardware video decode |
+| `VIDEO_QCOM_CAMSS=m`, `PHY_QCOM_MIPI_CSI2=m`, `I2C_QCOM_CCI=m`, `CLK_X1E80100_CAMCC=m`, `V4L2_FWNODE=m`, `V4L2_CCI_I2C=m` | X1E camera subsystem (patches 0025-0037) |
+| `VIDEO_OV02C10=m`, `VIDEO_VD55G=m` | front RGB and IR sensors (`VIDEO_VD55G` replaces `VIDEO_VD55G1`) |
+| `LEDS_CLASS_FLASH=m`, `LEDS_QCOM_FLASH=m`, `V4L2_FLASH_LED_CLASS=m` | PMIC flash LED class; not described in the DT, so nothing fires the illuminator |
 
 ## Patch queue
 
@@ -51,6 +54,16 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0020-0022 | ps883x v5 (DP state F, config delay, disable USB4 on incomplete platforms) | Jens Glathe, usb-next `42411ff1a7bb`, `d9eadbba6663`, `647f31f34d40` | in usb-next, expected in 7.4 |
 | 0023 | ath12k: ignore the false rfkill hard block | linux-sp11 `37f883437b` (Jiajie Chen) | will not go upstream |
 | 0024 | EXPERIMENTAL: eDP variable refresh (DPU INTF AVR, MSA ignore, `vrr_capable`) behind `msm.vrr_enabled=1` (default 0; see `omarchy-sl7-test-entry`) | scuggo/x1e-nixos `msm-vrr-avr.patch` (ca7db70), rebased and gated by us | will not go upstream as is |
+| 0025-0026 | qcom MIPI CSI2 DPHY schema and driver (`phy-qcom-mipi-csi2`) | Bryan O'Donoghue v18 (patchwork 1166977, 2026-09-16) | in linux-next, expected in 7.4 |
+| 0027-0032 | `phy_get_by_of_node()` helpers, CAMSS PHY API, data-lanes start at 1 | Bryan O'Donoghue v20 (patchwork 1168715, 2026-09-18) | posted v20 |
+| 0033-0034 | x1e80100 CAMSS binding: iommus, optional csiphy supplies | x1e/Hamoa camera DTSI v7 patches 1-2 (patchwork 1167605) | posted v7 |
+| 0035 | x1e80100 CAMCC node (also purwa compatible) | torvalds `6a3568f938c9` | merged for 7.3 (backport) |
+| 0036-0037 | x1e80100 CCI0/1 and CAMSS plus four standalone CSIPHY nodes | camera DTSI v7 patches 3-4 | posted v7, unreviewed |
+| 0038-0040 | ST VD55G family driver with VD55G0 (replaces `vd55g1`), binding, firmware header | petm5, linux-surface/kernel PR 169 (patches 3, 4, 7-9; the x86 IPU6 patches are dropped) | posted as linux-media 1169036 v2; ST pushes back on merging G0 into the G1 driver |
+| 0041 | vd55g: no strobe GPIO and no flash LED control unless `st,leds` is set | ours | not for upstream |
+| 0042 | HACK vd55g: `mclk_index` and `mclk_hz` module parameters | ours | not for upstream, drop once the clock is known |
+| 0043 | romulus: front RGB OV02C10 (CCI1, CSIPHY4, MCLK4, PM8010 rails l1m/l3m/l5m) | ours, from ELLX / bryce / Oliver White v2, on the v7 DTSI style | pending |
+| 0044 | romulus13: IR VD55G0 (CCI0 0x10, CSIPHY0 1 lane, 378 MHz, reset gpio109, pinned rails l2m 1.2 V / l4m 1.8 V / l6m 1.8 V, MCLK0 plus pinctrl states mclk1..3), **no illuminator** | ours; `ir/REPORT.md` | pending |
 
 Notes on the DT patches:
 
@@ -115,9 +128,32 @@ Bump `pkgver` (and the `_srcname` base for a new minor), refresh the two
 kernel.org sums in the PKGBUILD, update `config.alarm` from ALARM, then run
 `fast-check.sh`. Drop patches as they land upstream.
 
+## Camera (Phase A of IR face unlock)
+
+Phase A proves that the cameras probe and stream, and nothing else. The infrared illuminator
+(PM8550 flash, 700 mA) is **not** described: `&pm8550_flash` stays disabled, there is no `leds`
+link and no `st,leds`, and patch 0041 stops the vd55g driver from defaulting a sensor GPIO to a
+strobe output. Do not enable the emitter until its flash channel has been found (Phase B).
+
+- Firmware: the VD55G0 needs `vd55g0-cut1.bin` or `vd55g0-cut2.bin`, installed by this package
+  under `/usr/lib/firmware` (petm5/vd55g-firmware at e519457, GPL-2.0 STMicroelectronics patch
+  arrays, licence text in `LICENSE.vd55g-firmware`). No Microsoft file is involved.
+- Rails: IR vcore LDO2_M 1.2 V, vio LDO4_M 1.8 V, vana LDO6_M 1.8 V, all pinned (min = max).
+  vana must never be raised to ST's 2.8 V.
+- The master clock is unknown. The IR node starts with MCLK0 (gpio96) at 19.2 MHz.
+  The `vd55g` module parameters `mclk_index` (0 to 3 for MCLK0..3 on gpio96..99, -2 for no
+  clock, default -1 = device tree) and `mclk_hz` are read at probe, so the probe procedure tries
+  every candidate without rebuilding or rebooting: `sudo sl7-ir-probe --sweep-mclk`
+  (package omarchy-surface-sl7). Chosen over four extra DTBs because Limine's `efi` protocol has
+  no `dtb_path` (only the `linux` protocol does, and then initramfs and command line must be
+  supplied by hand), and a UKI cannot select between DTBs by command line (`.dtbauto` is chosen
+  by SMBIOS HWIDs). It changes no persistent state: a reboot returns to the device tree.
+- First on-device steps: `sudo sl7-ir-probe`, read its `SUMMARY`, then `--sweep-mclk` only if the
+  IR sensor did not bind.
+
 ## Not in v0
 
-Camera (OV02C10, IR), USB4 host router, fused-core handling for X1P-64-100,
+The IR illuminator, libcamera tuning for the RGB camera, USB4 host router, fused-core handling for X1P-64-100,
 Iris DT enablement, DP audio, the EC reboot helper. See the project PLAN.md.
 
 ## Licensing

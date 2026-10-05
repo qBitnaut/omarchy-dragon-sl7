@@ -27,6 +27,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest` |
 | 8d | optional kernel test boot entries, PSR (known broken) and VRR (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
 
@@ -288,6 +289,33 @@ Test steps:
    normal entry with `--label normal`, then `sl7-powertest compare ...-normal.jsonl ...-vrr.jsonl`
    (VRR does not lower an idle desktop's refresh by itself; the gain is for varying content).
 7. Done: `sudo omarchy-sl7-test-entry disable vrr` and boot the normal entry.
+
+### 12b. Camera probe: `sl7-ir-probe` (Phase A of IR face unlock)
+
+Read-only check of the camera stack on a `linux-sl7` 7.2.8-3 or later kernel on the 13.8 inch
+model (`romulus13`): CAMSS, CCI0/1, CSIPHY0/4 and camcc probe state, the IR sensor (ST VD55G0,
+i2c `0x10` on CCI0: the driver reads model id `0x53354730` and applies the firmware patch before
+it binds), the front RGB OV02C10 (i2c `0x36` on CCI1), the kernel messages about both,
+`media-ctl -p`, and then a 30 frame Y8/GREY 644x604 capture with per-frame statistics. Everything
+goes to `~/sl7-ir-test/` (`probe-*.txt`, `media-ctl-p.txt`, `dmesg.txt`, `ir.raw`) and ends with
+a `SUMMARY` of PASS/FAIL/INFO lines. It never writes to an LED class device, a flash strobe or a
+sensor GPIO: the illuminator is not described in this release and is not touched. It needs
+`v4l-utils` (optdepends) and re-runs itself with `sudo` for `dmesg`.
+
+```
+sl7-ir-probe                       # probe, topology, capture 30 frames
+sl7-ir-probe --no-capture          # probe state and topology only
+sl7-ir-probe --frames 100 --out ~/ir
+sudo sl7-ir-probe --sweep-mclk     # also look for the camera master clock (see below)
+```
+
+The IR module's master clock is not named by any Windows resource. The device tree starts with
+MCLK0 (gpio96) at 19.2 MHz. `--sweep-mclk` is the only mode that changes anything: it sets the
+`vd55g` module parameters `mclk_index` (0 to 3 for MCLK0..3 on gpio96..99, -2 for no clock) and
+`mclk_hz`, rebinds the sensor for each candidate and stops at the first that answers; if none does
+it restores `mclk_index=-1`. By hand: `echo 1 | sudo tee /sys/module/vd55g/parameters/mclk_index`,
+then unbind and bind `/sys/bus/i2c/drivers/vd55g/<bus>-0010`. Nothing is persistent: a reboot
+returns to the device tree values.
 
 ### 12. Measuring power: `sl7-powertest`
 

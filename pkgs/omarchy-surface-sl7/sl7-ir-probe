@@ -1,0 +1,441 @@
+#!/bin/bash
+# Phase A probe for the Surface Laptop 7 cameras: CAMSS, CCI and CSIPHY probe
+# state, the IR sensor (ST VD55G0, ACPI SMO55F0 / MSHW0472, i2c 0x10 on CCI0)
+# and the front RGB camera (OmniVision OV02C10, i2c 0x36 on CCI1).
+#
+# Read-only by default. It never touches the illuminator: no LED class device,
+# no flash strobe, no sensor GPIO. With --sweep-mclk it additionally changes
+# the vd55g module parameters mclk_index/mclk_hz (a linux-sl7 debug hack) and
+# rebinds the sensor, to find which camera master clock feeds the IR module.
+#
+#   sl7-ir-probe [--frames N] [--out DIR] [--no-capture]
+#                [--sweep-mclk [--mclk-hz HZ]]
+#
+# Captures go to ~/sl7-ir-test (30 frames of Y8/GREY 644x604 by default).
+# Needs: v4l-utils (media-ctl, v4l2-ctl) for the topology and the capture;
+# root (it re-runs itself with sudo) for dmesg and for --sweep-mclk.
+set -u
+
+frames=30
+out=${SL7_IR_OUT:-${SUDO_USER:+$(getent passwd "$SUDO_USER" | cut -d: -f6)/sl7-ir-test}}
+out=${out:-$HOME/sl7-ir-test}
+capture=1
+sweep=0
+mclk_hz=19200000
+sysfs=${SL7_SYSFS:-/sys}
+ir_addr=0010
+rgb_addr=0036
+
+usage() {
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+while (($#)); do
+  case $1 in
+    --frames) frames=${2:?}; shift ;;
+    --out) out=${2:?}; shift ;;
+    --no-capture) capture=0 ;;
+    --sweep-mclk) sweep=1 ;;
+    --mclk-hz) mclk_hz=${2:?}; shift ;;
+    -h | --help) usage ;;
+    *) usage ;;
+  esac
+  shift
+done
+[[ $frames =~ ^[0-9]+$ && $mclk_hz =~ ^[0-9]+$ ]] || usage
+
+if ((EUID != 0)) && [[ -z ${SL7_IR_NO_SUDO:-} ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo --preserve-env=SL7_IR_OUT,SL7_SYSFS "$0" "$@"
+  fi
+  echo "sl7-ir-probe: not root and no sudo; dmesg and bind/unbind will be limited" >&2
+fi
+
+mkdir -p "$out" || { echo "sl7-ir-probe: cannot create $out" >&2; exit 1; }
+if [[ -n ${SUDO_UID:-} ]]; then chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$out" 2>/dev/null || true; fi
+report=$out/probe-$(date +%Y%m%d-%H%M%S).txt
+
+summary=()
+rc=0
+say() { printf '%s\n' "$*" | tee -a "$report"; }
+note() { summary+=("$1  $2"); }
+ok() { note PASS "$1"; }
+bad() { note FAIL "$1"; rc=1; }
+info() { note INFO "$1"; }
+section() { say ""; say "== $1"; }
+
+kdmesg() {
+  dmesg 2>/dev/null || journalctl -k -b --no-pager 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- kernel
+section "Kernel and device tree"
+kernel=$(uname -r)
+say "kernel: $kernel"
+if [[ -f /usr/lib/modules/$kernel/pkgbase ]] && grep -qx linux-sl7 "/usr/lib/modules/$kernel/pkgbase"; then
+  ok "running kernel is linux-sl7"
+else
+  bad "running kernel is not linux-sl7 (the camera patches live there)"
+fi
+compat=$(tr '\0' ' ' <"$sysfs/firmware/devicetree/base/compatible" 2>/dev/null || true)
+say "compatible: ${compat:-<none>}"
+case $compat in
+  *microsoft,romulus13*) ok "device tree is romulus13 (13.8 inch, has the IR camera node)" ;;
+  *microsoft,romulus15*) info "device tree is romulus15: no IR camera node in this release, only RGB" ;;
+  *) bad "no romulus device tree (booted without the SL7 DTB?)" ;;
+esac
+
+# ---------------------------------------------------------------- modules
+section "Modules and firmware"
+mods=(qcom_camss phy_qcom_mipi_csi2 i2c_qcom_cci camcc_x1e80100 ov02c10 vd55g)
+for m in "${mods[@]}"; do
+  if [[ -d $sysfs/module/$m ]]; then
+    say "module $m: loaded"
+  else
+    say "module $m: not loaded (try: sudo modprobe ${m//_/-})"
+  fi
+done
+if [[ -d $sysfs/module/vd55g/parameters ]]; then
+  say "vd55g mclk_index=$(cat "$sysfs/module/vd55g/parameters/mclk_index" 2>/dev/null) mclk_hz=$(cat "$sysfs/module/vd55g/parameters/mclk_hz" 2>/dev/null)"
+fi
+fw_found=0
+for f in vd55g0-cut1.bin vd55g0-cut2.bin; do
+  hit=""
+  for c in /usr/lib/firmware/"$f" /usr/lib/firmware/"$f".* /lib/firmware/"$f"; do
+    [[ -e $c ]] && { hit=$c; break; }
+  done
+  if [[ -n $hit ]]; then say "firmware $f: $hit"; fw_found=$((fw_found + 1)); else say "firmware $f: MISSING"; fi
+done
+if ((fw_found == 2)); then ok "VD55G0 patch firmware installed"; else bad "VD55G0 patch firmware missing (package linux-sl7 >= 7.2.8-3)"; fi
+
+# ---------------------------------------------------------------- platform
+section "CAMSS, CCI and CSIPHY probe state"
+bound() { # device path -> driver name or empty
+  local d=$1
+  [[ -L $d/driver ]] && basename "$(readlink "$d/driver")"
+}
+check_dev() { # label, glob under bus/platform/devices
+  local label=$1 pat=$2 dev drv found=0
+  for dev in "$sysfs"/bus/platform/devices/$pat; do
+    [[ -e $dev ]] || continue
+    found=1
+    drv=$(bound "$dev")
+    if [[ -n $drv ]]; then
+      say "$label: $(basename "$dev") bound to $drv"
+      ok "$label probed"
+    else
+      say "$label: $(basename "$dev") present, NOT bound"
+      bad "$label present but not bound"
+    fi
+  done
+  if ((!found)); then
+    say "$label: no platform device (not in the device tree, or status disabled)"
+    bad "$label: no platform device"
+  fi
+}
+check_dev "camcc" "ade0000.clock-controller"
+check_dev "CCI0" "ac15000.cci"
+check_dev "CCI1" "ac16000.cci"
+check_dev "CSIPHY0 (IR)" "ace4000.phy"
+check_dev "CSIPHY4 (RGB)" "acec000.phy"
+check_dev "CAMSS" "acb7000.isp"
+
+deferred=/sys/kernel/debug/devices_deferred
+if [[ -r $deferred ]] && grep -E 'cci|camss|phy@|isp@|vd55g|ov02c10|0010|0036' "$deferred" >"$out/deferred.txt" 2>/dev/null && [[ -s $out/deferred.txt ]]; then
+  say "deferred devices:"
+  cat "$out/deferred.txt" | tee -a "$report"
+  bad "camera devices are in the deferred probe list"
+fi
+
+# ---------------------------------------------------------------- i2c
+section "I2C sensors"
+find_i2c() { # address (4 hex digits) -> device dir on a CCI adapter, or empty
+  local addr=$1 d
+  for d in "$sysfs"/bus/i2c/devices/*-"$addr"; do
+    [[ -e $d ]] || continue
+    # only the CCI adapters (the camera buses), not the other buses' 0x10 devices
+    if readlink -f "$d/.." | grep -q 'cci'; then echo "$d"; return 0; fi
+  done
+  return 1
+}
+ir_dev=$(find_i2c "$ir_addr" || true)
+rgb_dev=$(find_i2c "$rgb_addr" || true)
+
+report_i2c() { # label, dev
+  local label=$1 dev=$2 drv
+  if [[ -z $dev ]]; then
+    say "$label: no i2c client (CCI bus not up or node missing)"
+    return 1
+  fi
+  drv=$(bound "$dev")
+  say "$label: $(basename "$dev") name=$(cat "$dev/name" 2>/dev/null) driver=${drv:-<none>}"
+  [[ -n $drv ]]
+}
+
+dmesg_ir() { kdmesg | grep -iE 'vd55g|0x53354730|53354730|smo55f0|sensor detect|sensor boot|external firmware|failed to (load|apply|boot|get)|expected vd55g|clock lane|link-frequenc|cci' | tail -n 40; }
+
+if report_i2c "IR (VD55G0 @ 0x10)" "$ir_dev"; then
+  ok "IR sensor probed: the driver read model id 0x53354730 (VD55G0) and applied the firmware patch"
+else
+  if [[ -z $ir_dev ]]; then
+    bad "IR sensor: no i2c client at 0x10 on CCI0 (CCI0 or the DT node is not up)"
+  else
+    bad "IR sensor: client present at 0x10 but the vd55g driver is not bound (no ack, wrong id, firmware or clock)"
+  fi
+fi
+say "-- kernel messages about the IR sensor"
+dmesg_ir | tee -a "$report"
+kdmesg >"$out/dmesg.txt" 2>/dev/null || true
+
+if report_i2c "RGB (OV02C10 @ 0x36)" "$rgb_dev"; then
+  ok "RGB OV02C10 probed"
+else
+  bad "RGB OV02C10 not probed (this validates the camera stack first: fix it before the IR)"
+fi
+say "-- kernel messages about the RGB sensor"
+kdmesg | grep -iE 'ov02c10|ovti|camss' | tail -n 20 | tee -a "$report"
+
+# ---------------------------------------------------------------- sweep
+ir_driver_dir=$sysfs/bus/i2c/drivers/vd55g
+param=$sysfs/module/vd55g/parameters
+ir_name=""
+[[ -n $ir_dev ]] && ir_name=$(basename "$ir_dev")
+
+try_mclk() { # index -> 0 when the sensor is bound afterwards
+  local idx=$1 bus
+  echo "$idx" >"$param/mclk_index"
+  echo "$mclk_hz" >"$param/mclk_hz"
+  [[ -n $ir_name ]] && echo "$ir_name" >"$ir_driver_dir/unbind" 2>/dev/null
+  sleep 1
+  echo "$ir_name" >"$ir_driver_dir/bind" 2>/dev/null
+  sleep 2
+  bus=$ir_name
+  [[ -L $sysfs/bus/i2c/devices/$bus/driver ]]
+}
+
+if ((sweep)); then
+  section "MCLK sweep (changes vd55g mclk_index; the emitter stays untouched)"
+  if ((EUID != 0)); then
+    bad "--sweep-mclk needs root"
+  elif [[ ! -w $param/mclk_index ]]; then
+    bad "vd55g mclk_index parameter missing: is the vd55g module from linux-sl7 7.2.8-3 loaded?"
+  elif [[ -z $ir_name ]]; then
+    bad "no IR i2c client to rebind"
+  else
+    found=""
+    for idx in 0 1 2 3 -2; do
+      say "trying mclk_index=$idx mclk_hz=$mclk_hz"
+      if try_mclk "$idx"; then
+        say "  -> bound with mclk_index=$idx"
+        found=$idx
+        break
+      fi
+      say "  -> not bound"
+      kdmesg | grep -iE 'vd55g|sensor detect' | tail -n 3 | sed 's/^/     /' | tee -a "$report"
+    done
+    if [[ -n $found ]]; then
+      case $found in
+        -2) ok "IR sensor works WITHOUT a camera master clock (module oscillator): mclk_index=-2" ;;
+        *) ok "IR sensor works with MCLK$found (gpio$((96 + found))) at $mclk_hz Hz: set the DT clock and pinctrl to MCLK$found" ;;
+      esac
+      ir_dev=$sysfs/bus/i2c/devices/$ir_name
+    else
+      echo -1 >"$param/mclk_index"
+      echo "$ir_name" >"$ir_driver_dir/unbind" 2>/dev/null
+      sleep 1
+      echo "$ir_name" >"$ir_driver_dir/bind" 2>/dev/null
+      bad "no MCLK candidate made the sensor answer (restored mclk_index=-1); check rails and reset in dmesg"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------- topology
+section "Media topology"
+media_dev=""
+if command -v media-ctl >/dev/null 2>&1; then
+  for m in /dev/media*; do
+    [[ -e $m ]] || continue
+    if media-ctl -d "$m" -p 2>/dev/null | grep -q 'driver[[:space:]]*qcom-camss'; then
+      media_dev=$m
+      break
+    fi
+  done
+  if [[ -n $media_dev ]]; then
+    say "CAMSS media device: $media_dev"
+    media-ctl -d "$media_dev" -p >"$out/media-ctl-p.txt" 2>&1
+    say "topology saved to $out/media-ctl-p.txt"
+    grep -E '^- entity [0-9]+:' "$out/media-ctl-p.txt" | tee -a "$report"
+    ok "CAMSS media device present ($media_dev)"
+  else
+    say "no qcom-camss media device found"
+    bad "no qcom-camss media device (CAMSS did not register)"
+  fi
+else
+  say "media-ctl not installed (pacman -S v4l-utils)"
+  info "media-ctl missing: install v4l-utils for topology and capture"
+fi
+
+# ---------------------------------------------------------------- capture
+# Python helper: find a path sensor -> video node in the media-ctl -p text and
+# print VIDEO <node>, LINK "a":p->"b":q and FMT "entity":pad lines.
+plan_path() { # media-ctl-p.txt sensor-prefix
+  python3 - "$@" <<'PY'
+import re, sys
+from collections import deque
+txt = open(sys.argv[1]).read()
+prefix = sys.argv[2]
+ents = {}
+cur = pad = None
+for line in txt.splitlines():
+    m = re.match(r'^- entity \d+: (.+?) \(\d+ pads?', line)
+    if m:
+        cur = {'dev': None, 'pads': {}}
+        ents[m.group(1)] = cur
+        pad = None
+        continue
+    if cur is None:
+        continue
+    m = re.match(r'^\s+device node name (\S+)', line)
+    if m:
+        cur['dev'] = m.group(1)
+        continue
+    m = re.match(r'^\s+pad(\d+): (Sink|Source)', line)
+    if m:
+        pad = int(m.group(1))
+        cur['pads'][pad] = (m.group(2), [])
+        continue
+    m = re.match(r'^\s+-> "(.+?)":(\d+) \[', line)
+    if m and pad is not None:
+        cur['pads'][pad][1].append((m.group(1), int(m.group(2))))
+src = next((n for n in ents if n.startswith(prefix)), None)
+if not src:
+    print('ERR no entity starting with %r' % prefix)
+    sys.exit(0)
+# hops: (from entity, from source pad, to entity, to sink pad)
+q = deque([(src, [])])
+seen = {src}
+found = None
+while q:
+    name, hops = q.popleft()
+    dev = ents[name]['dev']
+    if dev and dev.startswith('/dev/video'):
+        found = (name, hops)
+        break
+    for p, (direction, links) in sorted(ents[name]['pads'].items()):
+        if direction != 'Source':
+            continue
+        for dn, dp in links:
+            if dn in ents and dn not in seen:
+                seen.add(dn)
+                q.append((dn, hops + [(name, p, dn, dp)]))
+if not found:
+    print('ERR no path from %s to a video node' % src)
+    sys.exit(0)
+name, hops = found
+print('VIDEO %s' % ents[name]['dev'])
+for (a, ap, b, bp) in hops:
+    print('LINK "%s":%d->"%s":%d' % (a, ap, b, bp))
+for (a, ap, b, bp) in hops:
+    print('FMT "%s":%d' % (a, ap))
+    print('FMT "%s":%d' % (b, bp))
+PY
+}
+
+stats_py() { # file width height
+  python3 - "$@" <<'PY'
+import sys, statistics
+f, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+data = open(f, 'rb').read()
+fs = w * h
+n = len(data) // fs
+print('frames=%d bytes=%d (frame size %d, remainder %d)' % (n, len(data), fs, len(data) - n * fs))
+if not n:
+    sys.exit(0)
+means = []
+for i in range(n):
+    fr = data[i * fs:(i + 1) * fs]
+    mean = sum(fr) / fs
+    means.append(mean)
+    if i < 5 or i == n - 1:
+        print('frame %2d: min=%3d max=%3d mean=%6.2f saturated=%.3f%% zero=%.3f%%' % (
+            i, min(fr), max(fr), mean, 100 * fr.count(255) / fs, 100 * fr.count(0) / fs))
+print('mean of means=%.2f spread=%.2f' % (statistics.mean(means), max(means) - min(means)))
+if max(means) < 1.0:
+    print('NOTE all frames are black: normal without the illuminator in a dark room; cover/uncover the sensor to check it responds')
+elif min(means) > 254:
+    print('NOTE all frames saturated')
+PY
+}
+
+capture_ir() {
+  local plan videodev line
+  [[ -n $media_dev && -n $ir_dev ]] || { info "IR capture skipped: no sensor or media device"; return; }
+  [[ -L $ir_dev/driver ]] || { info "IR capture skipped: sensor not probed"; return; }
+  command -v v4l2-ctl >/dev/null 2>&1 || { info "IR capture skipped: v4l2-ctl missing"; return; }
+  plan=$(plan_path "$out/media-ctl-p.txt" vd55g)
+  say "$plan"
+  if grep -q '^ERR' <<<"$plan"; then
+    bad "IR capture: $(grep '^ERR' <<<"$plan")"
+    return
+  fi
+  videodev=$(sed -n 's/^VIDEO //p' <<<"$plan")
+  while IFS= read -r line; do
+    case $line in
+      "LINK "*)
+        media-ctl -d "$media_dev" -l "${line#LINK }[1]" >>"$report" 2>&1 || say "link failed: $line"
+        ;;
+    esac
+  done <<<"$plan"
+  while IFS= read -r line; do
+    case $line in
+      "FMT "*)
+        media-ctl -d "$media_dev" -V "${line#FMT } [fmt:Y8_1X8/644x604]" >>"$report" 2>&1 \
+          || say "set format failed: $line (the sensor may offer Y10_1X10 only: see media-ctl-p.txt)"
+        ;;
+    esac
+  done <<<"$plan"
+  v4l2-ctl -d "$videodev" --set-fmt-video=width=644,height=604,pixelformat=GREY >>"$report" 2>&1 \
+    || say "set video format failed on $videodev"
+  rm -f "$out/ir.raw"
+  say "capturing $frames frames from $videodev (no illuminator)"
+  if timeout 30 v4l2-ctl -d "$videodev" --stream-mmap --stream-count="$frames" --stream-to="$out/ir.raw" >>"$report" 2>&1; then
+    ok "IR stream ran ($videodev)"
+  else
+    bad "IR stream failed or timed out (see CSIPHY/CSID messages below)"
+  fi
+  kdmesg | grep -iE 'csid|csiphy|vfe|camss|vd55g' | tail -n 15 | tee -a "$report"
+  if [[ -s $out/ir.raw ]]; then
+    say "-- frame statistics (Y8 644x604)"
+    stats_py "$out/ir.raw" 644 604 | tee -a "$report"
+    local sz
+    sz=$(stat -c %s "$out/ir.raw")
+    if ((sz >= frames * 644 * 604)); then ok "IR captured $frames frames (~/sl7-ir-test/ir.raw)"; else bad "IR capture short: $sz bytes"; fi
+  else
+    bad "IR capture produced no data"
+  fi
+}
+
+if ((capture)); then
+  section "IR capture"
+  if [[ -n $media_dev ]]; then capture_ir; else info "IR capture skipped: no CAMSS media device"; fi
+fi
+
+# ---------------------------------------------------------------- leds
+section "Illuminator (not touched)"
+leds=""
+for l in "$sysfs"/class/leds/*; do
+  [[ -e $l ]] || continue
+  [[ ${l##*/} =~ [Ff]lash|[Ii][Rr]|[Tt]orch ]] && leds+="${l##*/} "
+done
+say "flash/IR-like LED class devices: ${leds:-none} (read only, nothing written)"
+info "illuminator: not described in the device tree and not touched by this script"
+
+# ---------------------------------------------------------------- summary
+section "SUMMARY"
+printf '%s\n' "${summary[@]}" | tee -a "$report"
+say ""
+say "report: $report"
+say "files: $out"
+if [[ -n ${SUDO_UID:-} ]]; then chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$out" 2>/dev/null || true; fi
+exit "$rc"

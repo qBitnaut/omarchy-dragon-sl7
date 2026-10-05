@@ -6,13 +6,13 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=10
+pkgrel=11
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT' 'ISC')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7' 'iptsd-sl7>=3.1.0.r20260717-8' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
+depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7>=7.2.8-3' 'iptsd-sl7>=3.1.0.r20260717-8' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'jq' 'glib2' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'
@@ -20,7 +20,8 @@ optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarch
             'socat: omarchy-sl7-powermode re-applies 60 Hz after a Hyprland config reload'
             'brightnessctl: sl7-powertest pins the backlight'
             'mpv: sl7-powertest video'
-            'bluez-utils: bluetoothctl in sl7-mac status')
+            'bluez-utils: bluetoothctl in sl7-mac status'
+            'v4l-utils: media-ctl and v4l2-ctl for sl7-ir-probe')
 backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
         'etc/limine-entry-tool.d/omarchy-surface-sl7.conf'
         'etc/pacman.d/omarchy-sl7.conf'
@@ -72,6 +73,7 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-powertest'
         'omarchy-sl7-psr-entry'
         'omarchy-sl7-test-entry'
+        'sl7-ir-probe'
         '80-omarchy-sl7-test-entry.post-hook')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
@@ -100,7 +102,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '4ea106d3ce65ef0eab97e0d0933db8be0202460d8d09a83a4e388f5fa49e27e1'
+            '5c40b0b83adc9b5fed69ed3616ce46e350dfa30745b91d6409ad6271e7f87cf9'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -116,6 +118,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '1e01dc25d19bcf37ddcf5de66de3c7e2757dd0db22e0717a8ed90a99caae6170'
             '345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff'
             '7a8f55c5eda5173139aef60f32cba0fdc6dddeeaa1e1d8a3fad8d0d2320b89de'
+            '690d226565f5bc506cd440d166a356b59131b1c51e6c2e82f195b39bdbb3de88'
             '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a')
 
 package() {
@@ -228,6 +231,9 @@ package() {
   install -Dm755 omarchy-sl7-psr-entry "$pkgdir/usr/bin/omarchy-sl7-psr-entry"
   install -Dm755 80-omarchy-sl7-test-entry.post-hook \
     "$pkgdir/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry"
+
+  # 8e. camera Phase A probe (read-only; --sweep-mclk only changes a module parameter)
+  install -Dm755 sl7-ir-probe "$pkgdir/usr/bin/sl7-ir-probe"
 
   # 9. omarchy-sl7 package repository: config, the script that keeps it Included
   # above [core]/[alarm]/[omarchy], its pacman hook and boot service, and the

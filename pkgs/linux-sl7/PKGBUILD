@@ -15,12 +15,16 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.8
-pkgrel=2
+pkgrel=3
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
 makedepends=('bc' 'cpio' 'dtc' 'git' 'inetutils' 'kmod' 'pahole' 'perl' 'python' 'tar' 'xz')
 options=('!strip')
+
+# VD55G0 sensor firmware patches (GPL-2.0, STMicroelectronics), pinned commit of
+# petm5/vd55g-firmware. Installed under /usr/lib/firmware; no Microsoft files.
+_vd55g_fw=e519457ec5e379a791a6a28e8dbda03499c75bb7  # 2026-07-21
 
 # The two downloads are pinned to the kernel.org sha256sums.asc values. Files
 # from this directory are covered by the repository's git history instead.
@@ -53,7 +57,29 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0021-usb-typec-mux-ps883x-add-a-delay-after-writing-confi.patch'
         'patches/0022-usb-typec-mux-ps883x-disable-USB4-on-incomplete-USB4.patch'
         'patches/0023-HACK-disable-rfkill-of-ath12k_pci.patch'
-        'patches/0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch')
+        'patches/0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch'
+        'patches/0025-dt-bindings-phy-qcom-Add-CSI2-C-PHY-DPHY-schema.patch'
+        'patches/0026-phy-qcom-mipi-csi2-Add-a-CSI2-MIPI-DPHY-driver.patch'
+        'patches/0027-phy-core-Fix-race-condition-between-_of_phy_get-and.patch'
+        'patches/0028-phy-core-Add-phy_get_by_of_node.patch'
+        'patches/0029-phy-core-Add-devm_phy_get_by_of_node.patch'
+        'patches/0030-phy-core-Add-missing-kerneldoc-colon-in-two-location.patch'
+        'patches/0031-media-qcom-camss-Add-support-for-PHY-API-devices.patch'
+        'patches/0032-media-qcom-camss-Use-data-lanes-starting-at-1-for-ne.patch'
+        'patches/0033-dt-bindings-media-qcom-x1e80100-camss-Describe-iommu.patch'
+        'patches/0034-dt-bindings-media-qcom-x1e80100-camss-Make-vdd-csiph.patch'
+        'patches/0035-arm64-dts-qcom-x1e80100-Add-CAMCC-block-definition.patch'
+        'patches/0036-arm64-dts-qcom-x1e80100-Add-CCI-definitions.patch'
+        'patches/0037-arm64-dts-qcom-x1e80100-Add-CAMSS-block-definition.patch'
+        'patches/0038-media-i2c-vd55g-move-patch-array-to-a-separate-firmw.patch'
+        'patches/0039-dt-bindings-media-i2c-st-vd55g-rename-and-add-VD55G0.patch'
+        'patches/0040-media-i2c-st-vd55g-Add-generic-driver-and-VD55G0-sup.patch'
+        'patches/0041-media-i2c-st-vd55g-Keep-the-strobe-GPIO-off-unless-s.patch'
+        'patches/0042-HACK-media-i2c-st-vd55g-mclk_index-and-mclk_hz-modul.patch'
+        'patches/0043-arm64-dts-qcom-x1e80100-romulus-Add-the-front-RGB-ca.patch'
+        'patches/0044-arm64-dts-qcom-x1e80100-romulus13-Add-the-IR-camera.patch'
+        "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
+        'LICENSE.vd55g-firmware')
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'b509067e26487f23795b30640bbfdff0afba0c48290f1100fe880c9bdf369776'
             'SKIP'
@@ -83,6 +109,28 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
          'SKIP'
          'SKIP'
          'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         '968ce7359fa90078e15e7fd544ebd9fa74a28f1e7fb83bd8fd310e7e9ca7daee'
          'SKIP')
 
 prepare() {
@@ -149,6 +197,13 @@ _package() {
   local dtbdir="$modulesdir/dtbs"
   make INSTALL_DTBS_PATH="$dtbdir" dtbs_install
   find "$dtbdir" -mindepth 1 -maxdepth 1 ! -name qcom -exec rm -rf {} +
+
+  echo "Installing the VD55G0 firmware patches..."
+  install -Dm644 -t "$pkgdir/usr/lib/firmware" \
+    "$srcdir/vd55g-firmware-$_vd55g_fw/vd55g0-cut1.bin" \
+    "$srcdir/vd55g-firmware-$_vd55g_fw/vd55g0-cut2.bin"
+  install -Dm644 "$srcdir/LICENSE.vd55g-firmware" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE.vd55g-firmware"
 
   echo "Installing modules..."
   make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 \

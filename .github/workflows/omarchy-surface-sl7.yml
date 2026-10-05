@@ -28,7 +28,7 @@ jobs:
             omarchy-surface-sl7-system-sleep update-uki-dtbs \
             neutralize-surface-keyboard restart-iptsd power-event \
             sl7-firmware sl7-doctor set-boot-order surface-laptop-7.sh omarchy-surface-sl7.install \
-            omarchy-sl7-repo-ensure 10-omarchy-sl7-repo
+            omarchy-sl7-repo-ensure 10-omarchy-sl7-repo sl7-ir-probe
           luac5.4 -p guard-pro-audio.lua
           if grep -rIn '[[:space:]]$' . ; then
             echo "trailing whitespace found" >&2

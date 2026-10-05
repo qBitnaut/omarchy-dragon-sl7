@@ -42,3 +42,35 @@
 
 # 8. EXPERIMENTAL eDP VRR (default off, msm.vrr_enabled=1)
 0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch
+
+# 9. Camera stack (Phase A of IR face unlock). The emitter is NOT enabled.
+# 9a. Standalone CSI2 DPHY driver (v18, in linux-next, expected in 7.4)
+0025-dt-bindings-phy-qcom-Add-CSI2-C-PHY-DPHY-schema.patch
+0026-phy-qcom-mipi-csi2-Add-a-CSI2-MIPI-DPHY-driver.patch
+
+# 9b. phy_get_by_of_node helpers and CAMSS PHY API (v20)
+0027-phy-core-Fix-race-condition-between-_of_phy_get-and.patch
+0028-phy-core-Add-phy_get_by_of_node.patch
+0029-phy-core-Add-devm_phy_get_by_of_node.patch
+0030-phy-core-Add-missing-kerneldoc-colon-in-two-location.patch
+0031-media-qcom-camss-Add-support-for-PHY-API-devices.patch
+0032-media-qcom-camss-Use-data-lanes-starting-at-1-for-ne.patch
+
+# 9c. x1e/Hamoa camera DTSI v7 (bindings, CAMCC from 7.3, CCI, CAMSS)
+0033-dt-bindings-media-qcom-x1e80100-camss-Describe-iommu.patch
+0034-dt-bindings-media-qcom-x1e80100-camss-Make-vdd-csiph.patch
+0035-arm64-dts-qcom-x1e80100-Add-CAMCC-block-definition.patch
+0036-arm64-dts-qcom-x1e80100-Add-CCI-definitions.patch
+0037-arm64-dts-qcom-x1e80100-Add-CAMSS-block-definition.patch
+
+# 9d. ST VD55G family driver with VD55G0 (petm5, linux-surface PR 169)
+0038-media-i2c-vd55g-move-patch-array-to-a-separate-firmw.patch
+0039-dt-bindings-media-i2c-st-vd55g-rename-and-add-VD55G0.patch
+0040-media-i2c-st-vd55g-Add-generic-driver-and-VD55G0-sup.patch
+# safety: strobe GPIO off unless st,leds; debug: mclk_index/mclk_hz module parameters
+0041-media-i2c-st-vd55g-Keep-the-strobe-GPIO-off-unless-s.patch
+0042-HACK-media-i2c-st-vd55g-mclk_index-and-mclk_hz-modul.patch
+
+# 9e. romulus: front RGB OV02C10; romulus13: IR VD55G0 (no illuminator)
+0043-arm64-dts-qcom-x1e80100-romulus-Add-the-front-RGB-ca.patch
+0044-arm64-dts-qcom-x1e80100-romulus13-Add-the-IR-camera.patch

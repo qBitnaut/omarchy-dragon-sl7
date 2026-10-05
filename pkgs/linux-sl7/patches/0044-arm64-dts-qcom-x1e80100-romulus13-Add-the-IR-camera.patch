@@ -1,0 +1,210 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 19:12:11 -0500
+Subject: [PATCH] arm64: dts: qcom: x1e80100-romulus13: Add the IR camera
+
+IR camera of the Surface Laptop 7 13.8 inch (ACPI CAMI, SMO55F0 /
+MSHW0472): an ST VD55G0 on CCI0 master 0 (gpio101/102, 400 kHz) at 0x10,
+one data lane on CSIPHY0, RAW10 644x604 with a 378 MHz link frequency,
+reset on gpio109 (active low, kept muxed as gpio: its alternate function is
+cci_timer0). All decoded from the Windows camera module and platform
+resources.
+
+Rails (pinned, min = max): LDO4_M 1.8 V vddio, LDO2_M 1.2 V vcore and
+LDO6_M 1.8 V vana. ST's binding says 2.8 V for vana, but Windows votes
+1.8 V on this module, and the SP11 uses a different LDO at 2.8 V, so the
+rail must never be raised. LDO6_M's parent supply is unknown.
+
+The master clock is not described by any SL7 resource. The node starts with
+MCLK0 (gpio96) at 19.2 MHz, and defines pinctrl states mclk1..3 for gpio97
+to gpio99 that the vd55g mclk_index module parameter can select.
+
+The illuminator (PM8550 flash, 700 mA) is deliberately not described: no
+st,leds, no leds link and &pm8550_flash stays disabled until the flash
+channel has been found on the device. This node only proves probe and
+streaming without illumination.
+
+Origin: ours; ir/REPORT.md section 3 and the Windows MSHW0472 decode
+Upstream-Status: Pending (depends on the CAMSS DTSI series and the vd55g
+        driver)
+---
+ .../dts/qcom/x1e80100-microsoft-romulus13.dts | 156 ++++++++++++++++++
+ 1 file changed, 156 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+index 6b20de1ae..1b95621be 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+@@ -30,6 +30,125 @@ vreg_ts: regulator-ts {
+ 	};
+ };
+ 
++&apps_rsc {
++	/*
++	 * IR camera rails (ACPI CAMI, MSHW0472). The Windows module resources
++	 * vote LDO4_M 1.8 V (vio), LDO2_M 1.2 V (vcore) and LDO6_M 1.8 V (vana).
++	 * ST's binding text says 2.8 V for vana but Windows uses 1.8 V on this
++	 * module, so every rail is pinned (min = max) and must never be raised.
++	 * LDO6_M has no known parent supply (vdd-l6-supply).
++	 */
++	regulators-8 {
++		vreg_l2m_1p2: ldo2 {
++			regulator-name = "vreg_l2m_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l4m_1p8: ldo4 {
++			regulator-name = "vreg_l4m_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l6m_1p8: ldo6 {
++			regulator-name = "vreg_l6m_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++	};
++};
++
++&camss {
++	ports {
++		port@0 {
++			camss_csiphy0_inep: endpoint {
++				data-lanes = <1>;
++				remote-endpoint = <&csiphy0_out_ep>;
++			};
++		};
++	};
++};
++
++&cci0 {
++	status = "okay";
++};
++
++&cci0_i2c0 {
++	/* The Windows module description asks for FAST mode (400 kHz) */
++	clock-frequency = <400000>;
++
++	/*
++	 * IR camera, ST VD55G0 (ACPI CAMI, SMO55F0 / MSHW0472). Probe and
++	 * stream only: the illuminator is not connected. There is no `st,leds`
++	 * (the driver then keeps every sensor GPIO off) and no flash LED node.
++	 *
++	 * The illuminator is the PM8550 flash (QCOM0C27, 700 mA) but its
++	 * channel is unknown. Do not enable &pm8550_flash and do not add a
++	 * `leds = <...>` link until the channel has been found on the device
++	 * (see the Phase B notes). Never drive it as a continuous torch.
++	 *
++	 * The master clock is unknown: no SL7 resource file names one. MCLK0
++	 * (gpio96) at 19.2 MHz is the first guess; the vd55g module
++	 * parameters mclk_index and mclk_hz (patch "HACK: ... mclk_index")
++	 * select MCLK1..3 or no clock without rebuilding this tree.
++	 */
++	camera@10 {
++		compatible = "st,vd55g0";
++		reg = <0x10>;
++
++		reset-gpios = <&tlmm 109 GPIO_ACTIVE_LOW>;
++
++		pinctrl-names = "default", "mclk1", "mclk2", "mclk3";
++		pinctrl-0 = <&cam_ir_reset_n &cam_ir_mclk0>;
++		pinctrl-1 = <&cam_ir_reset_n &cam_ir_mclk1>;
++		pinctrl-2 = <&cam_ir_reset_n &cam_ir_mclk2>;
++		pinctrl-3 = <&cam_ir_reset_n &cam_ir_mclk3>;
++
++		clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		orientation = <0>; /* front facing */
++
++		vcore-supply = <&vreg_l2m_1p2>;
++		vddio-supply = <&vreg_l4m_1p8>;
++		vana-supply = <&vreg_l6m_1p8>;
++
++		port {
++			vd55g0_ep: endpoint {
++				data-lanes = <1>;
++				link-frequencies = /bits/ 64 <378000000>;
++				remote-endpoint = <&csiphy0_in_ep>;
++			};
++		};
++	};
++};
++
++&csiphy0 {
++	vdda-0p9-supply = <&vreg_l2c>;
++	vdda-1p2-supply = <&vreg_l1c>;
++
++	status = "okay";
++};
++
++&csiphy0_in_port {
++	csiphy0_in_ep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
++		data-lanes = <1>;
++		remote-endpoint = <&vd55g0_ep>;
++	};
++};
++
++&csiphy0_out_port {
++	csiphy0_out_ep: endpoint {
++		remote-endpoint = <&camss_csiphy0_inep>;
++	};
++};
++
+ &gpi_dma1 {
+ 	status = "okay";
+ };
+@@ -72,6 +191,43 @@ touchscreen@0 {
+ };
+ 
+ &tlmm {
++	/* IR camera: reset on gpio109 (its alternate function is cci_timer0, keep it gpio) */
++	cam_ir_reset_n: cam-ir-reset-n-state {
++		pins = "gpio109";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	/* MCLK0..3 candidates for the IR camera, only one is selected per boot */
++	cam_ir_mclk0: cam-ir-mclk0-state {
++		pins = "gpio96";
++		function = "cam_mclk";
++		drive-strength = <16>;
++		bias-disable;
++	};
++
++	cam_ir_mclk1: cam-ir-mclk1-state {
++		pins = "gpio97";
++		function = "cam_mclk";
++		drive-strength = <16>;
++		bias-disable;
++	};
++
++	cam_ir_mclk2: cam-ir-mclk2-state {
++		pins = "gpio98";
++		function = "cam_mclk";
++		drive-strength = <16>;
++		bias-disable;
++	};
++
++	cam_ir_mclk3: cam-ir-mclk3-state {
++		pins = "gpio99";
++		function = "cam_mclk";
++		drive-strength = <16>;
++		bias-disable;
++	};
++
+ 	ts_reg_en: ts-reg-en-state {
+ 		pins = "gpio64";
+ 		function = "gpio";
+-- 
+2.55.0
+

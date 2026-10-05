@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 19:10:10 -0500
+Subject: [PATCH] HACK: media: i2c: st-vd55g: mclk_index and mclk_hz module
+ parameters
+
+Windows describes no camera master clock for the Surface Laptop 7 IR
+module (SMO55F0 / MSHW0472), so which of cam_cc_mclk0..3 (gpio96..99)
+feeds the VD55G0, or whether the module has its own oscillator, can only
+be found on the device. Let the probe procedure try each candidate
+without rebuilding the device tree:
+
+  mclk_index  -1 (default) use the device tree clock; 0..3 take
+              cam_cc_mclk<N>_clk from the same clock controller as the
+              first "clocks" entry and select the "mclk<N>" pinctrl state;
+              -2 no clock
+  mclk_hz     rate for mclk_index >= 0 and the assumed rate for -2
+
+The parameters are read at probe, so set them and rebind the device.
+With the defaults the driver behaves exactly like the generic driver.
+Drop once the clock is known and described in the device tree.
+
+Origin: ours
+Upstream-Status: Not for upstream
+---
+ drivers/media/i2c/vd55g.c | 93 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 91 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
+index 639c4a380..c8e61ad54 100644
+--- a/drivers/media/i2c/vd55g.c
++++ b/drivers/media/i2c/vd55g.c
+@@ -11,6 +11,8 @@
+ #include <linux/i2c.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
+@@ -19,6 +21,8 @@
+ #include <linux/units.h>
+ #include <linux/firmware.h>
+ 
++#include <dt-bindings/clock/qcom,x1e80100-camcc.h>
++
+ #include <media/mipi-csi2.h>
+ #include <media/v4l2-async.h>
+ #include <media/v4l2-cci.h>
+@@ -2009,6 +2013,91 @@ static void vd55g_subdev_cleanup(struct vd55g *sensor)
+ 	v4l2_ctrl_handler_free(sensor->sd.ctrl_handler);
+ }
+ 
++/*
++ * HACK(linux-sl7): the Surface Laptop 7 IR camera module does not say which
++ * camera master clock feeds it (Windows ACPI resources name none). These
++ * parameters let the probe procedure try MCLK0..3 (and no clock at all)
++ * without rebuilding the device tree. They are read at probe time, so set
++ * them and rebind the device:
++ *
++ *   mclk_index  -1 use the device tree clock (default), 0..3 use
++ *               cam_cc_mclk<N>_clk and the "mclk<N>" pinctrl state,
++ *               -2 no clock (module with its own oscillator)
++ *   mclk_hz     rate for mclk_index >= 0, and the assumed rate for -2
++ *               (the sensor accepts 6 to 27 MHz)
++ */
++static int mclk_index = -1;
++module_param(mclk_index, int, 0644);
++MODULE_PARM_DESC(mclk_index, "HACK: -1 DT clock, 0..3 camcc MCLK<N>, -2 no clock");
++
++static unsigned int mclk_hz = 19200000;
++module_param(mclk_hz, uint, 0644);
++MODULE_PARM_DESC(mclk_hz, "HACK: rate used with mclk_index >= 0 or -2");
++
++static void vd55g_xclk_put(void *data)
++{
++	clk_put(data);
++}
++
++static struct clk *vd55g_get_xclk(struct device *dev)
++{
++	struct of_phandle_args args;
++	struct pinctrl_state *state;
++	struct pinctrl *pinctrl;
++	struct clk *clk;
++	char name[16];
++	int ret;
++
++	if (mclk_index == -1)
++		return devm_v4l2_sensor_clk_get(dev, NULL);
++
++	dev_warn(dev, "HACK: mclk_index=%d mclk_hz=%u override the device tree clock\n",
++		 mclk_index, mclk_hz);
++
++	if (mclk_index == -2)
++		return NULL;
++
++	if (mclk_index < 0 || mclk_index > 3)
++		return ERR_PTR(-EINVAL);
++
++	ret = of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells",
++					 0, &args);
++	if (ret)
++		return ERR_PTR(ret);
++
++	/* CLK and CLK_SRC ids alternate in the camcc binding */
++	args.args[0] = CAM_CC_MCLK0_CLK + 2 * mclk_index;
++	clk = of_clk_get_from_provider(&args);
++	of_node_put(args.np);
++	if (IS_ERR(clk))
++		return clk;
++
++	ret = devm_add_action_or_reset(dev, vd55g_xclk_put, clk);
++	if (ret)
++		return ERR_PTR(ret);
++
++	ret = clk_set_rate(clk, mclk_hz);
++	if (ret)
++		return ERR_PTR(ret);
++
++	if (mclk_index > 0) {
++		pinctrl = devm_pinctrl_get(dev);
++		if (IS_ERR(pinctrl))
++			return ERR_CAST(pinctrl);
++
++		snprintf(name, sizeof(name), "mclk%d", mclk_index);
++		state = pinctrl_lookup_state(pinctrl, name);
++		if (IS_ERR(state))
++			return ERR_CAST(state);
++
++		ret = pinctrl_select_state(pinctrl, state);
++		if (ret)
++			return ERR_PTR(ret);
++	}
++
++	return clk;
++}
++
+ static int vd55g_get_regulators(struct vd55g *sensor)
+ {
+ 	unsigned int i;
+@@ -2043,12 +2132,12 @@ static int vd55g_probe(struct i2c_client *client)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Failed to get regulators\n");
+ 
+-	sensor->xclk = devm_v4l2_sensor_clk_get(dev, NULL);
++	sensor->xclk = vd55g_get_xclk(dev);
+ 	if (IS_ERR(sensor->xclk))
+ 		return dev_err_probe(dev, PTR_ERR(sensor->xclk),
+ 				     "Failed to get xclk\n");
+ 
+-	sensor->xclk_freq = clk_get_rate(sensor->xclk);
++	sensor->xclk_freq = sensor->xclk ? clk_get_rate(sensor->xclk) : mclk_hz;
+ 
+ 	sensor->reset_gpio =
+ 		devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+-- 
+2.55.0
+

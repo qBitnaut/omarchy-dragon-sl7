@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 19:09:50 -0500
+Subject: [PATCH] media: i2c: st-vd55g: Keep the strobe GPIO off unless st,leds
+ is set
+
+The generic driver defaults sensor GPIO 1 to a strobe output when the
+device tree has no 'st,leds' property, and then exposes a flash LED mode
+control. On the Surface Laptop 7 the infrared illuminator (PM8550 flash,
+up to 700 mA) must not be reachable from the first release, so without
+'st,leds' make no GPIO a strobe output, do not create the flash LED mode
+control, and guard the one place that read the control unconditionally.
+
+Origin: ours
+Upstream-Status: Not for upstream (carried as a safety default; the
+        upstream driver keeps GPIO 1)
+---
+ drivers/media/i2c/vd55g.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
+index 0df7e103e..639c4a380 100644
+--- a/drivers/media/i2c/vd55g.c
++++ b/drivers/media/i2c/vd55g.c
+@@ -627,7 +627,7 @@ static void vd55g_get_frame_timings(struct vd55g *sensor,
+ 
+ 	timings->expo_max = timings->frame_length - VD55G_EXPO_MAX_TERM;
+ 
+-	if (sensor->info->limit_flash_duty_cycle &&
++	if (sensor->info->limit_flash_duty_cycle && sensor->led_ctrl &&
+ 	    sensor->led_ctrl->val == V4L2_FLASH_LED_MODE_FLASH) {
+ 		timings->expo_max = timings->expo_max / 2;
+ 	}
+@@ -1928,10 +1928,12 @@ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
+ 		set_bit(led_gpios[i], &sensor->ext_leds_mask);
+ 	}
+ 
+-	if (nb_gpios_leds == 0) {
+-		sensor->gpios[1] = VD55G_GPIO_MODE_STROBE;
+-		set_bit(1, &sensor->ext_leds_mask);
+-	}
++	/*
++	 * Without an 'st,leds' property no GPIO is a strobe output and the
++	 * flash LED control is not created, so nothing can drive an
++	 * illuminator by accident. The generic driver used to default to
++	 * GPIO 1.
++	 */
+ 
+ 	return 0;
+ }
+-- 
+2.55.0
+
