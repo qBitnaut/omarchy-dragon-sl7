@@ -4,10 +4,12 @@
 # and the front RGB camera (OmniVision OV02C10, i2c 0x36 on CCI1).
 #
 # Read-only by default. It never touches the illuminator: no LED class device,
-# no flash strobe, no sensor GPIO. With --sweep-mclk (or --mclk-hz without it)
-# it additionally changes the vd55g module parameters mclk_index/mclk_hz (a
-# linux-sl7 debug hack) and rebinds the sensor: the parameters are read at
-# probe, so unbind and bind is enough, no module reload.
+# no flash strobe, no sensor GPIO. With --sweep-mclk it changes the vd55g
+# module parameters mclk_index/mclk_hz (a linux-sl7 debug hack) and rebinds the
+# sensor: the parameters are read at probe, so unbind and bind is enough, no
+# module reload. --mclk-hz HZ alone keeps mclk_index=-1 (the device tree
+# clock), sets the module parameter mclk_hz (the driver then retunes that clock
+# to HZ at probe) and rebinds. Without either the device tree rate is used.
 #
 #   sl7-ir-probe [--frames N] [--out DIR] [--no-capture] [--y10] [--debug]
 #                [--sweep-mclk] [--mclk-hz HZ]
@@ -29,14 +31,14 @@ capture=1
 sweep=0
 debug=0
 want_y10=0
-mclk_hz=19200000
+mclk_hz=0
 mclk_hz_set=0
 sysfs=${SL7_SYSFS:-/sys}
 ir_addr=0010
 rgb_addr=0036
 
 usage() {
-  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,/^set -u/{/^set -u/!p}' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -55,6 +57,9 @@ while (($#)); do
   shift
 done
 [[ $frames =~ ^[0-9]+$ && $mclk_hz =~ ^[0-9]+$ ]] || usage
+# the driver treats mclk_hz=0 as "device tree rate", and as 19.2 MHz when the
+# sweep picks the clock itself
+sweep_hz=$((mclk_hz ? mclk_hz : 19200000))
 
 if ((EUID != 0)) && [[ -z ${SL7_IR_NO_SUDO:-} ]]; then
   if command -v sudo >/dev/null 2>&1; then
@@ -78,6 +83,12 @@ section() { say ""; say "== $1"; }
 
 kdmesg() {
   dmesg 2>/dev/null || journalctl -k -b --no-pager 2>/dev/null || true
+}
+
+# Drop the media graph walk and media pipeline debug lines (--debug turns on
+# mc-entity.c dynamic debug) from the report; they stay in the raw dmesg file.
+filter_noise() {
+  grep -vE 'walk:|media_graph_walk|__media_pipeline_(start|stop)|media_pipeline_(walk|entity|start|stop)|pipeline_(start|stop)_|graph_walk' || true
 }
 
 # ---------------------------------------------------------------- kernel
@@ -184,7 +195,7 @@ report_i2c() { # label, dev
   [[ -n $drv ]]
 }
 
-dmesg_ir() { kdmesg | grep -iE 'vd55g|0x53354730|53354730|smo55f0|sensor detect|sensor boot|external firmware|failed to (load|apply|boot|get)|expected vd55g|clock lane|link-frequenc|cci' | tail -n 40; }
+dmesg_ir() { kdmesg | filter_noise | grep -iE 'vd55g|0x53354730|53354730|smo55f0|sensor detect|sensor boot|external firmware|failed to (load|apply|boot|get)|expected vd55g|clock lane|link-frequenc|cci' | tail -n 40; }
 
 if report_i2c "IR (VD55G0 @ 0x10)" "$ir_dev"; then
   ok "IR sensor probed: the driver read model id 0x53354730 (VD55G0) and applied the firmware patch"
@@ -205,7 +216,7 @@ else
   bad "RGB OV02C10 not probed (this validates the camera stack first: fix it before the IR)"
 fi
 say "-- kernel messages about the RGB sensor"
-kdmesg | grep -iE 'ov02c10|ovti|camss' | tail -n 20 | tee -a "$report"
+kdmesg | filter_noise | grep -iE 'ov02c10|ovti|camss' | tail -n 20 | tee -a "$report"
 
 # ---------------------------------------------------------------- sweep
 ir_driver_dir=$sysfs/bus/i2c/drivers/vd55g
@@ -223,7 +234,7 @@ rebind_ir() { # unbind and bind the sensor so the module parameters are read aga
 
 try_mclk() { # index -> 0 when the sensor is bound afterwards
   echo "$1" >"$param/mclk_index"
-  echo "$mclk_hz" >"$param/mclk_hz"
+  echo "$sweep_hz" >"$param/mclk_hz"
   rebind_ir
 }
 
@@ -238,19 +249,19 @@ if ((sweep)); then
   else
     found=""
     for idx in 0 1 2 3 -2; do
-      say "trying mclk_index=$idx mclk_hz=$mclk_hz"
+      say "trying mclk_index=$idx mclk_hz=$sweep_hz"
       if try_mclk "$idx"; then
         say "  -> bound with mclk_index=$idx"
         found=$idx
         break
       fi
       say "  -> not bound"
-      kdmesg | grep -iE 'vd55g|sensor detect' | tail -n 3 | sed 's/^/     /' | tee -a "$report"
+      kdmesg | filter_noise | grep -iE 'vd55g|sensor detect' | tail -n 3 | sed 's/^/     /' | tee -a "$report"
     done
     if [[ -n $found ]]; then
       case $found in
         -2) ok "IR sensor works WITHOUT a camera master clock (module oscillator): mclk_index=-2" ;;
-        *) ok "IR sensor works with MCLK$found (gpio$((96 + found))) at $mclk_hz Hz: set the DT clock and pinctrl to MCLK$found" ;;
+        *) ok "IR sensor works with MCLK$found (gpio$((96 + found))) at $sweep_hz Hz: set the DT clock and pinctrl to MCLK$found" ;;
       esac
       ir_dev=$sysfs/bus/i2c/devices/$ir_name
     else
@@ -272,6 +283,8 @@ if ((!sweep && mclk_hz_set)); then
   elif [[ -z $ir_name ]]; then
     bad "no IR i2c client to rebind"
   else
+    # keep the device tree clock (mclk_index=-1); the driver retunes it to mclk_hz at probe
+    echo -1 >"$param/mclk_index"
     echo "$mclk_hz" >"$param/mclk_hz"
     if rebind_ir; then
       say "sensor rebound with mclk_hz=$mclk_hz (mclk_index=$(cat "$param/mclk_index" 2>/dev/null))"
@@ -280,6 +293,8 @@ if ((!sweep && mclk_hz_set)); then
     else
       bad "IR sensor did not bind with mclk_hz=$mclk_hz"
     fi
+    say "-- kernel messages after the rebind"
+    kdmesg | filter_noise | grep -E 'vd55g [0-9]+-[0-9a-f]{4}:' | tail -n 15 | tee -a "$report"
   fi
 fi
 
@@ -574,7 +589,7 @@ irq_snap() { grep -E 'csid|vfe|csiphy|ace4000' /proc/interrupts >"$1" 2>/dev/nul
 capture_cam() {
   local kind=$1 prefix=$2 sdev=$3 csid=$4 rdi=$5 nframes=$6 w=$7 h=$8
   local label plan videodev sensordev rdipad codes code fourcc bits line cur curcode cursize
-  local bpl size fmt_out log raw dm_mark sz need ok_stream=1
+  local bpl size fmt_out log raw dm_mark sz need ok_stream=1 slice vlines tree errs
   cap_kind=$kind
   label=${kind^^}
   [[ -n $media_dev && -n $sdev ]] || { info "$label capture skipped: no sensor or media device"; return; }
@@ -658,8 +673,20 @@ capture_cam() {
     say "-- interrupt deltas during the $label capture"
     irq_delta_py "$out/irq-$kind-before.txt" "$out/irq-$kind-after.txt" | tee -a "$report"
   fi
-  say "-- kernel messages since the $label capture began"
-  kdmesg | tail -n +$((dm_mark + 1)) | grep -iE 'csi2-phy|ace4000|acec000|phy-ace|vb2|Link|validat|camss|vd55g|csid|csiphy|vfe' | tail -n 60 | tee -a "$report"
+  slice=$(kdmesg | tail -n +$((dm_mark + 1)))
+  say "-- kernel messages since the $label capture began (graph walk debug lines filtered out, see dmesg.txt)"
+  filter_noise <<<"$slice" | grep -iE 'csi2-phy|ace4000|acec000|phy-ace|vb2|Link|validat|camss|vd55g|csid|csiphy|vfe' | tail -n 60 | tee -a "$report"
+  if [[ $kind == ir ]]; then
+    vlines=$(grep -E 'vd55g [0-9]+-[0-9a-f]{4}:' <<<"$slice" | filter_noise)
+    tree=$(grep 'clock tree:' <<<"$vlines" | tail -n 1 || true)
+    errs=$(grep -iE 'enable streams|poll reg|s_ctrl|fail|error|timed out|unsupported|mismatch|HACK' <<<"$vlines" | grep -v 'clock tree:' || true)
+    say "-- vd55g clock tree (logged at each stream start)"
+    say "${tree:-<none: the sensor never reached stream start>}"
+    say "-- vd55g errors and warnings during the capture"
+    say "${errs:-<none>}"
+    if [[ -n $tree ]]; then info "IR clock tree: ${tree#*: }"; fi
+    if [[ -n $errs ]]; then info "IR vd55g errors: $(tail -n 1 <<<"$errs" | sed 's/^[^:]*: //')"; fi
+  fi
 
   sz=0
   [[ -f $raw ]] && sz=$(stat -c %s "$raw")
@@ -669,7 +696,7 @@ capture_cam() {
     stats_py "$raw" "$w" "$h" "$bpl" "$size" "$bits" | tee -a "$report"
   fi
   if ((!ok_stream)); then
-    verdict FAIL "stream failed ($videodev: STREAMON error or timeout, $sz of $need bytes); if frames time out try --mclk-hz 24000000 (Windows says MCLK 24 MHz)"
+    verdict FAIL "stream failed ($videodev: STREAMON error or timeout, $sz of $need bytes${errs:+; last vd55g error: $(tail -n 1 <<<"$errs" | sed 's/^[^:]*: //')}); if frames time out try --mclk-hz 24000000 (Windows says MCLK 24 MHz)"
   elif ((sz >= need)); then
     verdict PASS "captured $nframes frames $code/$fourcc ${w}x${h} stride $bpl ($raw)"
   else
@@ -698,6 +725,7 @@ if ((capture)); then
     info "RGB capture skipped: no CAMSS media device"
   fi
   debug_off
+  kdmesg >"$out/dmesg.txt" 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------- leds

@@ -14,7 +14,10 @@ without rebuilding the device tree:
               cam_cc_mclk<N>_clk from the same clock controller as the
               first "clocks" entry and select the "mclk<N>" pinctrl state;
               -2 no clock
-  mclk_hz     rate for mclk_index >= 0 and the assumed rate for -2
+  mclk_hz     0 (default) leave the device tree clock rate alone; with
+              mclk_index -1 a non-zero value sets the device tree clock to
+              that rate; with mclk_index >= 0 the rate of that clock and
+              with -2 the assumed rate (0 means 19.2 MHz)
 
 The parameters are read at probe, so set them and rebind the device.
 With the defaults the driver behaves exactly like the generic driver.
@@ -23,11 +26,11 @@ Drop once the clock is known and described in the device tree.
 Origin: ours
 Upstream-Status: Not for upstream
 ---
- drivers/media/i2c/vd55g.c | 93 ++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 91 insertions(+), 2 deletions(-)
+ drivers/media/i2c/vd55g.c | 117 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 115 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
-index 639c4a380..c8e61ad54 100644
+index ade2db631..15b2c4f83 100644
 --- a/drivers/media/i2c/vd55g.c
 +++ b/drivers/media/i2c/vd55g.c
 @@ -11,6 +11,8 @@
@@ -48,7 +51,7 @@ index 639c4a380..c8e61ad54 100644
  #include <media/mipi-csi2.h>
  #include <media/v4l2-async.h>
  #include <media/v4l2-cci.h>
-@@ -2009,6 +2013,91 @@ static void vd55g_subdev_cleanup(struct vd55g *sensor)
+@@ -2101,6 +2105,114 @@ static void vd55g_subdev_cleanup(struct vd55g *sensor)
  	v4l2_ctrl_handler_free(sensor->sd.ctrl_handler);
  }
  
@@ -62,16 +65,26 @@ index 639c4a380..c8e61ad54 100644
 + *   mclk_index  -1 use the device tree clock (default), 0..3 use
 + *               cam_cc_mclk<N>_clk and the "mclk<N>" pinctrl state,
 + *               -2 no clock (module with its own oscillator)
-+ *   mclk_hz     rate for mclk_index >= 0, and the assumed rate for -2
-+ *               (the sensor accepts 6 to 27 MHz)
++ *   mclk_hz     0 (default) leave the rate alone with mclk_index -1; non-zero
++ *               sets the device tree clock to this rate with mclk_index -1.
++ *               With mclk_index >= 0, the rate for that clock, and with -2
++ *               the assumed rate (0 means 19.2 MHz in both cases; the
++ *               sensor accepts 6 to 27 MHz)
 + */
++#define VD55G_MCLK_HZ_DEFAULT 19200000
++
 +static int mclk_index = -1;
 +module_param(mclk_index, int, 0644);
-+MODULE_PARM_DESC(mclk_index, "HACK: -1 DT clock, 0..3 camcc MCLK<N>, -2 no clock");
++MODULE_PARM_DESC(mclk_index, "HACK: -1 DT clock (default), 0..3 camcc MCLK<N>, -2 no clock");
 +
-+static unsigned int mclk_hz = 19200000;
++static unsigned int mclk_hz;
 +module_param(mclk_hz, uint, 0644);
-+MODULE_PARM_DESC(mclk_hz, "HACK: rate used with mclk_index >= 0 or -2");
++MODULE_PARM_DESC(mclk_hz, "HACK: 0 (default) keep the DT clock rate; with mclk_index -1 set the DT clock to this rate; with mclk_index >= 0 or -2 the rate used (0 = 19200000)");
++
++static unsigned int vd55g_mclk_hz(void)
++{
++	return mclk_hz ? mclk_hz : VD55G_MCLK_HZ_DEFAULT;
++}
 +
 +static void vd55g_xclk_put(void *data)
 +{
@@ -87,11 +100,24 @@ index 639c4a380..c8e61ad54 100644
 +	char name[16];
 +	int ret;
 +
-+	if (mclk_index == -1)
-+		return devm_v4l2_sensor_clk_get(dev, NULL);
++	if (mclk_index == -1) {
++		clk = devm_v4l2_sensor_clk_get(dev, NULL);
++		if (IS_ERR_OR_NULL(clk) || !mclk_hz)
++			return clk;
++
++		dev_warn(dev, "HACK: setting the device tree clock to mclk_hz=%u\n",
++			 mclk_hz);
++		ret = clk_set_rate(clk, mclk_hz);
++		if (ret)
++			return ERR_PTR(dev_err_probe(dev, ret,
++						     "Failed to set clock to %u Hz\n",
++						     mclk_hz));
++
++		return clk;
++	}
 +
 +	dev_warn(dev, "HACK: mclk_index=%d mclk_hz=%u override the device tree clock\n",
-+		 mclk_index, mclk_hz);
++		 mclk_index, vd55g_mclk_hz());
 +
 +	if (mclk_index == -2)
 +		return NULL;
@@ -115,7 +141,7 @@ index 639c4a380..c8e61ad54 100644
 +	if (ret)
 +		return ERR_PTR(ret);
 +
-+	ret = clk_set_rate(clk, mclk_hz);
++	ret = clk_set_rate(clk, vd55g_mclk_hz());
 +	if (ret)
 +		return ERR_PTR(ret);
 +
@@ -140,7 +166,7 @@ index 639c4a380..c8e61ad54 100644
  static int vd55g_get_regulators(struct vd55g *sensor)
  {
  	unsigned int i;
-@@ -2043,12 +2132,12 @@ static int vd55g_probe(struct i2c_client *client)
+@@ -2135,12 +2247,13 @@ static int vd55g_probe(struct i2c_client *client)
  	if (ret)
  		return dev_err_probe(dev, ret, "Failed to get regulators\n");
  
@@ -151,7 +177,8 @@ index 639c4a380..c8e61ad54 100644
  				     "Failed to get xclk\n");
  
 -	sensor->xclk_freq = clk_get_rate(sensor->xclk);
-+	sensor->xclk_freq = sensor->xclk ? clk_get_rate(sensor->xclk) : mclk_hz;
++	sensor->xclk_freq = sensor->xclk ? clk_get_rate(sensor->xclk) :
++			    vd55g_mclk_hz();
  
  	sensor->reset_gpio =
  		devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);

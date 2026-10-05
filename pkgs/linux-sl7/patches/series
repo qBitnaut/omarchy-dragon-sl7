@@ -110,3 +110,6 @@
 
 # 10e. Power: pmic_glink early rpmsg probe (7.4)
 0065-soc-qcom-pmic_glink-Avoid-losing-early-rpmsg-probe.patch
+
+# 11. camss: stop the subdevs already started when a later s_stream(1) fails
+0067-media-qcom-camss-Stop-started-subdevs-when-the-sensor.patch

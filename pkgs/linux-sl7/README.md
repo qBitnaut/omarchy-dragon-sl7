@@ -61,7 +61,8 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0036-0037 | x1e80100 CCI0/1 and CAMSS plus four standalone CSIPHY nodes | camera DTSI v7 patches 3-4 | posted v7, unreviewed |
 | 0038-0040 | ST VD55G family driver with VD55G0 (replaces `vd55g1`), binding, firmware header | petm5, linux-surface/kernel PR 169 (patches 3, 4, 7-9; the x86 IPU6 patches are dropped) | posted as linux-media 1169036 v2; ST pushes back on merging G0 into the G1 driver |
 | 0041 | vd55g: no strobe GPIO and no flash LED control unless `st,leds` is set | ours | not for upstream |
-| 0042 | HACK vd55g: `mclk_index` and `mclk_hz` module parameters | ours | not for upstream, drop once the clock is known |
+| 0042 | HACK vd55g: `mclk_index` and `mclk_hz` module parameters (`mclk_hz` alone retunes the DT clock) | ours | not for upstream, drop once the clock is known |
+| 0067 | camss: stop the subdevs already started when a later `s_stream(1)` fails | ours | candidate for linux-media (same code in mainline) |
 | 0043 | romulus: front RGB OV02C10 (CCI1, CSIPHY4, MCLK4, PM8010 rails l1m/l3m/l5m) | ours, from ELLX / bryce / Oliver White v2, on the v7 DTSI style | pending |
 | 0044 | romulus13: IR VD55G0 (CCI0 0x10, CSIPHY0 1 lane, 378 MHz, reset gpio109, pinned rails l2m 1.2 V / l4m 1.8 V / l6m 1.8 V, MCLK0 plus pinctrl states mclk1..3), **no illuminator** | ours; `ir/REPORT.md` | pending |
 
@@ -318,6 +319,16 @@ strobe output. Do not enable the emitter until its flash channel has been found 
   Bayer lookup falls back to row 0, and `init_state` picks the first mono or Bayer code (as
   `vd55g1` did). `set_fmt` and `enum_frame_size` go through the same check. Patch 0031 also logs
   `csiphy %d init fail` with `dev_err_probe()` so a deferred probe is not printed as an error.
+- 7.2.8-7: the IR sensor probes and loads firmware patch 2.11, but `vd55g_enable_streams()` failed
+  with a hard-coded `-EINVAL` that hid the cause. Patch 0040 now returns the real error, logs
+  `enable streams: <step> failed: <ret>` for each step, logs register, expected value, last value and
+  system FSM state when a poll times out, and logs the computed clock tree (`clock tree: ...`, at
+  `dev_info`) at every stream start. `s_ctrl` failures are logged with the control name. Patch 0042:
+  `mclk_hz` now defaults to 0 (keep the DT rate) and, with `mclk_index` -1, sets the DT clock to
+  that rate; with `mclk_index` >= 0 or -2 a zero still means 19.2 MHz. `sl7-ir-probe --mclk-hz N`
+  uses this. Patch 0067 (new) stops the VFE, CSID and CSIPHY that `video_start_streaming()` had
+  already started when the sensor fails, which removes the `call_s_stream` WARN libcamera's `cam`
+  hit after a failed start.
 - First on-device steps: `sudo sl7-ir-probe`, read its `SUMMARY`, then `--sweep-mclk` only if the
   IR sensor did not bind.
 

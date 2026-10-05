@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 14:00:00 -0500
+Subject: [PATCH] media: qcom: camss: Stop started subdevs when a later
+ s_stream(1) fails
+
+video_start_streaming() starts the subdevs from the video node towards
+the sensor (VFE, CSID, CSIPHY, sensor). If one of them fails, only the
+media pipeline is stopped. The subdevs started before it keep
+s_stream_enabled set and stay powered, and vb2 does not call
+stop_streaming() after a failed start_streaming(). The next start then
+calls s_stream(1) on an already started subdev and trips the WARN_ON in
+call_s_stream(). A sensor that fails to start, such as the VD55G0 on the
+Surface Laptop 7, made libcamera's cam hit this.
+
+Stop the subdevs that were already started, in the same order as
+video_stop_streaming(), before the error path stops the pipeline.
+
+Origin: ours
+Upstream-Status: Not submitted (same code in mainline; candidate for
+        linux-media)
+---
+ drivers/media/platform/qcom/camss/camss-video.c | 36 +++++++++++++++++++++++++++++++++++-
+ 1 file changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-video.c b/drivers/media/platform/qcom/camss/camss-video.c
+index 0852eb6f1..50609d6db 100644
+--- a/drivers/media/platform/qcom/camss/camss-video.c
++++ b/drivers/media/platform/qcom/camss/camss-video.c
+@@ -249,6 +249,38 @@ static int video_prepare_streaming(struct vb2_queue *q)
+ 	return ret;
+ }
+ 
++/*
++ * Stop the subdevs that video_start_streaming() already started, that is every
++ * subdev on the pipeline before @failed, the one whose s_stream(1) failed.
++ * vb2 does not call stop_streaming() after a failed start_streaming(), so
++ * without this the VFE, CSID and CSIPHY stay started, and the next start
++ * hits the "start an already started subdev" WARN in call_s_stream().
++ */
++static void video_stop_started_subdevs(struct camss_video *video,
++				       struct v4l2_subdev *failed)
++{
++	struct media_entity *entity = &video->vdev.entity;
++	struct media_pad *pad;
++	struct v4l2_subdev *subdev;
++
++	while (1) {
++		pad = &entity->pads[0];
++		if (!(pad->flags & MEDIA_PAD_FL_SINK))
++			break;
++
++		pad = media_pad_remote_pad_first(pad);
++		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
++			break;
++
++		entity = pad->entity;
++		subdev = media_entity_to_v4l2_subdev(entity);
++		if (subdev == failed)
++			break;
++
++		v4l2_subdev_call(subdev, video, s_stream, 0);
++	}
++}
++
+ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct camss_video *video = vb2_get_drv_priv(q);
+@@ -282,8 +314,10 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+ 		subdev = media_entity_to_v4l2_subdev(entity);
+ 
+ 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
+-		if (ret < 0 && ret != -ENOIOCTLCMD)
++		if (ret < 0 && ret != -ENOIOCTLCMD) {
++			video_stop_started_subdevs(video, subdev);
+ 			goto error;
++		}
+ 	}
+ 
+ 	return 0;
+-- 
+2.55.0
+

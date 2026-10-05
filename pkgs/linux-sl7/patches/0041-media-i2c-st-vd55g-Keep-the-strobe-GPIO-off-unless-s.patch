@@ -19,10 +19,10 @@ Upstream-Status: Not for upstream (carried as a safety default; the
  1 file changed, 7 insertions(+), 5 deletions(-)
 
 diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
-index 0df7e103e..639c4a380 100644
+index 8c504aeef..ade2db631 100644
 --- a/drivers/media/i2c/vd55g.c
 +++ b/drivers/media/i2c/vd55g.c
-@@ -627,7 +627,7 @@ static void vd55g_get_frame_timings(struct vd55g *sensor,
+@@ -634,7 +634,7 @@ static void vd55g_get_frame_timings(struct vd55g *sensor,
  
  	timings->expo_max = timings->frame_length - VD55G_EXPO_MAX_TERM;
  
@@ -31,7 +31,7 @@ index 0df7e103e..639c4a380 100644
  	    sensor->led_ctrl->val == V4L2_FLASH_LED_MODE_FLASH) {
  		timings->expo_max = timings->expo_max / 2;
  	}
-@@ -1928,10 +1928,12 @@ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
+@@ -2020,10 +2020,12 @@ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
  		set_bit(led_gpios[i], &sensor->ext_leds_mask);
  	}
  

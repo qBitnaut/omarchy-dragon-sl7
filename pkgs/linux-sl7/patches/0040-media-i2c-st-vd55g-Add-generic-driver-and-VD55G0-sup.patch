@@ -35,9 +35,9 @@ Upstream-Status: Submitted (v2; ST's Benjamin Mugnier questions merging
  MAINTAINERS                |    9 +-
  drivers/media/i2c/Kconfig  |   10 +-
  drivers/media/i2c/Makefile |    2 +-
- drivers/media/i2c/vd55g.c  | 2152 ++++++++++++++++++++++++++++++++++++
+ drivers/media/i2c/vd55g.c  | 2244 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
  drivers/media/i2c/vd55g1.c | 1781 -----------------------------
- 5 files changed, 2163 insertions(+), 1791 deletions(-)
+ 5 files changed, 2249 insertions(+), 1791 deletions(-)
  create mode 100644 drivers/media/i2c/vd55g.c
  delete mode 100644 drivers/media/i2c/vd55g1.c
 
@@ -113,10 +113,10 @@ index e45359efe..b40b6020e 100644
  obj-$(CONFIG_VIDEO_VP27SMPX) += vp27smpx.o
 diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
 new file mode 100644
-index 000000000..0df7e103e
+index 000000000..8c504aeef
 --- /dev/null
 +++ b/drivers/media/i2c/vd55g.c
-@@ -0,0 +1,2158 @@
+@@ -0,0 +1,2244 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Driver for VD55G family global shutter sensors
@@ -581,6 +581,9 @@ index 000000000..0df7e103e
 +	u8 gpios[VD55G_NB_GPIOS];
 +	unsigned long ext_leds_mask;
 +	u32 mipi_rate;
++	u32 sys_clk;
++	u8 mipi_div;
++	u8 pixel_div;
 +	u32 pixel_clock;
 +	u64 link_freq;
 +	struct v4l2_ctrl_handler ctrl_handler;
@@ -835,9 +838,25 @@ index 000000000..0df7e103e
 +	return ret;
 +}
 +
++static const char *vd55g_fsm_name(unsigned int state)
++{
++	switch (state) {
++	case VD55G_SYSTEM_FSM_READY_TO_BOOT:
++		return "READY_TO_BOOT";
++	case VD55G_SYSTEM_FSM_SW_STBY:
++		return "SW_STBY";
++	case VD55G_SYSTEM_FSM_STREAMING:
++		return "STREAMING";
++	default:
++		return "unknown";
++	}
++}
++
 +static int vd55g_poll_reg(struct vd55g *sensor, u32 reg, u8 poll_val, int *err)
 +{
 +	unsigned int val = 0;
++	unsigned int fsm = 0;
++	int fsm_ret;
 +	int ret;
 +
 +	if (err && *err)
@@ -846,6 +865,21 @@ index 000000000..0df7e103e
 +	ret = regmap_read_poll_timeout(sensor->regmap, CCI_REG_ADDR(reg), val,
 +				       (val == poll_val), 2000,
 +				       500 * USEC_PER_MSEC);
++
++	if (ret) {
++		fsm_ret = regmap_read(sensor->regmap,
++				      CCI_REG_ADDR(sensor->info->reg_map[REG_SYSTEM_FSM]),
++				      &fsm);
++		if (fsm_ret)
++			dev_err(sensor->dev,
++				"poll reg 0x%04lx failed: ret=%d expected=0x%02x last=0x%02x, system FSM unreadable (%d)\n",
++				CCI_REG_ADDR(reg), ret, poll_val, val, fsm_ret);
++		else
++			dev_err(sensor->dev,
++				"poll reg 0x%04lx failed: ret=%d expected=0x%02x last=0x%02x, system FSM 0x%02x (%s)\n",
++				CCI_REG_ADDR(reg), ret, poll_val, val, fsm,
++				vd55g_fsm_name(fsm));
++	}
 +
 +	if (ret && err)
 +		*err = ret;
@@ -903,9 +937,26 @@ index 000000000..0df7e103e
 +	else
 +		pixel_div = 8;
 +
++	sensor->mipi_div = mipi_div;
++	sensor->pixel_div = pixel_div;
++	sensor->sys_clk = sys_clk;
 +	sensor->pixel_clock = sys_clk / pixel_div;
 +
 +	return 0;
++}
++
++static void vd55g_log_clock_tree(struct vd55g *sensor)
++{
++	/* The sensor firmware derives its PLL from EXT_CLOCK and the data rate */
++	unsigned int ratio_milli = sensor->xclk_freq ?
++		div_u64((u64)sensor->sys_clk * 1000, sensor->xclk_freq) : 0;
++
++	dev_info(sensor->dev,
++		 "clock tree: xclk_freq=%u Hz (live %lu Hz) link_freq(DT)=%llu Hz mipi_rate=%u bps mipi_div=%u sys_clk=%u Hz (pll ratio %u.%03u, set by sensor) pixel_div=%u pixel_clock=%u Hz oif_ctrl=0x%04x\n",
++		 sensor->xclk_freq, sensor->xclk ? clk_get_rate(sensor->xclk) : 0,
++		 sensor->link_freq, sensor->mipi_rate, sensor->mipi_div,
++		 sensor->sys_clk, ratio_milli / 1000, ratio_milli % 1000,
++		 sensor->pixel_div, sensor->pixel_clock, sensor->oif_ctrl);
 +}
 +
 +static int vd55g_update_patgen(struct vd55g *sensor, u32 patgen_index)
@@ -1234,56 +1285,87 @@ index 000000000..0df7e103e
 +	struct v4l2_rect *crop = v4l2_subdev_state_get_crop(state, 0);
 +	struct v4l2_mbus_framefmt *format =
 +		v4l2_subdev_state_get_format(state, 0);
++	const char *step;
 +	int ret;
 +
 +	ret = pm_runtime_resume_and_get(sensor->dev);
-+	if (ret < 0)
++	if (ret < 0) {
++		dev_err(sensor->dev, "enable streams: runtime resume failed: %d\n",
++			ret);
 +		return ret;
++	}
++
++	vd55g_log_clock_tree(sensor);
 +
 +	/* Configure output */
 +	vd55g_write(sensor, VD55G_REG_MIPI_DATA_RATE, sensor->mipi_rate, &ret);
 +	vd55g_write(sensor, VD55G_REG_OIF_CTRL, sensor->oif_ctrl, &ret);
 +	vd55g_cci_write(sensor, REG_ISL_ENABLE, 0, &ret);
-+	if (ret)
++	if (ret) {
++		step = "output config writes (MIPI_DATA_RATE/OIF_CTRL/ISL_ENABLE)";
 +		goto err_rpm_put;
++	}
 +
 +	ret = vd55g_set_framefmt(sensor, format, crop);
-+	if (ret)
++	if (ret) {
++		step = "set_framefmt";
 +		goto err_rpm_put;
++	}
 +
 +	/* Setup default GPIO values; could be overridden by V4L2 ctrl setup */
 +	ret = vd55g_update_gpios(sensor, GENMASK(VD55G_NB_GPIOS - 1, 0));
-+	if (ret)
++	if (ret) {
++		step = "update_gpios";
 +		goto err_rpm_put;
++	}
 +
 +	ret = vd55g_apply_cold_start(sensor, crop);
-+	if (ret)
++	if (ret) {
++		step = "apply_cold_start";
 +		goto err_rpm_put;
++	}
 +
 +	/* Apply settings from V4L2 ctrls */
 +	ret = __v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
-+	if (ret)
++	if (ret) {
++		step = "ctrl handler setup";
 +		goto err_rpm_put;
++	}
 +
 +	/* Also apply settings from read-only V4L2 ctrls */
 +	ret = vd55g_ro_ctrls_setup(sensor, crop);
-+	if (ret)
++	if (ret) {
++		step = "ro_ctrls_setup";
 +		goto err_rpm_put;
++	}
 +
 +	/* Start streaming */
 +	vd55g_write(sensor, VD55G_REG_STBY, VD55G_STBY_START_STREAM, &ret);
-+	vd55g_poll_reg(sensor, VD55G_REG_STBY, 0, &ret);
-+	vd55g_wait_state(sensor, VD55G_SYSTEM_FSM_STREAMING, &ret);
-+	if (ret)
++	if (ret) {
++		step = "STBY start";
 +		goto err_rpm_put;
++	}
++
++	vd55g_poll_reg(sensor, VD55G_REG_STBY, 0, &ret);
++	if (ret) {
++		step = "poll STBY";
++		goto err_rpm_put;
++	}
++
++	vd55g_wait_state(sensor, VD55G_SYSTEM_FSM_STREAMING, &ret);
++	if (ret) {
++		step = "wait_state STREAMING";
++		goto err_rpm_put;
++	}
 +
 +	vd55g_grab_ctrls(sensor, true);
 +
 +	return 0;
 +
 +err_rpm_put:
++	dev_err(sensor->dev, "enable streams: %s failed: %d\n", step, ret);
 +	pm_runtime_put(sensor->dev);
-+	return -EINVAL;
++	return ret;
 +}
 +
 +static int vd55g_disable_streams(struct v4l2_subdev *sd,
@@ -1737,6 +1819,10 @@ index 000000000..0df7e103e
 +		ret = -EINVAL;
 +		break;
 +	}
++
++	if (ret)
++		dev_err(sensor->dev, "s_ctrl %s (id 0x%x) failed: %d\n",
++			ctrl->name, ctrl->id, ret);
 +
 +	pm_runtime_put_autosuspend(sensor->dev);
 +

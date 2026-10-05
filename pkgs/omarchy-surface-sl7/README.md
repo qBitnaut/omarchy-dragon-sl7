@@ -343,12 +343,18 @@ The capture builds on `media-ctl -r` (reset links), sets the format pad by pad a
 RDI source pad before streaming. It reads the real `bytesperline` and `sizeimage` from `v4l2-ctl
 --get-fmt-video`, and counts a capture as PASS only when `v4l2-ctl` printed no `returned -1`,
 `timeout` or `VIDIOC_` error and the file holds at least frames x sizeimage bytes. The kernel log
-shown is only what appeared since the capture began. `--debug` enables dynamic debug for
+shown is only what appeared since the capture began, with the media graph walk and pipeline debug
+lines (`walk:` and friends) filtered out; they stay in the raw `dmesg.txt`. The IR section also
+prints the `vd55g` clock tree line (linux-sl7 7.2.8-7 and later, logged at each stream start) and
+every `vd55g` error from the capture (`enable streams: <step> failed`, `poll reg ... timed out`,
+`s_ctrl ... failed`). `--debug` enables dynamic debug for
 `qcom_camss`, `phy_qcom_mipi_csi2`, `vd55g`, `mc-entity.c` and `v4l2-subdev.c`, sets
 `videobuf2_common` debug=2, lists the `csid|vfe|csiphy|ace4000` interrupt counter deltas in the
 report and turns everything off again. If frames time out, the next MCLK to try is 24 MHz (Windows
-says 24 MHz): `sudo sl7-ir-probe --mclk-hz 24000000`. `--mclk-hz` only writes the `mclk_hz` module
-parameter and rebinds the sensor (the parameter is read at probe, no module reload).
+says 24 MHz): `sudo sl7-ir-probe --mclk-hz 24000000`. `--mclk-hz` keeps `mclk_index=-1` (the device tree
+clock), writes the `mclk_hz` module parameter and rebinds the sensor; with linux-sl7 7.2.8-7 and
+later the driver then retunes the device tree clock to that rate (the parameter is read at probe,
+no module reload). `mclk_hz=0`, the default, leaves the device tree rate alone.
 
 The IR module's master clock is not named by any Windows resource. The device tree starts with
 MCLK0 (gpio96) at 19.2 MHz. `--sweep-mclk` is the only mode that changes anything: it sets the
