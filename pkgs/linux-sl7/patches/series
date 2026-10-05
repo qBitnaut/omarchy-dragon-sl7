@@ -74,3 +74,38 @@
 # 9e. romulus: front RGB OV02C10; romulus13: IR VD55G0 (no illuminator)
 0043-arm64-dts-qcom-x1e80100-romulus-Add-the-front-RGB-ca.patch
 0044-arm64-dts-qcom-x1e80100-romulus13-Add-the-IR-camera.patch
+
+# 10. Power: 7.3 deepest-idle backport (x1e80100/hamoa PDC pass-through + domain_ss3).
+# The DT patch (0052) must not travel without the irqchip and pinctrl patches
+# before it: it lets the SoC enter a state in which the GIC is powered down.
+0045-irqchip-qcom-pdc-Restructure-version-support.patch
+0046-irqchip-qcom-pdc-Move-all-static-variables-to-struct.patch
+0047-irqchip-qcom-pdc-Differentiate-between-direct-SPI-an.patch
+0048-irqchip-qcom-pdc-Configure-PDC-to-pass-through-mode.patch
+0049-irqchip-qcom-pdc-Fix-kernel-doc-for-qcom_pdc_gic_sec.patch
+0050-pinctrl-qcom-Acknowledge-IRQs-for-PDC-interrupt-cont.patch
+0051-Revert-pinctrl-qcom-x1e80100-Bypass-PDC-wakeup-paren.patch
+0052-arm64-dts-qcom-x1e80100-Add-deepest-idle-state.patch
+
+# 10b. Power: 7.4 pmdomain/cpuidle-psci (ulfh/linux-pm next): OSI PM domains
+# start powered off, so fused-off cores no longer pin the parent domain
+0053-pmdomain-core-Rename-genpd_status_on.patch
+0054-pmdomain-core-Allow-a-non-CPU-device-in-a-CPU-PM-dom.patch
+0055-pmdomain-core-Add-a-genpd-config-to-support-unknown.patch
+0056-cpuidle-psci-Initialize-the-PM-domains-in-powered-of.patch
+0057-cpuidle-psci-Move-initialization-a-bit-earlier-in-th.patch
+0058-pmdomain-core-Fall-back-to-node-name-for-idle-states.patch
+
+# 10c. Power: suspend fixes (freezable workqueues for the Type-C workers)
+0059-soc-qcom-pmic_glink-Fix-device-access-from-worker-du.patch
+0060-usb-typec-ucsi-Schedule-connector-worker-on-freez.patch
+
+# 10d. Power: QREF/refgen regulator supplies for the x1e80100 TCSR clock
+# controller (generic clk_ref helper from 7.3, TCSR migration from 7.4)
+0061-clk-qcom-Add-generic-clkref_en-support.patch
+0062-dt-bindings-clock-qcom-Move-x1e80100-TCSR-to-own-bin.patch
+0063-clk-qcom-tcsrcc-x1e80100-Migrate-to-clk_ref-helper.patch
+0064-arm64-dts-qcom-hamoa-purwa-Add-QREF-regulator-suppli.patch
+
+# 10e. Power: pmic_glink early rpmsg probe (7.4)
+0065-soc-qcom-pmic_glink-Avoid-losing-early-rpmsg-probe.patch

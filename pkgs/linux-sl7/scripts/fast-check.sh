@@ -39,6 +39,17 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/media/i2c/ov02c10.o \
         drivers/phy/qualcomm/ \
         drivers/i2c/busses/i2c-qcom-cci.o \
-        drivers/clk/qcom/camcc-x1e80100.o
+        drivers/clk/qcom/camcc-x1e80100.o \
+        drivers/clk/qcom/clk-ref.o \
+        drivers/clk/qcom/tcsrcc-x1e80100.o \
+        drivers/irqchip/qcom-pdc.o \
+        drivers/pinctrl/qcom/pinctrl-msm.o \
+        drivers/pinctrl/qcom/pinctrl-x1e80100.o \
+        drivers/pmdomain/core.o \
+        drivers/cpuidle/cpuidle-psci.o \
+        drivers/cpuidle/cpuidle-psci-domain.o \
+        drivers/soc/qcom/pmic_glink.o \
+        drivers/soc/qcom/pmic_glink_altmode.o \
+        drivers/usb/typec/ucsi/ucsi.o
 fi
 echo "fast-check: OK"

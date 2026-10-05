@@ -1,0 +1,415 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Show whether the Snapdragon X SoC really sleeps: the RPMh/SMEM sleep counters
+# (qcom_stats: aosd, cxsd, ddr, apss, adsp, cdsp ...), the power-domain residency
+# of the 7.3 deepest idle state (domain_ss3 in power-domain-system) and the
+# per-state cpuidle totals.
+#
+#   sudo sl7-sleepstats                       print the current counters
+#   sudo sl7-sleepstats --suspend-test        snapshot, systemctl suspend, wake it by
+#                                             hand, print counter deltas, hours asleep
+#                                             and watts
+#
+# Needs root (debugfs) and CONFIG_QCOM_STATS (modprobe qcom_stats is tried).
+# Run --suspend-test on battery with the charger unplugged. Like sl7-powertest it
+# takes watts from the energy_now delta between two gauge updates (the gauge steps
+# in 10 mWh), so use 45 minutes or more asleep.
+#
+# Test hooks (all optional): SL7_SYS, SL7_DEBUGFS, SL7_PROC, SL7_SUSPEND_CMD,
+# SL7_ALLOW_NONROOT=1, SL7_POLL_S.
+set -u
+
+sys=${SL7_SYS:-/sys}
+debugfs=${SL7_DEBUGFS:-$sys/kernel/debug}
+proc=${SL7_PROC:-/proc}
+suspend_cmd=${SL7_SUSPEND_CMD:-systemctl suspend}
+poll_s=${SL7_POLL_S:-0.5}
+
+gauge_step_mwh=10   # energy_now resolution of qcom-battmgr
+cycle_mwh=24        # fixed cost per suspend cycle (Dell 7441; re-measure on the SL7)
+sync_timeout_s=300
+sync_stale_s=60     # ~15 s per step at 2.3 W; longer means the gauge is frozen
+xo_hz=19200000      # qcom_stats durations are 19.2 MHz XO ticks
+
+usage() {
+  cat << 'EOF'
+usage: sl7-sleepstats [--suspend-test] [--cycle-mwh N]
+
+  (no option)      print qcom_stats, power-domain and cpuidle counters
+  --suspend-test   snapshot the counters and energy_now, run `systemctl suspend`,
+                   and after the resume print the deltas, the hours asleep and the
+                   watts (wake the laptop with the power button; the SL7 RTC has no
+                   alarm)
+  --cycle-mwh N    fixed per-cycle cost to subtract (default 24 mWh)
+
+Run as root. For --suspend-test the charger must be unplugged.
+EOF
+}
+
+die() {
+  printf 'sl7-sleepstats: %s\n' "$*" >&2
+  exit 1
+}
+
+mode=show
+while (($# > 0)); do
+  case $1 in
+    --suspend-test) mode=suspend ;;
+    --cycle-mwh)
+      shift
+      [[ ${1:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--cycle-mwh needs a number"
+      cycle_mwh=$1
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ ${SL7_ALLOW_NONROOT:-0} != 1 && $EUID -ne 0 ]]; then
+  die "needs root (debugfs); run: sudo sl7-sleepstats"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sl7-sleepstats.XXXXXX") || die "mktemp failed"
+trap 'rm -rf "$tmp"' EXIT
+
+# --- debugfs and the counter sources ----------------------------------------
+
+ensure_debugfs() {
+  [[ -d $debugfs/qcom_stats ]] && return 0
+  if [[ ! -d $debugfs/pm_genpd ]] && ! mountpoint -q "$debugfs" 2> /dev/null; then
+    mount -t debugfs none "$debugfs" 2> /dev/null || true
+  fi
+  [[ -d $debugfs/qcom_stats ]] || modprobe qcom_stats 2> /dev/null || true
+  sleep 0.2
+  [[ -d $debugfs/qcom_stats ]]
+}
+
+have_stats=0
+ensure_debugfs && have_stats=1
+if ((have_stats == 0)); then
+  printf 'warning: %s/qcom_stats is missing (CONFIG_QCOM_STATS=m: modprobe qcom_stats failed,\n' "$debugfs" >&2
+  printf '         or debugfs is not mounted). SoC collapse cannot be judged.\n' >&2
+fi
+
+# name count duration_ticks
+snap_stats() {
+  local f n c d
+  ((have_stats)) || return 0
+  for f in "$debugfs"/qcom_stats/*; do
+    [[ -f $f ]] || continue
+    n=${f##*/}
+    [[ $n == ddr_stats ]] && continue
+    c=$(awk -F': *' '$1 == "Count" { print $2; exit }' "$f" 2> /dev/null)
+    d=$(awk -F': *' '$1 == "Accumulated Duration" { print $2; exit }' "$f" 2> /dev/null)
+    [[ -n $c ]] && printf '%s %s %s\n' "$n" "$c" "${d:-0}"
+  done
+}
+
+# domain state time_ms usage
+snap_genpd() {
+  local d name
+  for d in "$debugfs"/pm_genpd/power-domain-*; do
+    [[ -r $d/idle_states ]] || continue
+    name=${d##*/}
+    awk -v dom="$name" '$1 ~ /^S[0-9]+$/ { print dom, $1, $2, $3 }' "$d/idle_states"
+  done
+}
+
+# state time_us usage, summed over all CPUs
+snap_cpuidle() {
+  local st name t u
+  for st in "$sys"/devices/system/cpu/cpu[0-9]*/cpuidle/state*; do
+    [[ -r $st/time ]] || continue
+    name=$(< "$st/name")
+    t=$(< "$st/time")
+    u=$(< "$st/usage")
+    printf '%s %s %s\n' "$name" "$t" "$u"
+  done | awk '{ t[$1] += $2; u[$1] += $3; if (!($1 in o)) { o[$1] = ++n; k[n] = $1 } }
+              END { for (i = 1; i <= n; i++) print k[i], t[k[i]], u[k[i]] }'
+}
+
+domain_ss3_present() {
+  [[ -d $sys/firmware/devicetree/base/cpus/domain-idle-states/domain-sleep-0 ]] ||
+    [[ -d $proc/device-tree/cpus/domain-idle-states/domain-sleep-0 ]]
+}
+
+domain_label() { # genpd state -> human label
+  case $1 in
+    power-domain-system:S0) printf ' (domain_ss3)' ;;
+  esac
+}
+
+snapshot() { # dir
+  snap_stats > "$1/stats"
+  snap_genpd > "$1/genpd"
+  snap_cpuidle > "$1/cpuidle"
+}
+
+# --- printing -------------------------------------------------------------------
+
+print_current() {
+  local dir=$1
+  printf '== qcom_stats (SoC sleep counters since boot) ==\n'
+  if [[ -s $dir/stats ]]; then
+    awk -v hz="$xo_hz" '{ printf "  %-12s count %-10s %10.1f s\n", $1, $2, $3 / hz }' "$dir/stats"
+    awk '$1 == "cxsd" || $1 == "ddr" || $1 == "aosd" { n[$1] = $2 }
+         END {
+           if (length(n) == 0) { print "  (no cxsd/ddr/aosd files)"; exit }
+           printf "  SoC collapse since boot: cxsd=%s ddr=%s aosd=%s%s\n", n["cxsd"] + 0, n["ddr"] + 0, n["aosd"] + 0,
+                  (n["cxsd"] + n["ddr"] + n["aosd"] > 0) ? "  (the SoC has collapsed)" : "  (never collapsed)"
+         }' "$dir/stats"
+  else
+    printf '  unavailable\n'
+  fi
+  printf '\n== power-domain idle states (debugfs pm_genpd; S0 of power-domain-system is domain_ss3) ==\n'
+  if [[ -s $dir/genpd ]]; then
+    awk '{ printf "  %-32s %-4s %12s ms %12s entries\n", $1, $2, $3, $4 }' "$dir/genpd"
+  else
+    printf '  unavailable\n'
+  fi
+  if domain_ss3_present; then
+    printf '  domain_ss3 (domain-sleep-0) is present in the running device tree\n'
+  else
+    printf '  domain_ss3 is NOT in the running device tree (kernel without patch 0052, or an old DTB)\n'
+  fi
+  printf '\n== cpuidle (all CPUs summed) ==\n'
+  if [[ -s $dir/cpuidle ]]; then
+    awk '{ printf "  %-14s %14.1f s %12s entries\n", $1, $2 / 1000000, $3 }' "$dir/cpuidle"
+  else
+    printf '  unavailable\n'
+  fi
+}
+
+print_deltas() { # before-dir after-dir seconds_asleep
+  local b=$1 a=$2 secs=$3
+  printf '\n== qcom_stats deltas ==\n'
+  if [[ -s $a/stats && -s $b/stats ]]; then
+    awk -v hz="$xo_hz" -v secs="$secs" '
+      NR == FNR { c[$1] = $2; d[$1] = $3; next }
+      {
+        dc = $2 - c[$1]; dd = ($3 - d[$1]) / hz
+        printf "  %-12s +%-10d %+10.1f s", $1, dc, dd
+        if (secs > 0 && dc > 0) printf "   (%.1f entries/s)", dc / secs
+        printf "\n"
+        v[$1] = dc
+      }
+      END {
+        bad = 0
+        n = split("cxsd ddr aosd", w, " ")
+        for (i = 1; i <= n; i++) if (v[w[i]] > 0) bad = 1
+        if (bad) print "  SoC collapse: YES"
+        else print "  SoC collapse: NO (cxsd, ddr and aosd did not count)"
+      }' "$b/stats" "$a/stats"
+  else
+    printf '  unavailable\n'
+  fi
+  printf '\n== power-domain deltas ==\n'
+  if [[ -s $a/genpd && -s $b/genpd ]]; then
+    awk '
+      NR == FNR { t[$1 ":" $2] = $3; u[$1 ":" $2] = $4; next }
+      { k = $1 ":" $2; printf "  %-32s %-4s %+10d ms %+8d entries\n", $1, $2, $3 - t[k], $4 - u[k] }' "$b/genpd" "$a/genpd"
+    local line
+    line=$(awk 'NR == FNR { u[$1 ":" $2] = $4; next }
+                $1 == "power-domain-system" && $2 == "S0" { print $4 - u[$1 ":" $2] }' "$b/genpd" "$a/genpd")
+    if [[ -n $line ]]; then
+      if ((line > 0)); then
+        printf '  domain_ss3 entered %s time(s) during the test\n' "$line"
+      else
+        printf '  domain_ss3 was NOT entered during the test\n'
+      fi
+    fi
+  else
+    printf '  unavailable\n'
+  fi
+  printf '\n== cpuidle deltas (all CPUs summed) ==\n'
+  if [[ -s $a/cpuidle && -s $b/cpuidle ]]; then
+    awk '
+      NR == FNR { t[$1] = $2; u[$1] = $3; next }
+      { printf "  %-14s %+12.1f s %+10d entries\n", $1, ($2 - t[$1]) / 1000000, $3 - u[$1] }' "$b/cpuidle" "$a/cpuidle"
+  else
+    printf '  unavailable\n'
+  fi
+}
+
+# --- battery and clocks ---------------------------------------------------------
+
+battery=""
+find_battery() {
+  local d
+  for d in "$sys"/class/power_supply/*; do
+    [[ -r $d/type && $(< "$d/type") == Battery ]] || continue
+    [[ -r $d/scope && $(< "$d/scope") == Device ]] && continue
+    if [[ -z $battery || ${d##*/} == qcom-battmgr-bat ]]; then
+      battery=$d
+    fi
+  done
+  [[ -n $battery ]]
+}
+
+ac_online() {
+  local d t
+  for d in "$sys"/class/power_supply/*; do
+    [[ -r $d/type && -r $d/online ]] || continue
+    t=$(< "$d/type")
+    if [[ $t == Mains || $t == USB* ]] && [[ $(< "$d/online") == 1 ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+energy_uwh() { cat "$battery/energy_now" 2> /dev/null; }
+
+boottime_s() { awk '{ print $1 }' "$proc/uptime"; }
+
+# CLOCK_MONOTONIC (does not count suspend); empty if /proc/timer_list is unavailable
+mono_s() { awk '/^now at/ { printf "%.3f", $3 / 1e9; exit }' "$proc/timer_list" 2> /dev/null; }
+
+# Wait for energy_now to differ from $2; print "<uwh> <boottime>" of the first change.
+# label, previous value
+wait_gauge_step() {
+  local label=$1 prev=$2 t0 now cur next_progress hinted=0
+  t0=$(boottime_s)
+  next_progress=30
+  while :; do
+    cur=$(energy_uwh)
+    now=$(boottime_s)
+    if [[ -n $cur && $cur != "$prev" ]]; then
+      printf '%s %s\n' "$cur" "$now"
+      return 0
+    fi
+    local waited
+    waited=$(awk -v n="$now" -v t="$t0" 'BEGIN { printf "%d", n - t }')
+    if ((waited >= next_progress)); then
+      next_progress=$((next_progress + 30))
+      printf '%s gauge sync: energy_now %s uWh, unchanged for %d s\n' "$label" "${cur:-?}" "$waited" >&2
+    fi
+    if ((waited >= sync_stale_s && hinted == 0)); then
+      hinted=1
+      printf '%s gauge sync: the gauge looks frozen (no change for %d s). Plug the charger in for ~10 s and\n' \
+        "$label" "$waited" >&2
+      printf '  unplug it to wake the gauge; the test continues when it updates.\n' >&2
+    fi
+    if ((waited >= sync_timeout_s)); then
+      return 1
+    fi
+    sleep "$poll_s"
+  done
+}
+
+# --- modes ------------------------------------------------------------------------
+
+do_show() {
+  snapshot "$tmp"
+  print_current "$tmp"
+}
+
+do_suspend() {
+  find_battery || die "no battery found under $sys/class/power_supply"
+  local status
+  status=$(< "$battery/status")
+  if ac_online || [[ $status != Discharging ]]; then
+    die "the charger must be unplugged and the battery Discharging (battery status: $status). Unplug it and retry."
+  fi
+  local mem_sleep
+  mem_sleep=$(cat "$sys/power/mem_sleep" 2> /dev/null || true)
+  if [[ $mem_sleep != *"[deep]"* ]]; then
+    printf 'warning: mem_sleep is "%s", not [deep]: this will not test the deep suspend path\n' "${mem_sleep:-?}" >&2
+  fi
+
+  local e_first
+  e_first=$(energy_uwh)
+  [[ -n $e_first ]] || die "cannot read $battery/energy_now"
+
+  printf 'waiting for a fresh gauge update before starting the clock (energy_now %s uWh)...\n' "$e_first"
+  local start e0 t0
+  start=$(wait_gauge_step start "$e_first") || die "the gauge did not update within ${sync_timeout_s} s"
+  e0=${start% *}
+  t0=${start#* }
+  printf 'start: energy_now %s uWh at boottime %s s\n' "$e0" "$t0"
+
+  mkdir -p "$tmp/before" "$tmp/after"
+  snapshot "$tmp/before"
+  local boot0 mono0 susp0
+  boot0=$(boottime_s)
+  mono0=$(mono_s)
+  susp0=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
+
+  sync
+  printf 'suspending now (%s). Wake the laptop with the power button.\n' "$suspend_cmd"
+  # shellcheck disable=SC2086  # the command is a word list on purpose
+  if ! $suspend_cmd; then
+    die "'$suspend_cmd' failed"
+  fi
+
+  # resume
+  local t_resume mono1 ac_at_resume=0 susp1
+  t_resume=$(boottime_s)
+  mono1=$(mono_s)
+  ac_online && ac_at_resume=1
+  susp1=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
+  snapshot "$tmp/after"
+  printf 'resumed at boottime %s s; waiting for a fresh gauge update...\n' "$t_resume"
+
+  local e_resume end e1 t1
+  e_resume=$(energy_uwh)
+  end=$(wait_gauge_step end "$e_resume") || die "the gauge did not update within ${sync_timeout_s} s after the resume"
+  e1=${end% *}
+  t1=${end#* }
+
+  local valid=1 notes=""
+  if ((ac_at_resume)); then
+    valid=0
+    notes+=" charger connected at resume;"
+  fi
+  if [[ $susp0 != '?' && $susp1 != '?' && $susp1 -le $susp0 ]]; then
+    valid=0
+    notes+=" suspend_stats/success did not increase (no suspend happened?);"
+  fi
+
+  local window asleep
+  window=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')
+  asleep=$window
+  if [[ -n $mono0 && -n $mono1 ]]; then
+    # CLOCK_BOOTTIME advances during suspend, CLOCK_MONOTONIC does not
+    asleep=$(awk -v b1="$t_resume" -v b0="$boot0" -v m1="$mono1" -v m0="$mono0" \
+      'BEGIN { printf "%.3f", (b1 - b0) - (m1 - m0) }')
+  fi
+
+  print_current "$tmp/after"
+  print_deltas "$tmp/before" "$tmp/after" "$asleep"
+
+  printf '\n== energy ==\n'
+  awk -v e0="$e0" -v e1="$e1" -v w="$window" -v asl="$asleep" -v c="$cycle_mwh" -v g="$gauge_step_mwh" \
+    -v valid="$valid" -v notes="$notes" '
+    BEGIN {
+      used = (e0 - e1) / 1000.0
+      hours = w / 3600.0
+      printf "  window (gauge step to gauge step): %.1f min (%.2f h), of which asleep %.1f min (%.2f h)\n",
+             w / 60, hours, asl / 60, asl / 3600
+      printf "  energy_now: %.0f -> %.0f mWh, used %.0f mWh\n", e0 / 1000.0, e1 / 1000.0, used
+      if (used < 0) { valid = 0; notes = notes " energy_now rose (charging?);" }
+      if (hours <= 0) { print "  no usable window"; exit }
+      printf "  raw:       %.3f W\n", used / 1000.0 / hours
+      printf "  corrected: %.3f W  (minus the fixed %g mWh per cycle, +/-%.3f W from the %g mWh gauge step)\n",
+             (used - c) / 1000.0 / hours, c, g / 1000.0 / hours, g
+      if (hours < 0.5) print "  warning: under 30 minutes: dominated by the gauge step and the cycle cost; use 45 min or more"
+      if (!valid) printf "  INVALID:%s\n", notes
+    }'
+  if ((valid == 0)); then
+    return 3
+  fi
+  return 0
+}
+
+case $mode in
+  show) do_show ;;
+  suspend) do_suspend ;;
+esac

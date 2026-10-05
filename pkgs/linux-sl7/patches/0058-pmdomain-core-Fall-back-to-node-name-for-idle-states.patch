@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Maulik Shah <maulik.shah@oss.qualcomm.com>
+Date: Mon, 14 Sep 2026 12:24:25 +0530
+Subject: [PATCH] pmdomain: core: Fall back to node name for idle states
+
+commit 46ff460038d6c90ff491489e0ce5c5161c6b589a in ulfh/linux-pm next (linux-next, not yet in a tag).
+
+The dt_idle_states uses idle-state-name when available and when missing
+falls back to the node name. Do the same for domain-idle-states.
+
+This lets pmdomain idle_states_desc debugfs show a name even when
+idle-state-name is omitted.
+
+Signed-off-by: Maulik Shah <maulik.shah@oss.qualcomm.com>
+Reviewed-by: Abel Vesa <abel.vesa@oss.qualcomm.com>
+Signed-off-by: Ulf Hansson <ulfh@kernel.org>
+
+Origin: ulfh/linux-pm next 46ff460038d6 (linux-next); Maulik Shah
+Upstream-Status: In linux-next, ulfh/linux-pm next, queued for 7.4 (backport)
+
+---
+ drivers/pmdomain/core.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pmdomain/core.c b/drivers/pmdomain/core.c
+index f3d9fd7659bd..b99c2dcf3d8f 100644
+--- a/drivers/pmdomain/core.c
++++ b/drivers/pmdomain/core.c
+@@ -3657,7 +3657,10 @@ static int genpd_parse_state(struct genpd_power_state *genpd_state,
+ 	if (!err)
+ 		genpd_state->residency_ns = 1000LL * residency;
+ 
+-	of_property_read_string(state_node, "idle-state-name", &genpd_state->name);
++	err = of_property_read_string(state_node, "idle-state-name",
++				      &genpd_state->name);
++	if (err)
++		genpd_state->name = state_node->name;
+ 
+ 	genpd_state->power_on_latency_ns = 1000LL * exit_latency;
+ 	genpd_state->power_off_latency_ns = 1000LL * entry_latency;

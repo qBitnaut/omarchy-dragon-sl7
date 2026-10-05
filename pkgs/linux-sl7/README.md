@@ -80,6 +80,158 @@ Notes on the DT patches:
   is not in the geni-se binding, and the opcode type and size. They are
   allow-listed in `scripts/check-dtbs.sh`; anything else fails.
 
+## Power: 7.3 deepest-idle backport
+
+Added in 7.2.8-5 (patches 0045-0065). Goal: let the SoC enter the
+`domain_ss3` system idle state, so that `cxsd`, `ddr` and `aosd` have a chance
+to count in suspend, and take the suspend-time fixes that go with it. Nothing
+here has been booted on the SL7 yet. Measure with `sl7-sleepstats` (package
+omarchy-surface-sl7; not yet packaged) before and after.
+
+Baseline on 7.2.8-4: suspend (`PM: suspend entry (deep)`, 8 h 25 min) drew
+about 0.8 to 0.9 W; Linux idle is about 5 W; `cxsd` and `ddr` never counted.
+On the only other X1E machine measured with this stack (Dell Inspiron 7441,
+omarchy discussion 12441) suspend stayed at 0.93 W overnight and `cxsd` stayed
+at 0 even with `domain_ss3` entered, so treat a watt gain as unproven.
+
+All patches are GPL-2.0 and carry the upstream author, `Signed-off-by` chain,
+a `commit <sha> upstream.` line and `Origin:`/`Upstream-Status:` headers. Rework
+is limited to the items marked below.
+
+### 7.3 PDC pass-through and deepest idle state (Maulik Shah)
+
+Series "x1e80100: Enable PDC wake GPIOs and deepest idle state"
+(`20260707-hamoa_pdc_v3-v4`, DT patch v5). The DT patch (0052) must never be
+carried without 0045-0051: it lets the SoC enter a state in which the GIC is
+powered down, so GPIO wakeups have to be routed through the PDC first.
+
+| # | Subject | Upstream SHA | Tree |
+|---|---|---|---|
+| 0045 | irqchip/qcom-pdc: Restructure version support | `83e089ef0d4e` | torvalds, v7.3-rc1 |
+| 0046 | irqchip/qcom-pdc: Move all static variables to struct pdc_desc | `60caa95aa14a` | torvalds, v7.3-rc1 |
+| 0047 | irqchip/qcom-pdc: Differentiate between direct SPI and GPIO as SPI | `45af2d61edf6` | torvalds, v7.3-rc1 |
+| 0048 | irqchip/qcom-pdc: Configure PDC to pass through mode | `ad01c2b2f291` | torvalds, v7.3-rc1 |
+| 0049 | irqchip/qcom-pdc: Fix kernel doc for qcom_pdc_gic_secondary_set_type() | `d307a7e7d939` | torvalds, v7.3-rc1 |
+| 0050 | pinctrl: qcom: Acknowledge IRQs for PDC interrupt controller | `f790ea0b699d` | torvalds, v7.3-rc1 |
+| 0051 | Revert "pinctrl: qcom: x1e80100: Bypass PDC wakeup parent for now" | `77fbc756d9cb` | torvalds, v7.3-rc1 |
+| 0052 | arm64: dts: qcom: x1e80100: Add deepest idle state (`domain_ss3`; cluster_cl5 latencies 2000/2000 us) | `95f827ceb21e` | torvalds, v7.3-rc1 |
+
+0052 changes `hamoa.dtsi`, which `x1e80100.dtsi` and both romulus DTBs include;
+the built `x1e80100-microsoft-romulus13.dtb` and `romulus15.dtb` contain
+`domain_ss3` (`arm,psci-suspend-param = <0x0200c354>`, 2500/2500/9000 us) and
+`power-domain-system` lists it in `domain-idle-states`. The series applies
+unchanged on 7.2.8. Not carried: `c39df6b350ef` (x1e80100: reduce the OS PDC
+DRV span to 0x10000, a size trim that the driver does not depend on).
+
+### 7.4 pmdomain and cpuidle-psci (Ulf Hansson, Maulik Shah)
+
+PSCI OS-initiated PM domains start powered off with `GENPD_FLAG_POWER_UNKNOWN`,
+so cores that never come online no longer pin their cluster and the system
+domain. Pinned to ulfh/linux-pm `next` (identical SHAs in linux-next), not yet
+in a tag.
+
+| # | Subject | SHA | Tree |
+|---|---|---|---|
+| 0053 | pmdomain: core: Rename genpd_status_on() | `81f1099186fd` | ulfh/linux-pm next |
+| 0054 | pmdomain: core: Allow a non-CPU device in a CPU PM domain to do power on | `9e8dff8e0978` | ulfh/linux-pm next |
+| 0055 | pmdomain: core: Add a genpd config to support unknown initial status | `2224d686e788` | ulfh/linux-pm next |
+| 0056 | cpuidle: psci: Initialize the PM domains in powered off state for OSI | `6d3080bfe007` | ulfh/linux-pm next |
+| 0057 | cpuidle: psci: Move initialization a bit earlier in the boot sequence | `65705b18162b` | ulfh/linux-pm next |
+| 0058 | pmdomain: core: Fall back to node name for idle states | `46ff460038d6` | ulfh/linux-pm next |
+
+### Suspend fixes (Abel Vesa, Linaro)
+
+Both defer a Type-C worker to `system_freezable_wq` so it cannot touch the
+PS8830 retimer over I2C while the I2C controller is suspended.
+
+| # | Subject | SHA | Tree |
+|---|---|---|---|
+| 0059 | soc: qcom: pmic_glink: Fix device access from worker during suspend | `7d0767c5cd87` | qcom drivers-for-7.4 (linux-next) |
+| 0060 | usb: typec: ucsi: Schedule connector worker on freezable workqueue | none (RFC, not merged) | lore `20250205-ucsi-schedule-conn-worker-on-freezable-wq-v1-1-107d1356b77b@linaro.org` |
+
+0060 is the posted one-line RFC, rebased onto 7.2.8 by us (the Linaro tree
+commit `4622de89` and linux-msm `7106d100ce` named in discussion 12441 were not
+independently checked). In 12441 these two fixes were first blamed for doubling
+suspend drain; that was a fan artefact, the retest showed 0.916 W against
+0.926 W.
+
+### QREF and refgen supplies for the TCSR clock controller (Qiang Yu)
+
+Lets the kernel manage the QREF/refgen LDOs instead of leaving them as the
+firmware set them. Upstream this is the same change Ubuntu's X1 kernel
+carries. Expect no measurable power change (the LDOs are shared).
+
+| # | Subject | SHA | Tree |
+|---|---|---|---|
+| 0061 | clk: qcom: Add generic clkref_en support | `22c70e573200` | torvalds, v7.3-rc1 |
+| 0062 | dt-bindings: clock: qcom: Move x1e80100 TCSR to own binding | `fcbd3151c9be` | qcom clk-for-7.4 (linux-next); reworked |
+| 0063 | clk: qcom: tcsrcc-x1e80100: Migrate to clk_ref helper | `011ed2a61f44` | qcom clk-for-7.4 (linux-next) |
+| 0064 | arm64: dts: qcom: hamoa/purwa: Add QREF regulator supplies | `d9d07e230c45` | qcom arm64-for-7.4 (linux-next); reworked |
+
+Rework: 0062's `qcom,sm8550-tcsr.yaml` hunk is rebased (on 7.2.8 the x1e80100
+compatible still sits in the single enum); 0064 keeps only the
+`x1e80100-microsoft-romulus.dtsi` hunk, because the other 18 board files do not
+exist in 7.2.8 or are not SL7 hardware. All 18 supplies in the romulus hunk
+match the binding.
+
+### Other 7.4 queue
+
+| # | Subject | SHA | Tree |
+|---|---|---|---|
+| 0065 | soc: qcom: pmic_glink: Avoid losing early rpmsg probe | `1517efff0e9d` | qcom drivers-for-7.4 (linux-next) |
+
+Without it a pmic_glink rpmsg endpoint that appears before the platform device
+has probed is dropped, and the battery manager and Type-C never come up.
+
+### Already in 7.2.8, not carried
+
+`rpmsg: glink: smem: order FIFO read after availability check` (`786439ad5876`)
+and `PM: sleep: Unblock runtime PM when device prepare fails` (`cb258d651d74`)
+are in the 7.2.8 stable patch, as is the `d9108bfdb746` drm/msm a6xx GMU RPMh
+stop fix (checked in the patched 7.2.8 tree: the patches were found already
+applied).
+
+### Not carried, with reasons
+
+| Item | Reason |
+|---|---|
+| EC standby notification (register `0xB9`) | Dell-only. It is the Qualcomm "Fan EC Interface" (`QCOM0D05`, I2C 0x3b) that Dell's `_DSM` pokes. The SL7 DSDT has no such device and its Modern Standby `_DSM` (UUID `11e00d56`, functions 3 to 8) only writes an `MSBN` record into the ABD region. The SL7's EC is the Surface Aggregator Module, and 7.2.8 `ssam_serial_hub_pm_*` already sends display-off (prepare), D0-exit (suspend), D0-entry (resume) and display-on (complete). |
+| gcc-x1e80100 "Tie the CX power domain to controller" (`965dd2be7d35`) | Inert here: only `.use_rpm = true`, and no x1e80100 GCC `power-domains` DT or binding change is queued. A possible later experiment, not made without evidence. |
+| interconnect "implement get_bw with rpmh_read" (`11a44c6087c6`) | Changes the boot-time vote state of every RPMh interconnect; X1E already hard-resets under bus starvation (see the QoS revert below). Needs on-device validation first. |
+| `serial: qcom-geni: add force suspend/resume to system sleep callbacks` (`d0cd9c8d0fd5`) | Touches the UART resume path and sits in a churning series (nbcon conversion, revert, three fixes). It arrives with 7.3 anyway. |
+| `ucsi: allow retries of ucsi_resume_work` (`a2463e239443`) | Only for drivers that call `ucsi_resume()`; `ucsi_glink` does not. |
+| `pmdomain: qcom: rpmhpd: Skip retention by default` (`7178817f1904`) | No power evidence; changes every rpmhpd consumer; in 7.3. |
+| ASPM/L1ss series, `PCI: Add support for PCIe WAKE# interrupt`, ath12k ASPM API conversion | Large, touches resume paths; L1ss is already enabled at both ends of the NVMe link on this platform. |
+| drm/msm a6xx "Fix RPMH dependency votes" series (`eab0aff8965e`...) | Changes GPU voltage votes, not suspend or idle power. |
+| interconnect x1e80100 QoS enable (`5a8b2cc36e79`) and DT clocks (`f49d819c8987`) | Not in 7.2.8; it was reverted upstream (`2cc67425a97e`, hard resets on Hamoa). Check that the 7.3 rebase target includes the revert. |
+
+### Risks
+
+- Resume: the stack changes which low power state the cores and the system
+  domain request in suspend. ELLX's 7.3-rc3 broke resume on the SL7, and
+  7.3-rc4 mainline suspended worse than 7.2.6 on the Dell (that run was later
+  found to be fan-driven). The resume-sensitive pieces are 0048 (PDC mode
+  switched via SCM), 0051 (GPIO wake routing back through the PDC), 0052 and
+  0056.
+- `cluster_cl5` (cluster power-off) is requested far more often once 0056 lands.
+  The Dell owner removed it from the cluster domains because of the X1 DC ZVA
+  reset erratum (laptops-kernel `5c3cf1033d`). If the SL7 resets under load or
+  at idle, that is the first suspect.
+- 0060 is an unmerged RFC.
+- 0057 moves cpuidle-psci to `subsys_initcall`; the Dell owner saw a one-off
+  CDSP `timeout waiting for subsystem event response` at boot with the pmdomain
+  backport.
+
+### Rebase onto 7.3
+
+When 7.3 is tagged, drop 0045-0052 and 0061, and also 0053-0058, 0059, 0062-0065
+only if they are in the tag (check with `git merge-base --is-ancestor`; they are
+7.4-queued). Re-run `scripts/fast-check.sh`.
+
+Diagnostic: `sl7-sleepstats` (pkgs/omarchy-surface-sl7, not in the PKGBUILD yet)
+prints the qcom_stats counters, `power-domain-system` residency (S0 is
+`domain_ss3`) and cpuidle totals; `--suspend-test` runs a measured suspend.
+
 ## Build
 
 ### Quick validation (any machine, about 1 to 2 minutes)
