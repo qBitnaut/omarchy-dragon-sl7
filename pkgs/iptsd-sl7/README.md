@@ -148,6 +148,26 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
   so it fires even if the sensor sends no frames. Pausing mid-drag with a light touch (bit
   released, finger still) releases after `DragReleaseStillMs`: raise it, or set it to 0, if that
   bites.
+- `0006-daemon-drag-fast-motion-relatch.patch` (applied in `prepare()`, after 0005): fixes
+  the latch breaking when dragging fast, and adds `[Touchpad] DragRelatchMs` (default 400;
+  0 = off). Causes at speed: the tracker re-indexes a contact that moves more than 0.15
+  (normalized) per frame, which `LiftGraceMs` (5 mm) cannot bridge, so the drag contact
+  vanished and ended the latch; a smeared fast blob failing the size / aspect check
+  (`DisableOnPalm`) ended it too; an unstable frame (`PositionThresholdMax`) skipped the
+  singletouch contact, which read as a lift (BTN_TOUCH and tool off, BTN_LEFT too before the
+  latch engaged); a transient split contact next to the finger counted as a second mover and
+  fired the scroll cancel; the bit could drop before `DragStartMm` was reached. Now the latch
+  follows the drag by the real contact nearest its last position (25 mm plus 3 times its last
+  step, max 60 mm), rides out 100 ms of invalid frames, keeps the singletouch contact down over
+  unstable frames, counts only contacts present for 60 ms as movers, and latches on a bit drop
+  while the only contact moved 1 mm in the last frame. An unstable frame restarts the stillness
+  timer (never counts as still). `DragRelatchMs`: when the drag finger lifts and no other
+  contact is left (a selection reaching the pad edge), BTN_LEFT stays held that long; one new
+  contact landing in the window continues the same drag (no release or press) under the same
+  stillness rule, two contacts landing end it, and so does the timeout (it also fires without
+  frames). Trade-off: after a real drag ends by lifting, the drop is delayed by `DragRelatchMs`
+  (plus up to `LiftGraceMs`); a plain click is not delayed. If the delay bothers you, lower it
+  or set 0.
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset

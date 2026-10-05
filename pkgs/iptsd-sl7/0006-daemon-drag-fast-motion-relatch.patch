@@ -1,0 +1,595 @@
+daemon: Keep a latched drag alive through fast motion, re-latch after a lift
+
+Chris: click-and-drag broke more the faster he dragged. Causes found in the
+pkgrel 12 latch, all only reachable at speed:
+
+ - The contact tracker hands out a new index when a contact moves farther than
+   0.15 (normalized) between frames, and the 5 mm LiftGraceMs match cannot
+   bridge that either. The drag contact then vanished from the contact list
+   (held for LiftGraceMs, then gone) and the latch ended the drag. The latch now
+   follows the drag by the real contact nearest to its last position, within
+   25 mm plus 3 times its last step (up to 60 mm), and ends only when no such
+   contact is left after the grace.
+ - A fast finger smears into a blob that fails the size / aspect check for a
+   frame or two (DisableOnPalm): update() ended the drag and lifted everything.
+   A latched drag now rides out 100 ms of invalid frames.
+ - An unstable frame (PositionThresholdMax) skipped the singletouch contact,
+   which read as a lift: BTN_TOUCH and the tool off for a frame, and BTN_LEFT
+   cleared too when no drag was latched yet. The selected contact now stays
+   down while it is skipped.
+ - The scroll cancel counted any second moving contact, so a transient split of
+   a fast blob cancelled the drag. Only contacts that were present for 60 ms
+   count as movers now (for the cancel and for starting the latch).
+ - At speed the bit can drop before the contact moved DragStartMm. A release
+   while the only contact moved 1 mm in the last frame now latches the drag
+   instead of releasing the button.
+
+Unstable frames never count as still for DragReleaseStillMs (they restart the
+stillness timer, which is the safe direction).
+
+New [Touchpad] DragRelatchMs (default 400, 0 disables): when the dragging
+contact lifts with no other contact left (a selection reaching the pad edge),
+the button stays held for this long. One new contact landing in that time
+continues the same drag without a release or press, and is still subject to the
+stillness rule and to lifting again. Two contacts landing (a scroll), or
+nothing landing in time, release it. A drag that never moved DragStartMm, and a
+plain click, still release at once. The runner timeout covers the window. Trade
+off: after a real drag ends by lifting the finger, the drop is delayed by
+DragRelatchMs (plus up to LiftGraceMs).
+
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -100,6 +100,14 @@
+ ##
+ # DragReleaseStillMs = 300
+ 
++##
++## How long (in milliseconds) a latched drag keeps the button held after its finger lifted
++## (for example at the edge of the pad), waiting for a single new contact to continue it.
++## Two contacts landing, or nothing landing in time, release the button. A drag that ends
++## with a lift is therefore released this much later. 0 releases at once. (Default 400)
++##
++# DragRelatchMs = 400
++
+ [Contacts]
+ ##
+ ## How the neutral value of the heatmap will be determined.
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -47,6 +47,27 @@
+ 	// A latched drag counts as still while no contact moves this far (mm).
+ 	constexpr static f64 DRAG_STILL_MM = 0.5;
+ 
++	// A latched drag follows its contact to the nearest contact within this radius (mm) when
++	// the tracker hands out a new index (fast motion), plus DRAG_FOLLOW_STEPS times the
++	// distance the contact moved in the last frame, up to DRAG_FOLLOW_MAX_MM.
++	constexpr static f64 DRAG_FOLLOW_MM = 25.0;
++	constexpr static f64 DRAG_FOLLOW_STEPS = 3.0;
++	constexpr static f64 DRAG_FOLLOW_MAX_MM = 60.0;
++
++	// If the button bit drops while the only contact moved this far (mm) in the last frame,
++	// that is a fast drag: latch it at once instead of releasing the button.
++	constexpr static f64 DRAG_SPEED_LATCH_MM = 1.0;
++
++	// A latched drag survives frames with an invalid contact (palm check) for this long (ms).
++	constexpr static f64 DRAG_BLOCK_GRACE_MS = 100.0;
++
++	// A contact must be present this long (ms) to count as a second mover (scroll cancel).
++	// Shorter lived contacts are transient splits of a fast moving blob.
++	constexpr static f64 MOVER_MIN_AGE_MS = 60.0;
++
++	// A second contact within this time (ms) of a drag resuming after a lift ends the drag.
++	constexpr static f64 DRAG_RESUME_SETTLE_MS = 150.0;
++
+ private:
+ 	std::shared_ptr<UinputDevice> m_uinput = std::make_shared<UinputDevice>();
+ 
+@@ -139,9 +160,46 @@
+ 	// Whether a drag is latched: firmware releases of the button bit are ignored.
+ 	bool m_drag_latched = false;
+ 
+-	// The index of the contact that started the latched drag.
++	// The index of the contact that is dragging. Follows the contact over index changes.
+ 	usize m_drag_index = 0;
+ 
++	// Time (ms) a latched drag waits for a new contact after its contacts lifted. 0 disables.
++	f64 m_drag_relatch_ms = 0;
++
++	// Whether the drag contact lifted and the latched drag waits for a new one.
++	bool m_drag_waiting = false;
++
++	// Since when the latched drag waits.
++	std::chrono::steady_clock::time_point m_drag_wait_since {};
++
++	// When the drag last resumed on a new contact.
++	std::chrono::steady_clock::time_point m_drag_resume_time {};
++
++	// The last known position (mm) of the drag contact.
++	Vector2<f64> m_drag_pos = Vector2<f64>::Zero();
++
++	// Where the drag started (mm).
++	Vector2<f64> m_drag_origin = Vector2<f64>::Zero();
++
++	// Whether the drag contact moved DragStartMm away from where the drag started.
++	bool m_drag_traveled = false;
++
++	// How far (mm) the drag contact moved in the last frame.
++	f64 m_drag_step_mm = 0;
++
++	// Whether frames with an invalid contact are being tolerated, and since when.
++	bool m_drag_blocked = false;
++	std::chrono::steady_clock::time_point m_drag_block_since {};
++
++	// How far (mm) the fastest contact moved in the last frame.
++	f64 m_step_mm = 0;
++
++	// Whether the last frame had an unstable contact.
++	bool m_unstable = false;
++
++	// When the contacts (by effective index) were first seen.
++	std::map<usize, std::chrono::steady_clock::time_point> m_first_seen {};
++
+ 	// The raw state of the firmware button bit, as last reported.
+ 	bool m_fw_button = false;
+ 
+@@ -200,6 +258,7 @@
+ 			m_lift_grace_ms = config.touchpad_lift_grace_ms;
+ 			m_drag_start_mm = config.touchpad_drag_start_mm;
+ 			m_drag_release_still_ms = config.touchpad_drag_release_still_ms;
++			m_drag_relatch_ms = config.touchpad_drag_relatch_ms;
+ 		} else {
+ 			m_uinput->set_propbit(INPUT_PROP_DIRECT);
+ 
+@@ -253,10 +312,15 @@
+ 		m_blocked = this->is_blocked(contacts);
+ 
+ 		if (m_blocked) {
+-			this->end_drag();
++			// A fast moving finger can smear into a blob that fails the size / aspect
++			// checks for a frame or two. A latched drag rides that out, a palm does not.
++			if (!this->drag_block_tolerated())
++				this->end_drag();
++
+ 			this->reset_bridge();
+ 			this->lift_all();
+ 		} else {
++			m_drag_blocked = false;
+ 			this->process(contacts);
+ 		}
+ 
+@@ -278,8 +342,9 @@
+ 	[[nodiscard]] i32 timeout_ms() const
+ 	{
+ 		const bool drag = this->drag_timer_active();
++		const bool wait = m_drag_latched && m_drag_waiting;
+ 
+-		if (m_ghosts.empty() && !drag)
++		if (m_ghosts.empty() && !drag && !wait)
+ 			return -1;
+ 
+ 		const auto now = std::chrono::steady_clock::now();
+@@ -302,6 +367,13 @@
+ 			remaining = std::min(remaining, m_drag_release_still_ms - still);
+ 		}
+ 
++		if (wait) {
++			const f64 waited =
++				std::chrono::duration<f64, std::milli>(now - m_drag_wait_since).count();
++
++			remaining = std::min(remaining, m_drag_relatch_ms - waited);
++		}
++
+ 		// +1: a contact is released once it was gone for more than the grace time.
+ 		return casts::to<i32>(std::max(0.0, std::ceil(remaining)) + 1);
+ 	}
+@@ -313,7 +385,7 @@
+ 	 */
+ 	void expire()
+ 	{
+-		if (m_ghosts.empty() && !this->drag_timer_active())
++		if (m_ghosts.empty() && !this->drag_timer_active() && !(m_drag_latched && m_drag_waiting))
+ 			return;
+ 
+ 		// Re-run the last frame: the real contacts stay as they are, expired ghosts lift.
+@@ -356,6 +428,10 @@
+ 
+ 		// Release: immediate, and cancels a press that has not been confirmed yet.
+ 		if (!button.active) {
++			// Unless the only contact is moving fast: that is a drag that lost its pressure.
++			if (this->latch_on_release())
++				return;
++
+ 			m_button_pending = false;
+ 			m_button_suppressed = false;
+ 			m_button_anchor.clear();
+@@ -435,9 +511,11 @@
+ 		this->reset_bridge();
+ 		m_positions.clear();
+ 		m_button_anchor.clear();
++		m_first_seen.clear();
+ 		m_button_pending = false;
+ 		m_button_suppressed = false;
+ 		m_blocked = false;
++		m_drag_blocked = false;
+ 	}
+ 
+ 	/*!
+@@ -660,23 +738,69 @@
+ 	 */
+ 	void track_positions(const std::vector<contacts::Contact<f64>> &contacts)
+ 	{
++		const std::map<usize, Vector2<f64>> previous = m_positions;
++
+ 		m_positions.clear();
++		m_step_mm = 0;
++		m_unstable = false;
+ 
+-		if (m_blocked)
++		if (m_blocked) {
++			m_first_seen.clear();
+ 			return;
++		}
++
++		const auto now = std::chrono::steady_clock::now();
+ 
+ 		for (const contacts::Contact<f64> &contact : contacts) {
+ 			if (!contact.index.has_value() || !contact.valid.value_or(true))
+ 				continue;
+ 
+-			m_positions[contact.index.value()] = Vector2<f64> {
++			const usize index = contact.index.value();
++
++			const Vector2<f64> position {
+ 				contact.mean.x() * m_config.width * 10,
+ 				contact.mean.y() * m_config.height * 10,
+ 			};
++
++			m_positions[index] = position;
++			m_first_seen.emplace(index, now);
++
++			// Unstable (too fast) frames still carry the real position: they count as motion.
++			if (!contact.stable.value_or(true))
++				m_unstable = true;
++
++			const auto last = previous.find(index);
++
++			if (last != previous.cend())
++				m_step_mm = std::max(m_step_mm, (position - last->second).norm());
++		}
++
++		for (auto it = m_first_seen.begin(); it != m_first_seen.end();) {
++			if (m_positions.count(it->first) == 0)
++				it = m_first_seen.erase(it);
++			else
++				++it;
+ 		}
+ 	}
+ 
+ 	/*!
++	 * Whether a contact has been there long enough to count as a second mover.
++	 */
++	[[nodiscard]] bool mature(const usize index) const
++	{
++		const auto seen = m_first_seen.find(index);
++
++		if (seen == m_first_seen.cend())
++			return false;
++
++		const f64 age = std::chrono::duration<f64, std::milli>(
++					std::chrono::steady_clock::now() - seen->second)
++					.count();
++
++		return age >= MOVER_MIN_AGE_MS;
++	}
++
++	/*!
+ 	 * Largest distance (mm) any contact moved away from the button anchor.
+ 	 *
+ 	 * @return nothing if the set of contacts differs from the one in the anchor.
+@@ -701,9 +825,12 @@
+ 	}
+ 
+ 	// How many contacts moved away from the button anchor, and the last one that did.
++	// Mature movers are the ones that were there for MOVER_MIN_AGE_MS already.
+ 	struct Motion {
+ 		usize movers = 0;
+ 		usize index = 0;
++		usize mature_movers = 0;
++		usize mature_index = 0;
+ 	};
+ 
+ 	/*!
+@@ -729,6 +856,12 @@
+ 
+ 			motion.movers++;
+ 			motion.index = index;
++
++			if (!this->mature(index))
++				continue;
++
++			motion.mature_movers++;
++			motion.mature_index = index;
+ 		}
+ 
+ 		return motion;
+@@ -759,9 +892,11 @@
+ 			if (!motion.has_value()) {
+ 				// A contact came or went, measure from here on.
+ 				m_button_anchor = m_positions;
+-			} else if (motion->movers >= 2) {
++			} else if (motion->mature_movers >= 2) {
+ 				// Only one moving contact is a drag, a resting thumb does not matter.
++				// Short lived contacts (split blobs of a fast finger) are not movers.
+ 				m_drag_latched = false;
++				m_drag_waiting = false;
+ 				m_button_suppressed = true;
+ 				this->emit_button(false);
+ 			}
+@@ -790,18 +925,54 @@
+ 				return;
+ 			}
+ 
+-			// Two or more moving contacts are a scroll, not a drag.
+-			if (motion->movers != 1)
++			// Two or more moving contacts are a scroll, not a drag. A short lived one
++			// next to the finger is not.
++			if (motion->movers == 0 || (motion->movers >= 2 && motion->mature_movers != 1))
+ 				return;
+ 
+-			m_drag_latched = true;
+-			m_drag_index = motion->index;
+-			m_drag_still_anchor = m_positions;
+-			m_drag_still_since = std::chrono::steady_clock::now();
++			const usize index = motion->movers == 1 ? motion->index : motion->mature_index;
++
++			this->start_drag(index, true);
+ 			return;
+ 		}
+ 
+-		if (!m_button_state || m_current.empty() || m_positions.count(m_drag_index) == 0) {
++		// Frames with an invalid contact are tolerated for a while by update().
++		if (m_blocked)
++			return;
++
++		if (!m_button_state) {
++			this->end_drag();
++			return;
++		}
++
++		const auto now = std::chrono::steady_clock::now();
++
++		if (m_drag_waiting) {
++			this->track_drag_wait(now);
++			return;
++		}
++
++		if (!this->follow_drag_contact()) {
++			// The drag contact lifted. After a real drag, and with no other contact left,
++			// wait for the finger to come back (the pad edge), else release.
++			if (m_drag_relatch_ms > 0 && m_drag_traveled && m_positions.empty()) {
++				m_drag_waiting = true;
++				m_drag_wait_since = now;
++			} else {
++				this->end_drag();
++			}
++
++			return;
++		}
++
++		if (!m_drag_traveled && (m_drag_pos - m_drag_origin).norm() >= m_drag_start_mm)
++			m_drag_traveled = true;
++
++		// Two fingers landing right after a lift is a scroll, not a drag.
++		const f64 resumed =
++			std::chrono::duration<f64, std::milli>(now - m_drag_resume_time).count();
++
++		if (m_positions.size() >= 2 && resumed < DRAG_RESUME_SETTLE_MS) {
+ 			this->end_drag();
+ 			return;
+ 		}
+@@ -809,10 +980,10 @@
+ 		if (!this->drag_timer_active())
+ 			return;
+ 
+-		const auto now = std::chrono::steady_clock::now();
+ 		const std::optional<f64> d = this->still_displacement();
+ 
+-		if (!d.has_value() || d.value() >= DRAG_STILL_MM) {
++		// An unstable (too fast) frame is motion, never stillness.
++		if (m_unstable || !d.has_value() || d.value() >= DRAG_STILL_MM) {
+ 			m_drag_still_anchor = m_positions;
+ 			m_drag_still_since = now;
+ 			return;
+@@ -826,11 +997,145 @@
+ 	}
+ 
+ 	/*!
++	 * Latches a drag on the contact with the given index.
++	 *
++	 * @param[in] index The index of the contact that drags.
++	 * @param[in] traveled Whether the contact already moved far enough to count as a drag.
++	 */
++	void start_drag(const usize index, const bool traveled)
++	{
++		m_drag_latched = true;
++		m_drag_waiting = false;
++		m_drag_index = index;
++		m_drag_pos = m_positions.at(index);
++		m_drag_origin = m_drag_pos;
++		m_drag_traveled = traveled;
++		m_drag_step_mm = 0;
++		m_drag_still_anchor = m_positions;
++		m_drag_still_since = std::chrono::steady_clock::now();
++	}
++
++	/*!
++	 * Latches a drag when the button bit drops while the only contact moves fast.
++	 *
++	 * At speed the bit can drop before the contact moved DragStartMm.
++	 *
++	 * @return true if the release was absorbed.
++	 */
++	bool latch_on_release()
++	{
++		if (m_drag_start_mm <= 0 || !m_button_state || m_drag_latched)
++			return false;
++
++		if (m_positions.size() != 1 || m_step_mm < DRAG_SPEED_LATCH_MM)
++			return false;
++
++		this->start_drag(m_positions.cbegin()->first, false);
++		return true;
++	}
++
++	/*!
++	 * Follows the drag contact: by its index, or if the tracker gave it another one (a fast
++	 * contact jumps farther than the tracker or the lift grace match), by the real contact
++	 * nearest to its last position within a radius that grows with its speed.
++	 *
++	 * @return false if the drag contact is gone.
++	 */
++	[[nodiscard]] bool follow_drag_contact()
++	{
++		const auto same = m_positions.find(m_drag_index);
++
++		if (same != m_positions.cend() && m_ghosts.count(m_drag_index) == 0) {
++			m_drag_step_mm = (same->second - m_drag_pos).norm();
++			m_drag_pos = same->second;
++			return true;
++		}
++
++		const f64 radius = std::min(DRAG_FOLLOW_MAX_MM,
++		                            DRAG_FOLLOW_MM + DRAG_FOLLOW_STEPS * m_drag_step_mm);
++
++		auto best = m_positions.cend();
++		f64 best_distance = radius;
++
++		for (auto it = m_positions.cbegin(); it != m_positions.cend(); ++it) {
++			// Held contacts are the ones that vanished.
++			if (m_ghosts.count(it->first) != 0)
++				continue;
++
++			const f64 d = (it->second - m_drag_pos).norm();
++
++			if (d <= best_distance) {
++				best = it;
++				best_distance = d;
++			}
++		}
++
++		if (best != m_positions.cend()) {
++			m_drag_index = best->first;
++			m_drag_step_mm = best_distance;
++			m_drag_pos = best->second;
++			return true;
++		}
++
++		// Held for LiftGraceMs: a short dropout, not a lift yet.
++		return same != m_positions.cend();
++	}
++
++	/*!
++	 * The drag contact lifted: continue the drag on a new single contact, or release.
++	 */
++	void track_drag_wait(const std::chrono::steady_clock::time_point now)
++	{
++		if (m_positions.size() >= 2) {
++			this->end_drag();
++			return;
++		}
++
++		if (m_positions.size() == 1) {
++			m_drag_waiting = false;
++			m_drag_resume_time = now;
++			m_drag_index = m_positions.cbegin()->first;
++			m_drag_pos = m_positions.cbegin()->second;
++			m_drag_step_mm = 0;
++			m_drag_still_anchor = m_positions;
++			m_drag_still_since = now;
++			return;
++		}
++
++		const f64 waited =
++			std::chrono::duration<f64, std::milli>(now - m_drag_wait_since).count();
++
++		if (waited >= m_drag_relatch_ms)
++			this->end_drag();
++	}
++
++	/*!
++	 * Whether a latched drag outlasts a frame with an invalid contact.
++	 */
++	[[nodiscard]] bool drag_block_tolerated()
++	{
++		if (!m_drag_latched)
++			return false;
++
++		const auto now = std::chrono::steady_clock::now();
++
++		if (!m_drag_blocked) {
++			m_drag_blocked = true;
++			m_drag_block_since = now;
++		}
++
++		const f64 blocked =
++			std::chrono::duration<f64, std::milli>(now - m_drag_block_since).count();
++
++		return blocked <= DRAG_BLOCK_GRACE_MS;
++	}
++
++	/*!
+ 	 * Whether a latched drag waits for the contacts to stay still.
+ 	 */
+ 	[[nodiscard]] bool drag_timer_active() const
+ 	{
+-		return m_drag_latched && !m_fw_button && m_drag_release_still_ms > 0;
++		return m_drag_latched && !m_drag_waiting && !m_fw_button && m_drag_release_still_ms > 0;
+ 	}
+ 
+ 	/*!
+@@ -842,6 +1147,8 @@
+ 			return;
+ 
+ 		m_drag_latched = false;
++		m_drag_waiting = false;
++		m_drag_blocked = false;
+ 		m_button_pending = false;
+ 		m_button_anchor.clear();
+ 
+@@ -941,9 +1248,14 @@
+ 
+ 			const usize index = contact.index.value();
+ 
+-			// Ignore unstable changes
+-			if (!contact.stable.value_or(true))
++			// Ignore unstable changes. The selected singletouch contact stays down though:
++			// skipping it must not read as a lift (BTN_TOUCH / tool off, and BTN_LEFT).
++			if (!contact.stable.value_or(true)) {
++				if (m_single_index == index)
++					reset_singletouch = false;
++
+ 				continue;
++			}
+ 
+ 			// Check if the contact is too far outside of the screen.
+ 			bool lift = !contact.valid.value_or(true);
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -40,6 +40,7 @@
+ 	f64 touchpad_lift_grace_ms = 30;
+ 	f64 touchpad_drag_start_mm = 1.5;
+ 	f64 touchpad_drag_release_still_ms = 300;
++	f64 touchpad_drag_relatch_ms = 400;
+ 
+ 	// [Contacts]
+ 	std::string contacts_neutral = "mode";
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -166,6 +166,7 @@
+ 		this->get(ini, "Touchpad", "LiftGraceMs", m_config.touchpad_lift_grace_ms);
+ 		this->get(ini, "Touchpad", "DragStartMm", m_config.touchpad_drag_start_mm);
+ 		this->get(ini, "Touchpad", "DragReleaseStillMs", m_config.touchpad_drag_release_still_ms);
++		this->get(ini, "Touchpad", "DragRelatchMs", m_config.touchpad_drag_relatch_ms);
+ 
+ 		this->get(ini, "Contacts", "Neutral", m_config.contacts_neutral);
+ 		this->get(ini, "Contacts", "NeutralValue", m_config.contacts_neutral_value);
