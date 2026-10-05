@@ -25,7 +25,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 5 | factory Wi-Fi/BT MAC | `/usr/bin/sl7-mac`, `sl7-wifi-mac.service`, `sl7-bt-mac.service`, `99-sl7-bt-mac.rules` |
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
-| 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest` |
+| 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
 | 8d | optional kernel test boot entries, PSR (known broken), VRR (experimental) and the IR emitter test boot (`ir-test`), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | IR emitter load gate and the disabled Stage B channel test tool (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
@@ -468,6 +468,66 @@ that is why the baseline sets `ENABLE=no` first. The user part also holds 60 Hz:
 "before" run at 120 Hz, `systemctl --user stop omarchy-sl7-powermode` as well and run
 `omarchy-sl7-powermode ac`.
 
+### 12d. Live power rails: `sl7-powermeter`
+
+Needs linux-sl7 7.2.8-12 or newer. Runs as your user, no root, and only reads the hwmon device
+`qcom_pld_power`: a read-only view of the SoC firmware's power ring (the region Windows feeds to
+its Energy Meter). The kernel driver is ItsLucas's, carried as linux-sl7 patches 0082 and 0083
+(see the linux-sl7 README).
+
+```
+sl7-powermeter                               # live view, refreshed every second like watch
+sl7-powermeter --once                        # one snapshot
+sl7-powermeter --log idle-a.jsonl --seconds 120 --label a
+sl7-powermeter --log idle-b.jsonl --seconds 120 --label b
+sl7-powermeter --compare idle-a.jsonl idle-b.jsonl
+sl7-powermeter --describe                    # the rails and the accuracy limits
+```
+
+`--log` samples once a second (`-n S`, at least 0.5) and prints mean, standard deviation, min and
+max per rail; `--compare` prints the difference per rail with a noise threshold (twice the standard
+error, floored at 0.01 W) and the configuration differences. It also records the battery gauge's
+`power_now` while on battery, so SYS can be checked against the gauge. A log file is never
+overwritten.
+
+The rails, as the source defines them:
+
+| Rail | What it is |
+|---|---|
+| `CPU_CLUSTER_0`, `_1`, `_2` | CPUs 0-3, 4-7 and 8-11, mapped by affinity loads on a 15 inch X1E-80-100. On an X1P-64-100 cluster 2 should be the 3-core one (unconfirmed) |
+| `GPU` | Adreno GPU. In the Windows metadata; response under a dedicated GPU load not yet validated |
+| `PSU_USB` | Power input side. Semantics unverified; equalled SYS on external power with the battery not charging |
+| `USBC_TOTAL` | USB-C ports total. Semantics unverified |
+| `SYS` | The firmware's system power figure, the nearest thing to a whole-machine number |
+| `CPU_SUM` | Derived by the tool: the three clusters added. Nothing else is summed |
+
+There is no DDR, CX or MX rail: the ring has exactly these seven channels. SYS overlaps the others
+in unknown ways, so do not add rails to it or to each other.
+
+What the readings mean and how far to trust them:
+
+- The values are the firmware's one-second averages in 10 mW steps (the driver does not expose the
+  firmware's 100 ms ring). Nothing faster than one second is visible, and sampling faster than
+  that only repeats values.
+- Absolute accuracy is not known: it is not established whether the firmware measures the rails or
+  models them, and nobody has compared them with an external meter. Treat them as relative, good
+  for an A/B of a setting in one to two minutes, and calibrate SYS against the gauge on battery.
+- In the source's test the one-second values matched its 100 ms ring to about 0.02 W mean error.
+  Cluster mapping and the SYS = PSU_USB observation come from one 15 inch machine (BIOS 175.235.235);
+  the 13.8 inch is expected to match because the region belongs to the SoC firmware, not the board,
+  but that is unproven until a Romulus13 capture exists.
+- Reads fail with `ENODATA` until the firmware counter advances, for a few seconds after load and
+  after resume, and with `EIO` on a torn read; the tool shows `n/a` or skips those samples. Whether
+  the ring is populated on a cold Linux-only boot is unknown.
+
+Next to the battery gauge (`sl7-powertest`): the two are independent readers and can run together.
+The gauge gives watts from the `energy_now` delta over 20 to 30 minutes; the meter gives firmware
+power each second. The loaded driver already refreshes its cache once a second whether or not
+anything reads it, so reading adds nothing there, but a live `sl7-powermeter` wakes a CPU every
+second and can raise an idle reading. For gauge runs use `sl7-powertest idle --rails` instead: it
+adds `rails_w` to each 5 s record and `rails_mean_w` to the summary (shown by `compare`), with no
+extra process. The watts in the summary stay the gauge's.
+
 ### 12c. Finding what blocks SoC sleep: `sl7-sleepstats --trace`
 
 `sudo sl7-sleepstats` prints the `qcom_stats` counters (`cxsd`, `ddr` and `aosd` should count in
@@ -554,6 +614,9 @@ Untested on hardware:
   Omarchy's iwd/NetworkManager MAC settings.
 - The WirePlumber guard script (no SL7 card here; syntax only).
 - The power rule and the opt-in Wi-Fi power save (latency impact unmeasured).
+- `sl7-powermeter` and `sl7-powertest --rails`: syntax-checked only, never run. Not exercised: the hwmon
+  device itself (the kernel patches 0082-0083 are compile-checked only), the live view, `--log` and
+  `--compare` on real data.
 - `omarchy-sl7-powermode`, `sl7-powertest`: logic exercised against fake sysfs trees with
   stubbed `iw`, `hyprctl`, `brightnessctl`, `gdbus` and `mpv` (caps, idempotency, restore,
   display switch and restore, watcher events, gauge sync, Ctrl-C restore, compare). Not run on

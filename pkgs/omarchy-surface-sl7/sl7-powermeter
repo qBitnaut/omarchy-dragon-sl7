@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""Live power meter for the Surface Laptop 7 (qcom_pld_power hwmon).
+
+  sl7-powermeter                          live view, refreshed like watch(1)
+  sl7-powermeter --once                   print one snapshot and exit
+  sl7-powermeter --log FILE --seconds N   record N seconds, print mean/stddev per rail
+  sl7-powermeter --compare A.jsonl B.jsonl
+  sl7-powermeter --describe               what each rail is, and the accuracy limits
+
+Reads the read-only hwmon device `qcom_pld_power` (linux-sl7 patches 0082 and
+0083): the SoC firmware's power ring, one-second averages in 10 mW steps. Needs
+no root. Nothing is written to the hardware; the only file this tool creates is
+the --log file you name.
+
+The rails are CPU_CLUSTER_0..2, GPU, PSU_USB, USBC_TOTAL and SYS. There is no
+DDR, CX or MX rail in this ring. Run --describe for the details. Absolute
+accuracy is not known (the firmware may model rather than measure), so use it
+for A/B comparisons, and cross-check SYS against the battery gauge.
+"""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+HWMON_NAME = "qcom_pld_power"
+MIN_INTERVAL_S = 0.5  # the firmware ring publishes once a second; faster only repeats values
+FIRST_DATA_TIMEOUT_S = 30.0
+RESOLUTION_W = 0.01  # one firmware count
+
+ROOT = os.environ.get("SL7_SYSROOT", "")  # test hook: prefix for /sys, /proc, /run
+
+# label -> (short role, longer note). Source: ItsLucas/surface-laptop-7-ubuntu-kernel
+# PROTOCOL.md and pld-power-validation.md (commit 1cc387f).
+RAILS = {
+    "CPU_CLUSTER_0": ("CPUs 0-3",
+                      "First CPU cluster. Mapped by affinity loads (taskset) on a 15 inch X1E-80-100."),
+    "CPU_CLUSTER_1": ("CPUs 4-7",
+                      "Second CPU cluster, same mapping method."),
+    "CPU_CLUSTER_2": ("CPUs 8-11",
+                      "Third CPU cluster. On an X1P-64-100 (10 cores, two fused) it should be the "
+                      "3-core cluster; not yet confirmed there."),
+    "GPU": ("Adreno GPU",
+            "Named in the Windows Energy Meter metadata. Response under a dedicated GPU load is "
+            "not yet validated."),
+    "PSU_USB": ("power input / USB",
+                "Input side of the power path. Semantics unverified. It equalled SYS on external "
+                "power, not charging (15 inch). Never add it to SYS."),
+    "USBC_TOTAL": ("USB-C ports",
+                   "Total over the USB-C ports. Semantics unverified (battery and USB rail "
+                   "coverage is on the source's still-unverified list)."),
+    "SYS": ("system total",
+            "The firmware's system power figure, the closest thing to a whole-machine number. "
+            "Whether it overlaps the other rails is unknown, so do not sum rails into it."),
+}
+CPU_SUM = "CPU_SUM"  # derived: the three clusters added, nothing else
+
+
+def p(path):
+    return Path(ROOT + path)
+
+
+def read(path, default=None):
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return default
+
+
+def read_int(path):
+    v = read(path)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# --- hwmon ------------------------------------------------------------------------
+
+
+def find_hwmon():
+    for d in sorted(p("/sys/class/hwmon").glob("hwmon*")):
+        if read(d / "name") == HWMON_NAME:
+            return d
+    return None
+
+
+def need_hwmon():
+    hw = find_hwmon()
+    if hw is None:
+        sys.exit(
+            "sl7-powermeter: no hwmon device named %s.\n"
+            "  - kernel must be linux-sl7 7.2.8-12 or newer (CONFIG_SENSORS_QCOM_PLD_POWER=m)\n"
+            "  - check:  lsmod | grep qcom_pld_power ; ls /sys/bus/platform/devices | grep pld\n"
+            "  - load:   sudo modprobe qcom_pld_power ; dmesg | grep -i pld\n"
+            "  The driver refuses to probe unless the firmware region is EFI reserved memory."
+            % HWMON_NAME
+        )
+    return hw
+
+
+def channels(hw):
+    out = []
+    for f in hw.glob("power[0-9]*_label"):
+        n = f.name[len("power"):-len("_label")]
+        if n.isdigit():
+            out.append((int(n), read(f) or "power" + n))
+    return sorted(out)
+
+
+def read_rails(hw, chans):
+    """Watts per label; None where the driver has no fresh data (ENODATA/EIO)."""
+    vals = {}
+    for n, label in chans:
+        try:
+            vals[label] = int((hw / ("power%d_average" % n)).read_text()) / 1e6
+        except (OSError, ValueError):
+            vals[label] = None
+    clusters = [vals.get(k) for k in RAILS if k.startswith("CPU_CLUSTER")]
+    if clusters and all(v is not None for v in clusters):
+        vals[CPU_SUM] = sum(clusters)
+    return vals
+
+
+# --- battery cross-check -------------------------------------------------------------
+
+
+def find_battery():
+    base = p("/sys/class/power_supply")
+    bats = [d for d in sorted(base.glob("*")) if read(d / "type") == "Battery"]
+    scoped = [d for d in bats if read(d / "scope") != "Device"]
+    bats = scoped or bats
+    pref = [d for d in bats if d.name == "qcom-battmgr-bat"]
+    return (pref or bats or [None])[0]
+
+
+def battery_state(bat):
+    """(status, watts) from the battery gauge; watts is |power_now|, a cross-check only."""
+    if bat is None:
+        return None, None
+    pw = read_int(bat / "power_now")
+    return read(bat / "status"), None if pw is None else abs(pw) / 1e6
+
+
+def ac_online():
+    base = p("/sys/class/power_supply")
+    for d in sorted(base.glob("*")):
+        t = read(d / "type") or ""
+        if (t == "Mains" or t.startswith("USB")) and read(d / "online") == "1":
+            return True
+    return False
+
+
+# --- statistics --------------------------------------------------------------------------
+
+
+def mean(vals):
+    return sum(vals) / len(vals) if vals else None
+
+
+def stddev(vals):
+    """Sample standard deviation (n-1); 0 for a single sample."""
+    if len(vals) < 2:
+        return 0.0 if vals else None
+    m = mean(vals)
+    return math.sqrt(sum((v - m) ** 2 for v in vals) / (len(vals) - 1))
+
+
+def rail_stats(samples):
+    """samples: list of {label: watts or None}. Returns {label: {mean, stddev, min, max, n}}."""
+    labels = []
+    for s in samples:
+        for k in s:
+            if k not in labels:
+                labels.append(k)
+    out = {}
+    for k in labels:
+        vals = [s[k] for s in samples if s.get(k) is not None]
+        if vals:
+            out[k] = {"mean": mean(vals), "stddev": stddev(vals), "min": min(vals),
+                      "max": max(vals), "n": len(vals)}
+    return out
+
+
+def ordered(labels):
+    known = [k for k in RAILS if k in labels]
+    rest = sorted(k for k in labels if k not in RAILS and k != CPU_SUM)
+    return known + rest + ([CPU_SUM] if CPU_SUM in labels else [])
+
+
+def fmt_w(v):
+    return "   n/a" if v is None else "%6.2f" % v
+
+
+# --- live view ----------------------------------------------------------------------------
+
+
+def render(hw, vals, bat):
+    lines = ["sl7-powermeter   %s (%s)   %s" % (hw.name, HWMON_NAME, time.strftime("%H:%M:%S")),
+             "firmware one-second averages, 10 mW steps; Ctrl-C to quit", "",
+             "%-14s %7s   %s" % ("rail", "W", "what")]
+    for k in ordered(list(vals)):
+        role = "derived: the three clusters added" if k == CPU_SUM else RAILS.get(k, ("",))[0]
+        lines.append("%-14s %s   %s" % (k, fmt_w(vals[k]), role))
+    if all(v is None for v in vals.values()):
+        lines += ["", "no fresh data yet (ENODATA is normal for a few seconds after load or resume)"]
+    status, watts = battery_state(bat)
+    if status is not None:
+        lines += ["", "battery gauge  %s, power_now %s W (cross-check; the gauge is coarse)"
+                  % (status, "n/a" if watts is None else "%.2f" % watts)]
+    lines.append("power source   %s" % ("external power connected" if ac_online() else "battery"))
+    return "\n".join(lines) + "\n"
+
+
+def cmd_watch(args):
+    hw = need_hwmon()
+    chans = channels(hw)
+    bat = find_battery()
+    tty = sys.stdout.isatty() and not args.once
+    try:
+        while True:
+            frame = render(hw, read_rails(hw, chans), bat)
+            if tty:
+                sys.stdout.write("\x1b[H\x1b[2J" + frame)
+            else:
+                sys.stdout.write(frame + ("" if args.once else "\n"))
+            sys.stdout.flush()
+            if args.once:
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print()
+        return 0
+
+
+# --- logging ----------------------------------------------------------------------------------
+
+
+def config_snapshot():
+    status, _ = battery_state(find_battery())
+    return {
+        "kernel": read(p("/proc/sys/kernel/osrelease")) or os.uname().release,
+        "cmdline": read(p("/proc/cmdline")),
+        "ac_online": ac_online(),
+        "battery_status": status,
+        "powermode": read(p("/run/omarchy-surface-sl7/mode")),
+    }
+
+
+def _term(signum, _frame):
+    raise KeyboardInterrupt
+
+
+def print_stats(title, stats, battery_mean=None):
+    print(title)
+    print("  %-14s %7s %7s %7s %7s %5s" % ("rail", "mean W", "sd W", "min W", "max W", "n"))
+    for k in ordered(list(stats)):
+        s = stats[k]
+        print("  %-14s %7.3f %7.3f %7.2f %7.2f %5d" % (k, s["mean"], s["stddev"], s["min"], s["max"], s["n"]))
+    if battery_mean is not None:
+        print("  battery gauge power_now mean %.3f W (cross-check against SYS; coarse)" % battery_mean)
+
+
+def cmd_log(args):
+    if args.seconds is None or args.seconds < 1:
+        sys.exit("sl7-powermeter: --log needs --seconds N (N >= 1)")
+    if args.interval < MIN_INTERVAL_S:
+        sys.exit("sl7-powermeter: --interval must be at least %g s" % MIN_INTERVAL_S)
+    path = Path(args.log)
+    if path.exists():
+        sys.exit("sl7-powermeter: %s exists; choose a new file name" % path)
+    hw = need_hwmon()
+    chans = channels(hw)
+    bat = find_battery()
+    notes = []
+    if args.seconds < 30:
+        notes.append("%g s run: few samples, the standard deviation is rough; use 60 s or more" % args.seconds)
+    try:
+        out = open(path, "x", buffering=1)
+    except OSError as exc:
+        sys.exit("sl7-powermeter: cannot create %s: %s" % (path, exc))
+    cfg = config_snapshot()
+    hsh = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:12]
+    out.write(json.dumps({"type": "config", "t": round(time.time(), 3), "label": args.label,
+                          "seconds": args.seconds, "interval": args.interval, "hwmon": str(hw),
+                          "hash": hsh, "config": cfg}) + "\n")
+    old = {s: signal.signal(s, _term) for s in (signal.SIGTERM, signal.SIGHUP)}
+    samples, batt, gaps = [], [], 0
+    valid = False
+    start = time.monotonic()
+    next_t, end_t, got_first = start, start + args.seconds, False
+    print("recording %g s at %g s intervals to %s (Ctrl-C ends early)" % (args.seconds, args.interval, path))
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= end_t:
+                valid = True
+                break
+            if now >= next_t:
+                vals = read_rails(hw, chans)
+                status, bw = battery_state(bat)
+                if all(v is None for v in vals.values()):
+                    gaps += 1
+                    if not got_first and now - start > FIRST_DATA_TIMEOUT_S:
+                        raise RuntimeError("no fresh data from %s after %d s" % (HWMON_NAME, FIRST_DATA_TIMEOUT_S))
+                else:
+                    got_first = True
+                    samples.append(vals)
+                    if bw is not None and status == "Discharging":
+                        batt.append(bw)
+                    out.write(json.dumps({"type": "sample", "t": round(time.time(), 3), "rails_w": vals,
+                                          "battery_w": bw, "battery_status": status}) + "\n")
+                next_t += args.interval
+                if next_t < now:
+                    next_t = now + args.interval
+            time.sleep(max(0.0, min(0.1, next_t - time.monotonic())))
+    except KeyboardInterrupt:
+        notes.append("ended early by signal")
+    except RuntimeError as exc:
+        notes.append(str(exc))
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    if gaps:
+        notes.append("%d reads had no fresh data (ENODATA/EIO) and were skipped" % gaps)
+    stats = rail_stats(samples)
+    summ = {"type": "summary", "valid": valid and bool(samples), "notes": notes, "label": args.label,
+            "config_hash": hsh, "window_s": round(time.monotonic() - start, 1), "samples": len(samples),
+            "gaps": gaps, "interval_s": args.interval, "rails": stats,
+            "battery_mean_w": mean(batt)}
+    out.write(json.dumps(summ) + "\n")
+    out.close()
+    print()
+    if not stats:
+        print("no valid samples recorded")
+    else:
+        print_stats("%s%s, %d samples over %.0f s, config %s"
+                    % (args.label or "run", "" if summ["valid"] else " [INCOMPLETE]", len(samples),
+                       summ["window_s"], hsh), stats, summ["battery_mean_w"])
+    for n in notes:
+        print("  note: " + n)
+    print("  log: %s" % path)
+    return 0 if summ["valid"] else 1
+
+
+# --- compare ----------------------------------------------------------------------------------
+
+
+def load_run(path):
+    cfg, summ, samples = None, None, []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                t = rec.get("type")
+                if t == "config":
+                    cfg = rec
+                elif t == "summary":
+                    summ = rec
+                elif t == "sample" and isinstance(rec.get("rails_w"), dict):
+                    samples.append(rec["rails_w"])
+    except OSError as exc:
+        sys.exit("sl7-powermeter: %s" % exc)
+    if not samples:
+        sys.exit("sl7-powermeter: no samples in %s" % path)
+    return {"path": path, "config": cfg, "summary": summ, "stats": rail_stats(samples), "n": len(samples)}
+
+
+def flatten(d, prefix=""):
+    out = {}
+    for k, v in (d or {}).items():
+        key = prefix + k
+        if isinstance(v, dict):
+            out.update(flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def cmd_compare(args):
+    a, b = load_run(args.compare[0]), load_run(args.compare[1])
+    for name, r in (("A", a), ("B", b)):
+        s = r["summary"] or {}
+        cfg = r["config"] or {}
+        print("%s: %s  %s  %d samples, config %s%s" % (
+            name, os.path.basename(r["path"]), cfg.get("label") or "", r["n"], cfg.get("hash", "?"),
+            "" if s.get("valid") else "  [INCOMPLETE]"))
+    print()
+    print("%-14s %16s %16s %9s %8s  %s" % ("rail", "A mean +/- sd", "B mean +/- sd", "B-A W", "B-A %", "verdict"))
+    for k in ordered(list(set(a["stats"]) | set(b["stats"]))):
+        sa, sb = a["stats"].get(k), b["stats"].get(k)
+        if sa is None or sb is None:
+            print("%-14s only in %s" % (k, "A" if sb is None else "B"))
+            continue
+        d = sb["mean"] - sa["mean"]
+        se = math.sqrt(sa["stddev"] ** 2 / sa["n"] + sb["stddev"] ** 2 / sb["n"])
+        thr = max(2.0 * se, RESOLUTION_W)
+        pct = "%+7.1f" % (100.0 * d / sa["mean"]) if sa["mean"] else "     n/a"
+        verdict = ("within noise" if abs(d) <= thr else ("B higher" if d > 0 else "B lower"))
+        print("%-14s %7.3f +/- %5.3f %7.3f +/- %5.3f %+9.3f %8s  %s (threshold %.3f W)" % (
+            k, sa["mean"], sa["stddev"], sb["mean"], sb["stddev"], d, pct, verdict, thr))
+    fa, fb = flatten((a["config"] or {}).get("config")), flatten((b["config"] or {}).get("config"))
+    diffs = [(k, fa.get(k), fb.get(k)) for k in sorted(set(fa) | set(fb)) if fa.get(k) != fb.get(k)]
+    print("\nconfig differences:" + (" none" if not diffs else ""))
+    for k, x, y in diffs:
+        print("  %s: %s -> %s" % (k, x, y))
+    print("\nThe threshold is twice the standard error of the difference, floored at one firmware count\n"
+          "(0.01 W). It assumes independent samples; workload drift is correlated, so repeat each setting\n"
+          "three times, alternating A and B, before believing a small difference.")
+    return 0
+
+
+# --- describe -------------------------------------------------------------------------------------
+
+
+def cmd_describe(_args):
+    print("""sl7-powermeter: what the rails are
+
+Source: the SoC firmware's power ring at physical 0x81f30000 (the "pld-pep"
+region), the same data Windows reads through its Qualcomm PEP driver for the
+Energy Meter. The kernel driver (qcom_pld_power, by ItsLucas) maps it read-only
+and publishes the one-second ring as hwmon powerN_average.
+""")
+    for k, (role, note) in RAILS.items():
+        print("  %-14s %s" % (k, role))
+        print("  %-14s %s" % ("", note))
+    print("""  %-14s derived by this tool: CPU_CLUSTER_0 + 1 + 2. Nothing else is added.
+
+Not here: there is no DDR, CX, MX, display or Wi-Fi rail. The ring has exactly
+these seven channels; the other bytes of each record are unidentified and not read.
+
+Accuracy limits (from the source, not from this machine):
+  - Values are firmware averages with a 10 mW step, refreshed once a second.
+    The tool cannot see anything faster than that.
+  - Absolute calibration is unverified, and it is not known whether the firmware
+    measures the rails or models them from activity. Treat watts as relative.
+  - The one-second figures matched the firmware's 100 ms ring to about 0.02 W
+    mean error in the source's test, so the averaging looks sound; the exact
+    kernel is unspecified.
+  - Mapping and checks were done on a 15 inch X1E-80-100, BIOS 175.235.235.
+    The 13.8 inch is expected to match (SoC-level region) but is unproven.
+  - GPU load response, battery and USB rail semantics, and a cold Linux-only boot
+    are still unverified upstream. Reads fail with ENODATA until the firmware
+    counter advances (a few seconds after load or resume); the tool skips those.
+  - SYS equalled PSU_USB on external power with the battery not charging; do not
+    add rails to SYS or to each other.
+
+Versus the battery gauge (sl7-powertest): they are independent readers. The
+gauge measures energy leaving the battery over 20 to 30 minutes in 10 mWh steps;
+this meter reports firmware power each second. Use SYS against the gauge
+watts as a calibration check on battery. Running both at once is fine, but a
+live 1 Hz meter wakes a CPU every second and can raise an idle reading; for
+gauge A/B runs use `sl7-powertest ... --rails` (5 s samples, no extra process).""" % CPU_SUM)
+    return 0
+
+
+# --- main --------------------------------------------------------------------------------------------
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="sl7-powermeter", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-n", "--interval", type=float, default=1.0, metavar="S",
+                    help="seconds between refreshes or samples (default 1, minimum %g)" % MIN_INTERVAL_S)
+    ap.add_argument("--once", action="store_true", help="print one snapshot and exit")
+    ap.add_argument("--log", metavar="FILE", help="record to FILE (JSONL); needs --seconds")
+    ap.add_argument("--seconds", type=float, metavar="N", help="length of a --log run")
+    ap.add_argument("--label", help="tag stored in the log, e.g. before / after")
+    ap.add_argument("--compare", nargs=2, metavar=("A", "B"), help="compare two --log files")
+    ap.add_argument("--describe", action="store_true", help="explain each rail and the accuracy limits")
+    args = ap.parse_args()
+
+    if args.interval < MIN_INTERVAL_S:
+        ap.error("--interval must be at least %g" % MIN_INTERVAL_S)
+    if args.describe:
+        return cmd_describe(args)
+    if args.compare:
+        return cmd_compare(args)
+    if args.log:
+        return cmd_log(args)
+    if args.seconds is not None:
+        ap.error("--seconds is only for --log")
+    return cmd_watch(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -50,6 +50,7 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/cpuidle/cpuidle-psci-domain.o \
         drivers/soc/qcom/pmic_glink.o \
         drivers/soc/qcom/pmic_glink_altmode.o \
-        drivers/usb/typec/ucsi/ucsi.o
+        drivers/usb/typec/ucsi/ucsi.o \
+        drivers/hwmon/qcom_pld_power.o
 fi
 echo "fast-check: OK"

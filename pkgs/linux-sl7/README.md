@@ -69,6 +69,8 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0070 | SL7 local: ps883x drops the XO clock while the retimer is in reset | ours | not submitted |
 | 0071 | SL7 local: log why PCI D3cold is vetoed (dynamic debug only) | ours | not submitted |
 | 0072 | PCI: allow D3 for native hotplug-capable Root Ports on non-x86 | torvalds `d4c79b63d82d` (Manivannan Sadhasivam, v7.3-rc1) | merged for 7.3 (backport) |
+| 0082 | hwmon: `qcom_pld_power`, read-only firmware power telemetry (CPU clusters, GPU, system, USB) | ItsLucas, `drivers/qcom-pld-power/` at `1cc387f` (GPL-2.0-only), author kept, only build glue changed | not submitted; author says it needs a reviewed binding and more firmware evidence |
+| 0083 | romulus (13.8 and 15 inch): `pld-power@81f30000` node for 0082 | ours; resource from ItsLucas's `sl7_pld_device` | not submitted |
 
 Notes on the DT patches:
 
@@ -83,7 +85,9 @@ Notes on the DT patches:
   says uint8. The same mismatch exists in the SP11 device tree.
 - `dtbs_check` therefore reports three known findings: `qcom,geni-spi-qspi`
   is not in the geni-se binding, and the opcode type and size. They are
-  allow-listed in `scripts/check-dtbs.sh`; anything else fails.
+  allow-listed in `scripts/check-dtbs.sh`; anything else fails. The PLD power node (0083) adds a
+  fourth, an unknown compatible (`qcom,x1e80100-pld-power`), allow-listed the same way; that regex is
+  a guess at the message format, as `dt-validate` was not run.
 
 ## Power: 7.3 deepest-idle backport
 
@@ -278,6 +282,61 @@ Not done, with reasons:
   covered by 0068 (`pm_runtime_force_suspend()` skips a device already suspended) and it is not a DDR vote.
   Unresolved.
 - ADSP wakeups (104/s): no kernel patch.
+
+## Power telemetry: qcom_pld_power (7.2.8-12)
+
+Patches 0082 and 0083, `CONFIG_SENSORS_QCOM_PLD_POWER=m` in `config.sl7`. It gives Linux on the
+X1E the live power numbers it otherwise lacks (no RAPL, no other hwmon power driver), so an A/B of
+a setting takes one to two minutes instead of a 30 minute battery-gauge run. The userspace side is
+`sl7-powermeter` in `omarchy-surface-sl7` (see its README, section 12d, for the rails and how to read
+them).
+
+**Provenance and licence.** The driver is ItsLucas's
+[surface-laptop-7-ubuntu-kernel](https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel),
+`drivers/qcom-pld-power/` at commit `1cc387f` (2026-09-27), GPL-2.0-only (SPDX headers on every
+file, `GPL-2.0` licence file in that repository, `MODULE_LICENSE("GPL")`), compatible with this
+kernel. Patch 0082 carries it with ItsLucas as author (`From:` and `MODULE_AUTHOR`, plus an author
+note in each file); no sign-off is added on his behalf. What changed: the three files
+(`qcom_pld_power.c`, `qcom_pld_protocol.h`, `qcom_pld_cache.h`) moved to `drivers/hwmon/`, a Kconfig
+symbol and Makefile line replaced the external module build, and the author notes were added; the
+code is otherwise his. His `sl7_pld_device` bridge is not carried: it matched DMI, BIOS
+`175.235.235` and `microsoft,romulus15` only, and refused the 13.8 inch on purpose. Patch 0083
+describes the device in the shared romulus DTSI instead, so both sizes bind.
+
+**Read only.** The driver maps the 24 KiB firmware region `0x81f30000` read-only and uncached
+(`PAGE_KERNEL_RO`), reads the producer counter and seven u16 fields from the one-second ring, and has
+no write, control, limit, reset or raw-memory interface. It refuses to probe unless the range is
+EFI reserved memory and not System RAM, returns `ENODATA` until the firmware counter advances, and
+`EIO` on a torn read, so a wrong region fails closed. A deferrable work item refreshes a cached
+snapshot once a second (it does not wake an idle CPU) and a PM notifier invalidates it across suspend.
+
+hwmon `qcom_pld_power`, per channel `powerN_label`, `powerN_average` (uW) and
+`powerN_average_interval` (1000 ms), plus `update_interval`:
+
+```
+grep . /sys/class/hwmon/hwmon*/name | grep pld      # find it
+sensors 'qcom_pld_power-*'                          # if lm_sensors is installed
+cat /sys/class/hwmon/hwmonN/power{1..7}_{label,average}
+```
+
+power1-7 are CPU_CLUSTER_0, CPU_CLUSTER_1, CPU_CLUSTER_2, GPU, PSU_USB, USBC_TOTAL, SYS.
+
+**Status.**
+
+- Validated by the author on a 15 inch X1E-80-100, BIOS 175.235.235 (cluster mapping by affinity
+  load, one-second averaging against the 100 ms ring, suspend/resume, module reload).
+- Not validated by anyone: the 13.8 inch (the author's earlier "Romulus13" record was this 15 inch
+  booting the romulus13 DTB), GPU load, battery and USB rail meaning, absolute calibration, a cold
+  Linux-only boot, and whether the firmware measures or models the rails.
+- Here: patches apply on 7.2.8 with the queue, the driver compiles for aarch64 with clang, and its
+  undefined symbols are all exported. Nothing was booted. The DT node was not compiled (no `dtc`
+  on the dev box).
+- The `qcom,x1e80100-pld-power` compatible is the author's provisional string with no upstream
+  binding, so `dtbs_check` may report the node as undocumented.
+- 7.2.8's `hamoa.dtsi` still reserves `pld-pep` (no-map); 7.3 drops it because EFI reserves it. The
+  driver's checks should pass either way, but this is read from the code, not seen on hardware.
+- It loads on every boot once built (the DT node triggers the module alias). To switch it off:
+  `echo 'blacklist qcom_pld_power' | sudo tee /etc/modprobe.d/no-pld-power.conf`.
 
 ## Build
 

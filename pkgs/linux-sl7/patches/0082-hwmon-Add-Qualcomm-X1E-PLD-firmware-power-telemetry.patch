@@ -1,0 +1,505 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ItsLucas <11440538+ItsLucas@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 21:00:00 -0500
+Subject: [PATCH] hwmon: Add Qualcomm X1E PLD firmware power telemetry driver
+
+hwmon: Add Qualcomm X1E PLD firmware power telemetry driver
+
+Read-only hwmon driver for the power ring that the Snapdragon X1E
+firmware publishes in the EFI-reserved "pld-pep" region at physical
+0x81f30000 (length 0x6000). Windows maps the same region read-only in
+qcpep8380.sys and feeds it to the Energy Meter interface.
+
+Seven channels, each a u16 in units of 10 mW: CPU_CLUSTER_0..2, GPU,
+PSU_USB, USBC_TOTAL and SYS. The driver reads only the one-second ring
+and exposes powerN_average (uW), powerN_average_interval (1000 ms) and
+powerN_label, plus a read-only update_interval. It does not write to the
+region (mapped PAGE_KERNEL_RO, uncached), has no control, limit or reset
+interface, and returns -ENODATA until the producer counter advances and
+-EIO on torn reads, so a wrong region fails closed. Probe is refused
+unless the resource is EFI reserved memory and not System RAM. A
+deferrable freezable work item refreshes a cached snapshot and a PM
+notifier invalidates it across suspend.
+
+This is a straight carry of the original driver, with only the build
+glue changed: the three files move to drivers/hwmon/, a Kconfig symbol
+(SENSORS_QCOM_PLD_POWER, depends on ARM64 && EFI) and a Makefile line
+replace the external module build, and author notes are added. The
+sl7_pld_device bridge (DMI and BIOS-version gated, romulus15 only) is
+not carried; the next patch describes the device in the device tree
+instead. The qcom,x1e80100-pld-power compatible is the original, still
+provisional string and has no upstream binding.
+
+Protocol, units and the evidence behind them: PROTOCOL.md and
+docs/pld-power-validation.md in the origin repository. Absolute accuracy
+and whether the firmware measures or models the rails are not known.
+
+Origin: ItsLucas/surface-laptop-7-ubuntu-kernel drivers/qcom-pld-power/ at 1cc387f (GPL-2.0-only, author ItsLucas)
+Upstream-Status: Not submitted (the author notes upstreaming needs a reviewed binding and evidence from more firmware)
+---
+--- a/drivers/hwmon/Kconfig
++++ b/drivers/hwmon/Kconfig
+@@ -952,6 +952,24 @@
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called powerz.
+ 
++config SENSORS_QCOM_PLD_POWER
++	tristate "Qualcomm X1E PLD firmware power telemetry"
++	depends on ARM64 && EFI
++	depends on ARCH_QCOM || COMPILE_TEST
++	help
++	  If you say yes here you get read-only power telemetry (CPU
++	  clusters, GPU, system and USB rails) from the one-second ring
++	  that the Snapdragon X Elite/Plus firmware publishes in an
++	  EFI-reserved memory region at 0x81f30000. The region is mapped
++	  read-only; nothing is ever written to firmware.
++
++	  The driver binds to a "qcom,x1e80100-pld-power" device tree node
++	  and refuses to probe unless the region is EFI reserved memory.
++	  The compatible string is provisional and not an upstream binding.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called qcom_pld_power.
++
+ config SENSORS_POWR1220
+ 	tristate "Lattice POWR1220 Power Monitoring"
+ 	depends on I2C
+--- a/drivers/hwmon/Makefile
++++ b/drivers/hwmon/Makefile
+@@ -202,6 +202,7 @@
+ obj-$(CONFIG_SENSORS_PROM21_XHCI)	+= prom21-xhci.o
+ obj-$(CONFIG_SENSORS_PT5161L)	+= pt5161l.o
+ obj-$(CONFIG_SENSORS_PWM_FAN)	+= pwm-fan.o
++obj-$(CONFIG_SENSORS_QCOM_PLD_POWER)	+= qcom_pld_power.o
+ obj-$(CONFIG_SENSORS_QNAP_MCU_HWMON)	+= qnap-mcu-hwmon.o
+ obj-$(CONFIG_SENSORS_RASPBERRYPI_HWMON)	+= raspberrypi-hwmon.o
+ obj-$(CONFIG_SENSORS_SBTSI)	+= sbtsi_temp.o
+--- /dev/null
++++ b/drivers/hwmon/qcom_pld_cache.h
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Author: ItsLucas, https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel (1cc387f) */
++#ifndef QCOM_PLD_CACHE_H
++#define QCOM_PLD_CACHE_H
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++#define QCOM_PLD_STALE_NS 3000000000ULL
++
++struct qcom_pld_freshness {
++	u32 head;
++	u64 observed_ns;
++	u64 fresh_after_ns;
++	bool seeded;
++	bool live;
++};
++
++static inline int qcom_pld_cached_status(const struct qcom_pld_freshness *s,
++					u64 now, int error, bool suspended)
++{
++	if (suspended)
++		return -ENODATA;
++	if (error)
++		return error;
++	if (!s->live || now < s->fresh_after_ns ||
++	    now - s->fresh_after_ns > QCOM_PLD_STALE_NS)
++		return -ENODATA;
++	return 0;
++}
++
++/*
++ * Freshness is bounded by the PREVIOUS observation, not the time we notice
++ * a new head: after a long polling gap, even a changed head may be stale.
++ * -EAGAIN requests another observation; the caller bounds that wait.
++ */
++static inline int qcom_pld_observe(struct qcom_pld_freshness *s,
++				 u32 head, u64 now)
++{
++	u32 delta = head - s->head;
++
++	if (!s->seeded || now < s->observed_ns ||
++	    now - s->observed_ns > QCOM_PLD_STALE_NS ||
++	    delta > 0x7fffffffU ||
++	    delta > (now - s->observed_ns) / 1000000000ULL + 2) {
++		s->seeded = true;
++		s->live = false;
++	} else if (delta) {
++		s->live = true;
++		s->fresh_after_ns = s->observed_ns;
++	}
++	s->head = head;
++	s->observed_ns = now;
++	if (s->live && now - s->fresh_after_ns <= QCOM_PLD_STALE_NS)
++		return 0;
++	s->live = false;
++	return -EAGAIN;
++}
++
++#endif
+--- /dev/null
++++ b/drivers/hwmon/qcom_pld_power.c
+@@ -0,0 +1,298 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Qualcomm X1E PLD firmware power telemetry, protocol revision under study.
++ *
++ * Read-only hwmon driver for the power ring that the firmware publishes at
++ * physical 0x81f30000 (the "pld-pep" region).
++ *
++ * Author: ItsLucas, from
++ * https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel
++ * (drivers/qcom-pld-power/, commit 1cc387f, GPL-2.0-only), carried
++ * in-tree for linux-sl7 with only the build glue changed.
++ */
++#include <linux/efi.h>
++#include <linux/hwmon.h>
++#include <linux/io.h>
++#include <linux/ioport.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/suspend.h>
++#include <linux/workqueue.h>
++#include <asm/pgtable.h>
++
++#include "qcom_pld_cache.h"
++#include "qcom_pld_protocol.h"
++
++#define PLD_POLL_MS		1000
++
++static const char * const pld_labels[PLD_CHANNELS] = {
++	"CPU_CLUSTER_0", "CPU_CLUSTER_1", "CPU_CLUSTER_2", "GPU",
++	"PSU_USB", "USBC_TOTAL", "SYS",
++};
++
++struct pld_data {
++	void __iomem *base;
++	struct pld_io io;
++	struct mutex lock;
++	struct notifier_block pm_nb;
++	struct delayed_work poll_work;
++	struct qcom_pld_freshness freshness;
++	struct pld_sample sample;
++	u64 last_kick_ns;
++	int cached_error;
++	bool suspended;
++	bool stopping;
++};
++
++static u32 pld_read_head(void *context)
++{
++	struct pld_data *data = context;
++
++	return readl(data->base + PLD_HEAD);
++}
++
++static u16 pld_read_power(void *context, u32 offset)
++{
++	struct pld_data *data = context;
++
++	return readw(data->base + offset);
++}
++
++/* A deferrable timer does not wake an idle CPU merely to refresh hwmon. */
++static void pld_poll(struct work_struct *work)
++{
++	struct pld_data *data = container_of(to_delayed_work(work),
++					   struct pld_data, poll_work);
++	struct pld_sample sample;
++	u64 now;
++	int ret;
++
++	mutex_lock(&data->lock);
++	if (data->suspended || data->stopping)
++		goto out;
++	ret = pld_snapshot(&data->io, &sample);
++	now = ktime_get_boottime_ns();
++	if (ret) {
++		memset(&data->freshness, 0, sizeof(data->freshness));
++	} else {
++		ret = qcom_pld_observe(&data->freshness, sample.head, now);
++		if (ret == -EAGAIN)
++			ret = -ENODATA;
++	}
++	if (!ret)
++		data->sample = sample;
++	data->cached_error = ret;
++	queue_delayed_work(system_freezable_wq, &data->poll_work,
++			   msecs_to_jiffies(PLD_POLL_MS));
++out:
++	mutex_unlock(&data->lock);
++}
++
++static umode_t pld_is_visible(const void *priv, enum hwmon_sensor_types type,
++			     u32 attr, int channel)
++{
++	if (type == hwmon_chip && attr == hwmon_chip_update_interval)
++		return 0444;
++	if (type == hwmon_power && channel >= 0 && channel < PLD_CHANNELS &&
++	    (attr == hwmon_power_average || attr == hwmon_power_average_interval ||
++	     attr == hwmon_power_label))
++		return 0444;
++	return 0;
++}
++
++static int pld_read(struct device *dev, enum hwmon_sensor_types type,
++		    u32 attr, int channel, long *val)
++{
++	struct pld_data *data = dev_get_drvdata(dev);
++	u64 now;
++	int ret;
++
++	if (type == hwmon_chip && attr == hwmon_chip_update_interval) {
++		*val = 1000;
++		return 0;
++	}
++	if (type != hwmon_power ||
++	    channel < 0 || channel >= PLD_CHANNELS)
++		return -EOPNOTSUPP;
++	if (attr == hwmon_power_average_interval) {
++		*val = 1000;
++		return 0;
++	}
++	if (attr != hwmon_power_average)
++		return -EOPNOTSUPP;
++	mutex_lock(&data->lock);
++	now = ktime_get_boottime_ns();
++	ret = qcom_pld_cached_status(&data->freshness, now, data->cached_error,
++				     data->suspended);
++	if (!ret)
++		*val = pld_microwatts(data->sample.power[channel]);
++	/* A reader is already awake: kick a deferred refresh, without waiting. */
++	if (ret && !data->suspended && !data->stopping &&
++	    now - data->last_kick_ns >= 100000000ULL) {
++		data->last_kick_ns = now;
++		mod_delayed_work(system_freezable_wq, &data->poll_work, 0);
++	}
++	mutex_unlock(&data->lock);
++	return ret;
++}
++
++static int pld_read_string(struct device *dev, enum hwmon_sensor_types type,
++			   u32 attr, int channel, const char **str)
++{
++	if (type != hwmon_power || attr != hwmon_power_label ||
++	    channel < 0 || channel >= PLD_CHANNELS)
++		return -EOPNOTSUPP;
++	*str = pld_labels[channel];
++	return 0;
++}
++
++static const struct hwmon_ops pld_hwmon_ops = {
++	.is_visible = pld_is_visible,
++	.read = pld_read,
++	.read_string = pld_read_string,
++};
++
++#define PLD_POWER_FLAGS (HWMON_P_AVERAGE | HWMON_P_AVERAGE_INTERVAL | HWMON_P_LABEL)
++static const struct hwmon_channel_info * const pld_hwmon_info[] = {
++	HWMON_CHANNEL_INFO(chip, HWMON_C_UPDATE_INTERVAL),
++	HWMON_CHANNEL_INFO(power, PLD_POWER_FLAGS, PLD_POWER_FLAGS,
++			   PLD_POWER_FLAGS, PLD_POWER_FLAGS, PLD_POWER_FLAGS,
++			   PLD_POWER_FLAGS, PLD_POWER_FLAGS),
++	NULL,
++};
++
++static const struct hwmon_chip_info pld_chip = {
++	.ops = &pld_hwmon_ops,
++	.info = pld_hwmon_info,
++};
++
++static int pld_pm_notify(struct notifier_block *nb, unsigned long action, void *v)
++{
++	struct pld_data *data = container_of(nb, struct pld_data, pm_nb);
++	bool prepare;
++
++	switch (action) {
++	case PM_SUSPEND_PREPARE:
++	case PM_HIBERNATION_PREPARE:
++	case PM_RESTORE_PREPARE:
++	case PM_POST_SUSPEND:
++	case PM_POST_HIBERNATION:
++	case PM_POST_RESTORE:
++		prepare = action == PM_SUSPEND_PREPARE ||
++			  action == PM_HIBERNATION_PREPARE ||
++			  action == PM_RESTORE_PREPARE;
++		mutex_lock(&data->lock);
++		data->suspended = prepare;
++		memset(&data->freshness, 0, sizeof(data->freshness));
++		data->cached_error = -ENODATA;
++		if (!prepare && !data->stopping)
++			queue_delayed_work(system_freezable_wq, &data->poll_work, 0);
++		mutex_unlock(&data->lock);
++		if (prepare)
++			cancel_delayed_work_sync(&data->poll_work);
++	}
++	return NOTIFY_OK;
++}
++
++static void pld_unmap(void *base)
++{
++	iounmap((void __iomem *)base);
++}
++
++static void pld_stop(void *priv)
++{
++	struct pld_data *data = priv;
++
++	unregister_pm_notifier(&data->pm_nb);
++	mutex_lock(&data->lock);
++	data->stopping = true;
++	mutex_unlock(&data->lock);
++	cancel_delayed_work_sync(&data->poll_work);
++}
++
++static int pld_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct resource *res;
++	struct pld_data *data;
++	struct device *hwmon;
++	efi_memory_desc_t md;
++	int ret;
++
++	BUILD_BUG_ON(PLD_RECORDS + PLD_CAPACITY * PLD_RECORD_SIZE > PLD_SIZE);
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res || resource_size(res) != PLD_SIZE)
++		return -EINVAL;
++	if (region_intersects(res->start, PLD_SIZE, IORESOURCE_SYSTEM_RAM,
++			      IORES_DESC_NONE) != REGION_DISJOINT)
++		return -EBUSY;
++	ret = efi_mem_desc_lookup(res->start, &md);
++	if (ret)
++		return dev_err_probe(dev, ret, "EFI memory map unavailable\n");
++	if (md.type != EFI_RESERVED_TYPE || md.phys_addr > res->start ||
++	    md.num_pages > (U64_MAX - md.phys_addr) >> EFI_PAGE_SHIFT ||
++	    md.phys_addr + (md.num_pages << EFI_PAGE_SHIFT) <= res->end)
++		return dev_err_probe(dev, -ENODEV, "resource is not EFI reserved memory\n");
++	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	mutex_init(&data->lock);
++	INIT_DEFERRABLE_WORK(&data->poll_work, pld_poll);
++	data->io = (struct pld_io){
++		.context = data,
++		.head = pld_read_head,
++		.power = pld_read_power,
++	};
++	data->cached_error = -ENODATA;
++	if (!devm_request_mem_region(dev, res->start, PLD_SIZE, dev_name(dev)))
++		return -EBUSY;
++	/* arm64 ioremap_prot() strips RO; preserve it via __ioremap_prot(). */
++	data->base = __ioremap_prot(res->start, PLD_SIZE,
++				    pgprot_noncached(PAGE_KERNEL_RO));
++	if (!data->base)
++		return -ENOMEM;
++	ret = devm_add_action_or_reset(dev, pld_unmap, (void __force *)data->base);
++	if (ret)
++		return ret;
++	data->pm_nb.notifier_call = pld_pm_notify;
++	ret = register_pm_notifier(&data->pm_nb);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, pld_stop, data);
++	if (ret)
++		return ret;
++	platform_set_drvdata(pdev, data);
++	hwmon = devm_hwmon_device_register_with_info(dev, "qcom_pld_power", data,
++							   &pld_chip, NULL);
++	if (IS_ERR(hwmon))
++		return PTR_ERR(hwmon);
++	mutex_lock(&data->lock);
++	if (!data->suspended)
++		queue_delayed_work(system_freezable_wq, &data->poll_work, 0);
++	mutex_unlock(&data->lock);
++	return 0;
++}
++
++static const struct of_device_id pld_of_match[] = {
++	{ .compatible = "qcom,x1e80100-pld-power" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, pld_of_match);
++
++static struct platform_driver pld_driver = {
++	.probe = pld_probe,
++	.driver = {
++		.name = "qcom-pld-power",
++		.of_match_table = pld_of_match,
++	},
++};
++module_platform_driver(pld_driver);
++
++MODULE_ALIAS("platform:qcom-pld-power");
++MODULE_AUTHOR("ItsLucas");
++MODULE_DESCRIPTION("Qualcomm X1E read-only PLD firmware power telemetry");
++MODULE_LICENSE("GPL");
++MODULE_VERSION("0.1.0");
+--- /dev/null
++++ b/drivers/hwmon/qcom_pld_protocol.h
+@@ -0,0 +1,62 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Author: ItsLucas, https://github.com/ItsLucas/surface-laptop-7-ubuntu-kernel (1cc387f) */
++#ifndef QCOM_PLD_PROTOCOL_H
++#define QCOM_PLD_PROTOCOL_H
++
++#include <linux/errno.h>
++#include <linux/string.h>
++#include <linux/types.h>
++
++#define PLD_SIZE			0x6000
++#define PLD_HEAD			0x2938
++#define PLD_RECORDS		0x2940
++#define PLD_CAPACITY		128
++#define PLD_RECORD_SIZE		40
++#define PLD_CHANNELS		7
++
++struct pld_sample {
++	u32 head;
++	u16 power[PLD_CHANNELS];
++};
++
++/* The transport permits testing torn publications without touching hardware. */
++struct pld_io {
++	void *context;
++	u32 (*head)(void *context);
++	u16 (*power)(void *context, u32 offset);
++};
++
++static inline int pld_snapshot(const struct pld_io *io, struct pld_sample *sample)
++{
++	static const u32 offsets[PLD_CHANNELS] = { 8, 10, 12, 14, 26, 28, 24 };
++	u16 second[PLD_CHANNELS];
++	u32 middle, after, offset;
++	unsigned int attempt, ch;
++
++	for (attempt = 0; attempt < 4; attempt++) {
++		sample->head = io->head(io->context);
++		offset = PLD_RECORDS + ((sample->head - 1) % PLD_CAPACITY) *
++			 PLD_RECORD_SIZE;
++		for (ch = 0; ch < PLD_CHANNELS; ch++)
++			sample->power[ch] = io->power(io->context, offset + offsets[ch]);
++		middle = io->head(io->context);
++		for (ch = 0; ch < PLD_CHANNELS; ch++)
++			second[ch] = io->power(io->context, offset + offsets[ch]);
++		after = io->head(io->context);
++		if (sample->head != middle || middle != after ||
++		    memcmp(sample->power, second, sizeof(second)))
++			continue;
++		for (ch = 0; ch < PLD_CHANNELS; ch++)
++			if (sample->power[ch] == 0xffffU)
++				return -ENODATA;
++		return 0;
++	}
++	return -EIO;
++}
++
++static inline u32 pld_microwatts(u16 raw)
++{
++	return (u32)raw * 10000U;
++}
++
++#endif

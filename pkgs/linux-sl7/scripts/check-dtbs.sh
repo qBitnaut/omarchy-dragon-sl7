@@ -5,13 +5,14 @@
 # (dt-validate) on PATH for the schema check.
 # Usage: check-dtbs.sh <kernel-src-dir>
 #
-# Three findings are expected and allow-listed because they come from the
+# Four findings are expected and allow-listed because they come from the
 # carried spi-hid v4 series and the out-of-tree QSPI support, which ship no
-# matching binding updates:
+# matching binding updates, and from the PLD power node (patch 0083):
 #   - qcom,geni-spi-qspi is not in the geni-se binding
 #   - read-opcode / write-opcode are declared uint8 in hid-over-spi.yaml but
 #     the driver reads them with device_property_read_u32(), so the DT must
 #     use 32-bit cells to work
+#   - qcom,x1e80100-pld-power is a provisional compatible with no binding
 # Any other warning for the romulus trees fails the check.
 set -euo pipefail
 
@@ -35,6 +36,7 @@ out="$(make CHECK_DTBS=y "${dtbs[@]}" 2>&1)" || true
 
 allowed="spi@[0-9a-f]+:compatible:0: 'qcom,geni-spi' was expected"
 allowed+="|failed to match any schema with compatible: \['qcom,geni-spi-qspi'\]"
+allowed+="|failed to match any schema with compatible: \['qcom,x1e80100-pld-power'\]"
 allowed+="|(read|write)-opcode: (\[0, 0, 0, [0-9]+\] is not of type 'integer'|size is 32, expected 8)"
 
 unexpected="$(grep -E 'romulus1[35]\.dtb:' <<< "$out" | grep -Ev "$allowed" || true)"

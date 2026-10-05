@@ -124,3 +124,7 @@
 # 13. IR emitter bring-up, stage A (SL7 local): PM8550 flash LED safety lockout + romulus13 discovery nodes
 0080-SL7-leds-qcom-flash-IR-emitter-safety-lockout.patch
 0081-SL7-arm64-dts-qcom-x1e80100-romulus13-IR-flash-discovery-LEDs.patch
+
+# 14. Power telemetry: qcom_pld_power (ItsLucas) hwmon driver + romulus DT node
+0082-hwmon-Add-Qualcomm-X1E-PLD-firmware-power-telemetry.patch
+0083-SL7-arm64-dts-qcom-x1e80100-romulus-Add-the-PLD-power-telemetry-node.patch

@@ -48,6 +48,10 @@ CONFIG_LEDS_CLASS_FLASH=m
 CONFIG_LEDS_QCOM_FLASH=m
 CONFIG_V4L2_FLASH_LED_CLASS=m
 
+# Read-only firmware power telemetry (CPU clusters, GPU, system, USB) via hwmon,
+# patches 0082-0083; read by sl7-powermeter
+CONFIG_SENSORS_QCOM_PLD_POWER=m
+
 # No Qualcomm Crypto Engine. On 7.2 qcrypto (1dfa000.crypto) holds a permanent
 # 393600 kBps ALWAYS-tagged crypto -> EBI1 interconnect vote with no runtime PM,
 # which keeps DDR from collapsing in suspend. 7.3 marks it BROKEN (df373d39c6f0),
