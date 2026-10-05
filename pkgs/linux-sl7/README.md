@@ -68,6 +68,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0068-0069 | serial: qcom-geni force suspend/resume in the system sleep callbacks, and the unbalanced-resume fix | torvalds `d0cd9c8d0fd5` (v7.3-rc1), `3098c989bd38` (v7.3-rc6) | merged for 7.3 (backport) |
 | 0070 | SL7 local: ps883x drops the XO clock while the retimer is in reset | ours | not submitted |
 | 0071 | SL7 local: log why PCI D3cold is vetoed (dynamic debug only) | ours | not submitted |
+| 0072 | PCI: allow D3 for native hotplug-capable Root Ports on non-x86 | torvalds `d4c79b63d82d` (Manivannan Sadhasivam, v7.3-rc1) | merged for 7.3 (backport) |
 
 Notes on the DT patches:
 
@@ -240,7 +241,7 @@ applied).
 
 ### Rebase onto 7.3
 
-When 7.3 is tagged, drop 0045-0052, 0061 and 0068-0069, and also 0053-0058, 0059, 0062-0065
+When 7.3 is tagged, drop 0045-0052, 0061 and 0068-0069 and 0072, and also 0053-0058, 0059, 0062-0065
 only if they are in the tag (check with `git merge-base --is-ancestor`; they are
 7.4-queued). Re-run `scripts/fast-check.sh`.
 
@@ -248,9 +249,9 @@ Diagnostic: `sl7-sleepstats` (pkgs/omarchy-surface-sl7, not in the PKGBUILD yet)
 prints the qcom_stats counters, `power-domain-system` residency (S0 is
 `domain_ss3`) and cpuidle totals; `--suspend-test` runs a measured suspend.
 
-## Power: suspend holders (7.2.8-9)
+## Power: suspend holders (7.2.8-9, 7.2.8-10)
 
-Added in 7.2.8-9 (patches 0068-0071) from the 7.2.8-7 `sl7-sleepstats --trace` capture of 2026-10-05 (8 min
+Added in 7.2.8-9 (patches 0068-0071) and 0072 (7.2.8-10), from the 7.2.8-7 `sl7-sleepstats --trace` capture of 2026-10-05 (8 min
 `deep` suspend, qcrypto, BT, ath12k unloaded, USB wakeup off). The holder-by-holder mapping, with the trace
 evidence, is `Research/omarchy-dragon-sl7/power/sleeptrace-20261005/HOLDERS.md`. In short, APPS held three DDR
 BCMs (MC0, SH0, SH1, vote 1) through the 1 kBps vote that `1bf8000.pci` and `1c08000.pci` keep while their link
@@ -263,6 +264,7 @@ the ADSP woke 104 times a second. CX was not held. Nothing here has been booted 
 | 0069 serial: qcom-geni fix unbalanced runtime PM resume (`3098c989bd38`) | follow-up to 0068 for `no_console_suspend` (a console that was not force-suspended must not be force-resumed) | in 7.3-rc6 | none beyond 0068. 7.3 has later serial changes (nbcon, `.pm` removal) that are not carried, so only these two apply to 7.2 |
 | 0070 SL7 local: ps883x drops XO while in reset | `rfclka3`/`rfclka4` (RPMh `clka3`/`clka4`, held at 1 in the sleep set) were enabled at probe and never released for retimers that sit in reset with all supplies off | not submitted | the clock is taken after the supplies and before the reset GPIO is released, and dropped after the supplies go off. Not tested on hardware; if a USB-C port stops negotiating after plugging a device, drop 0070 |
 | 0071 SL7 local: log the PCI D3cold veto | none directly. `pci_host_common_d3cold_possible()` is false for `1bf8000`/`1c08000`, so the controllers take the keep-link branch (1 kBps vote, clkrefs, aux clocks). The log lines name the vetoing device | not submitted | none (dynamic debug, silent by default) |
+| 0072 PCI: allow D3 for native hotplug-capable Root Ports (`d4c79b63d82d`) | 7.2.8-9 trace with 0071: both root ports (`0004:00:00.0`, `0006:00:00.0`) stay in D0 at suspend_noirq (`current_state` unknown), so `pci_host_common_d3cold_possible()` vetoes D3cold and `1bf8000`/`1c08000` keep link, 1 kBps vote, clkrefs. The qcom root ports advertise Hot-Plug Capable (the driver sets NCCS for it), so `is_pciehp` is set and `pci_bridge_d3_possible()` returns false, `bridge_d3` stays 0, `pci_power_manageable()` is false and the PCI core never calls `pci_prepare_to_sleep()` on them. 0072 drops that restriction on non-x86 | in 7.3-rc1 | the qcom controllers now take the full D3cold path: PME_Turn_Off, link and PHY off, pwrctrl off (NVMe 3.3 V rail, Wi-Fi PMU), icc and clkref released. NVMe is already shut down cleanly (SHN) and reset on resume, but the rail is now cut and re-applied each suspend, and this path has not run on SL7 hardware. pciehp is suspended with the port. If resume hangs, NVMe or Wi-Fi vanish after resume, or `pciehp` removes devices, drop 0072 |
 
 Not done, with reasons:
 
@@ -368,6 +370,16 @@ strobe output. Do not enable the emitter until its flash channel has been found 
   became the return value. Patch 0040 initialises it to 0.
 - First on-device steps: `sudo sl7-ir-probe`, read its `SUMMARY`, then `--sweep-mclk` only if the
   IR sensor did not bind.
+
+### v4l2loopback (7.2.8-10)
+
+`linux-sl7` also ships `v4l2loopback` 0.15.4 (GPL-2.0-or-later, pinned release tarball with a sha256),
+for the `sl7-ir-bridge` package. It is not in mainline, so `build()` builds it out of tree against the
+tree that was just built (`make M=... modules`) and `package()` installs it as
+`/usr/lib/modules/<ver>/extra/v4l2loopback.ko`. No headers package and no DKMS are involved, so the
+vermagic always matches the kernel. It adds no module options: `sl7-ir-bridge` ships the modprobe
+options. 0.15.4 compiles clean against 7.2 (arm64, clang). Do not install ALARM's `v4l2loopback-dkms`
+next to it.
 
 ## Not in v0
 

@@ -15,7 +15,7 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.8
-pkgrel=9
+pkgrel=10
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -25,6 +25,13 @@ options=('!strip')
 # VD55G0 sensor firmware patches (GPL-2.0, STMicroelectronics), pinned commit of
 # petm5/vd55g-firmware. Installed under /usr/lib/firmware; no Microsoft files.
 _vd55g_fw=e519457ec5e379a791a6a28e8dbda03499c75bb7  # 2026-07-21
+
+# v4l2loopback (GPL-2.0-or-later), pinned upstream release. It is not in
+# mainline, so it is built here as an out-of-tree module against this exact
+# tree and .config (no headers package, no DKMS, vermagic always matches) and
+# installed under extra/. Used by the sl7-ir-bridge package. Needs
+# CONFIG_VIDEO_DEV=m, which config.alarm already sets.
+_v4l2lb=0.15.4
 
 # The two downloads are pinned to the kernel.org sha256sums.asc values. Files
 # from this directory are covered by the repository's git history instead.
@@ -105,11 +112,14 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0069-serial-qcom-geni-Fix-unbalanced-runtime-PM-resume-fo.patch'
         'patches/0070-SL7-usb-typec-mux-ps883x-Drop-the-XO-clock-while-in-reset.patch'
         'patches/0071-SL7-PCI-host-common-dwc-Log-why-D3cold-is-vetoed.patch'
+        'patches/0072-PCI-Allow-D3-for-native-hotplug-capable-Root-Ports-.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
-        'LICENSE.vd55g-firmware')
+        'LICENSE.vd55g-firmware'
+        "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'b509067e26487f23795b30640bbfdff0afba0c48290f1100fe880c9bdf369776'
             'SKIP'
+         'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -185,7 +195,8 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
          'SKIP'
          'SKIP'
          '968ce7359fa90078e15e7fd544ebd9fa74a28f1e7fb83bd8fd310e7e9ca7daee'
-         'SKIP')
+         'SKIP'
+         '21a17702648aa6a937b88a93bd71ef9f547815ead28719cafcfcc247396643dc')
 
 prepare() {
   cd "$_srcname"
@@ -223,6 +234,10 @@ build() {
   make ${MAKEFLAGS} Image modules
   # Symbols in the blobs allow device tree overlays
   make ${MAKEFLAGS} DTC_FLAGS="-@" dtbs
+
+  # Out-of-tree v4l2loopback, built against the tree that was just built
+  # (needs its Module.symvers).
+  make ${MAKEFLAGS} M="$srcdir/v4l2loopback-$_v4l2lb" modules
 }
 
 _package() {
@@ -262,6 +277,12 @@ _package() {
   echo "Installing modules..."
   make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 \
     DEPMOD=/doesnt/exist modules_install
+
+  echo "Installing v4l2loopback..."
+  make INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 INSTALL_MOD_DIR=extra \
+    DEPMOD=/doesnt/exist M="$srcdir/v4l2loopback-$_v4l2lb" modules_install
+  install -Dm644 "$srcdir/v4l2loopback-$_v4l2lb/COPYING" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE.v4l2loopback"
 
   # remove build link
   rm "$modulesdir"/build

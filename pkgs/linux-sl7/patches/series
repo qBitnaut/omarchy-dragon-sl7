@@ -119,3 +119,4 @@
 0069-serial-qcom-geni-Fix-unbalanced-runtime-PM-resume-fo.patch
 0070-SL7-usb-typec-mux-ps883x-Drop-the-XO-clock-while-in-reset.patch
 0071-SL7-PCI-host-common-dwc-Log-why-D3cold-is-vetoed.patch
+0072-PCI-Allow-D3-for-native-hotplug-capable-Root-Ports-.patch
