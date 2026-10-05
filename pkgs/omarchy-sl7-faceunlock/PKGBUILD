@@ -8,7 +8,7 @@
 
 pkgname=omarchy-sl7-faceunlock
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Omarchy-styled Face Unlock setup and face manager for the Surface Laptop 7 (howdy-next, IR bridge, PAM, lock screen)'
 arch=('any')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'

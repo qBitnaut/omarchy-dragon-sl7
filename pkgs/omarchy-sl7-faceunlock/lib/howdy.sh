@@ -253,5 +253,13 @@ howdy_disable() {
     note "[dry-run] howdy disable $1"
     return 0
   fi
-  "$HOWDY_BIN" disable "$1"
+  local out rc=0
+  out=$("$HOWDY_BIN" disable "$1" 2>&1) || rc=$?
+  [[ -n $out ]] && printf '%s\n' "$out"
+  # howdy-next exits non-zero when the state is already the requested one
+  # ("Howdy is already enabled" / "already disabled"); that is not a failure.
+  if ((rc != 0)) && [[ $out == *"already enabled"* || $out == *"already disabled"* ]]; then
+    return 0
+  fi
+  return "$rc"
 }

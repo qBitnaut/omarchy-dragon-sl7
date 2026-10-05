@@ -39,7 +39,15 @@ remove)
   ;;
 clear) : >"$d/models" ;;
 set) echo "${args[0]}=${args[1]}" >>"$d/config.set" ;;
-disable) echo "${args[0]}" >"$d/disabled" ;;
+disable)
+  # Like howdy-next: asking for the current state prints a notice and exits 1.
+  cur=$(cat "$d/disabled" 2>/dev/null || echo 0)
+  if [[ $cur == "${args[0]}" ]]; then
+    [[ $cur == 0 ]] && echo "Howdy is already enabled" || echo "Howdy is already disabled"
+    exit 1
+  fi
+  echo "${args[0]}" >"$d/disabled"
+  ;;
 test) echo "preview" ;;
 *) exit 1 ;;
 esac

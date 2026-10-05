@@ -197,7 +197,7 @@ check "off runs howdy disable 1" grep -qx 1 "$FAKE_HOWDY_DIR/disabled"
 fresh_env
 mkdir -p "$SL7_STATE_DIR"
 check "cli: auth enable sudo" "$APP" auth enable sudo
-check "cli: howdy re-enabled by enable" grep -qx 0 "$FAKE_HOWDY_DIR/disabled"
+check "cli: howdy enabled after enable" bash -c "[[ ! -e '$FAKE_HOWDY_DIR/disabled' ]] || grep -qx 0 '$FAKE_HOWDY_DIR/disabled'"
 check "cli: auth status json" bash -c "'$APP' auth status --json | jq -e '.sudo == \"enabled\"'"
 check "cli: faces add" "$APP" faces add Glasses
 check "cli: faces list json" bash -c "'$APP' faces list --json | jq -e '.[0].label == \"Glasses\"'"
