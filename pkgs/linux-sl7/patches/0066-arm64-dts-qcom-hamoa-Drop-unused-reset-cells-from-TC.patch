@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Qiang Yu <qiang.yu@oss.qualcomm.com>
+Date: Thu, 27 Aug 2026 23:00:35 -0700
+Subject: [PATCH] arm64: dts: qcom: hamoa: Drop unused #reset-cells from TCSR
+ node
+
+commit 4d8ff3d92241d9ae4fdd5fed7a810a116e37eb0d in qcom/linux arm64-for-7.4 (linux-next, not yet in a tag).
+
+TCSR does not act as a reset provider on x1e80100: the driver never
+registered a reset controller for it, and no consumer references
+&tcsr as a reset. Drop the stale #reset-cells property to match the
+qcom,x1e80100-tcsr binding, which no longer declares it either.
+
+Signed-off-by: Qiang Yu <qiang.yu@oss.qualcomm.com>
+Reviewed-by: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>
+Reviewed-by: Abel Vesa <abel.vesa@oss.qualcomm.com>
+Link: https://lore.kernel.org/r/20260827-hamoa_tcsr_qref_0826-v4-3-663c9d30468d@oss.qualcomm.com
+Signed-off-by: Bjorn Andersson <andersson@kernel.org>
+---
+ arch/arm64/boot/dts/qcom/hamoa.dtsi | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/hamoa.dtsi b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+index 385342c35b38..5e92645c5c3c 100644
+--- a/arch/arm64/boot/dts/qcom/hamoa.dtsi
++++ b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+@@ -4004,7 +4004,6 @@
+ 			reg = <0 0x01fc0000 0 0x30000>;
+ 			clocks = <&rpmhcc RPMH_CXO_CLK>;
+ 			#clock-cells = <1>;
+-			#reset-cells = <1>;
+ 		};
+ 
+ 		gpu: gpu@3d00000 {

@@ -99,6 +99,7 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0063-clk-qcom-tcsrcc-x1e80100-Migrate-to-clk_ref-helper.patch'
         'patches/0064-arm64-dts-qcom-hamoa-purwa-Add-QREF-regulator-suppli.patch'
         'patches/0065-soc-qcom-pmic_glink-Avoid-losing-early-rpmsg-probe.patch'
+        'patches/0066-arm64-dts-qcom-hamoa-Drop-unused-reset-cells-from-TC.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware')
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
@@ -107,6 +108,7 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'SKIP'
             'SKIP'
             'SKIP'
+         'SKIP'
          'SKIP'
          'SKIP'
          'SKIP'

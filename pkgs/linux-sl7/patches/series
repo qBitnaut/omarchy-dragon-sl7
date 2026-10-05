@@ -105,6 +105,7 @@
 0061-clk-qcom-Add-generic-clkref_en-support.patch
 0062-dt-bindings-clock-qcom-Move-x1e80100-TCSR-to-own-bin.patch
 0063-clk-qcom-tcsrcc-x1e80100-Migrate-to-clk_ref-helper.patch
+0066-arm64-dts-qcom-hamoa-Drop-unused-reset-cells-from-TC.patch
 0064-arm64-dts-qcom-hamoa-purwa-Add-QREF-regulator-suppli.patch
 
 # 10e. Power: pmic_glink early rpmsg probe (7.4)
