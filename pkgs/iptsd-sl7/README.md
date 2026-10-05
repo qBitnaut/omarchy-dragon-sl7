@@ -131,6 +131,23 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
   `IPTSD_MODE_WATCHDOG=0` in the unit environment disables it. The signal is unverified on
   hardware for the exact legacy report IDs: if the pad's mouse mode reuses the button report
   without X/Y fields, the daemon cannot see it and the old restart paths still apply.
+- `0005-daemon-drag-latch.patch` (applied in `prepare()`, after 0004): drag latch, adds
+  `[Touchpad] DragStartMm` (default 1.5; 0 disables) and `DragReleaseStillMs` (default 300;
+  0 = release only on lift). The firmware click bit is a pressure threshold: it drops out while
+  a finger slides during a click and drag, and is not set again, so the drag broke partway.
+  After a confirmed press, once exactly one contact moves `DragStartMm` from its press
+  position, releases of the bit are ignored (BTN_LEFT stays down, and the singletouch lift no
+  longer clears it). The latch ends when the dragging contact lifts or all contacts are gone
+  (`LiftGraceMs` still applies, the held contacts count as present), or when the bit is
+  released and no contact moves 0.5 mm for `DragReleaseStillMs`. A re-press during the latch
+  just continues the drag. Palm block or disabling the device also ends it. A click that never
+  moves `DragStartMm` releases immediately as before. Two moving contacts never latch, and
+  0002's scroll cancel still ends a latched drag. 0002's cancel now counts the contacts that
+  moved (2 or more) instead of using the farthest one, so a drag with a second resting contact
+  (thumb) is not cancelled. The stillness release uses the same runner timeout as `LiftGraceMs`,
+  so it fires even if the sensor sends no frames. Pausing mid-drag with a light touch (bit
+  released, finger still) releases after `DragReleaseStillMs`: raise it, or set it to 0, if that
+  bites.
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset

@@ -1,0 +1,422 @@
+daemon: Latch click-and-drag across firmware button dropouts
+
+The Sensel firmware's pressure bit (the touchpad button) drops out while a
+finger slides during a click and drag, because the pressure falls, and does not
+come back. The button released in the middle of the drag.
+
+Once a confirmed press is followed by exactly one contact moving
+[Touchpad] DragStartMm (default 1.5), a drag is latched and releases of the
+firmware bit are ignored. The latch ends when the dragging contact lifts (the
+contacts already have LiftGraceMs applied), when all contacts are gone, or when
+the bit is released and the contacts stay still (less than 0.5 mm) for
+[Touchpad] DragReleaseStillMs (default 300; 0 releases only on lift). A
+re-press of the bit during the latch continues the drag. A palm block or
+disabling the device ends it. Clicks without movement still release at once.
+
+The runner timeout from LiftGraceMs is reused so the stillness release also
+happens if the sensor stops sending frames. While latched, the singletouch lift
+no longer clears BTN_LEFT behind the latch's back.
+
+The two-finger scroll cancel of ButtonMaxMoveMm now counts the contacts that
+moved instead of looking at the farthest one: a drag with a second, resting
+contact (thumb) is no longer cancelled; two moving contacts still are.
+
+diff --git i/etc/iptsd.conf w/etc/iptsd.conf
+index 72cf95b..36166f0 100644
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -82,6 +82,24 @@
+ ##
+ # LiftGraceMs = 30
+ 
++##
++## Drag latch. Once a button press is confirmed and exactly one contact then moves this far
++## (in millimeters), a drag has begun and releases of the firmware's button bit are ignored,
++## because the bit drops out while the finger slides (pressure falls). The button is then
++## released when the dragging contact lifts (after LiftGraceMs), or when the bit is released
++## and the contacts stay still (less than 0.5 mm) for DragReleaseStillMs. A re-press of the
++## bit during the latch continues the drag. Clicks without movement release immediately.
++## DragStartMm = 0 disables the latch. (Default 1.5)
++##
++# DragStartMm = 1.5
++
++##
++## How long (in milliseconds) the button bit must stay released and the contacts must stay
++## still before a latched drag is released. 0 releases only when the contact lifts.
++## (Default 300)
++##
++# DragReleaseStillMs = 300
++
+ [Contacts]
+ ##
+ ## How the neutral value of the heatmap will be determined.
+diff --git i/src/apps/daemon/touch.hpp w/src/apps/daemon/touch.hpp
+index 50737a8..bb5887f 100644
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -20,6 +20,7 @@
+ #include <chrono>
+ #include <cmath>
+ #include <iterator>
++#include <limits>
+ #include <map>
+ #include <memory>
+ #include <optional>
+@@ -43,6 +44,9 @@ private:
+ 	// A reappearing contact is only merged with a vanished one if it is this close (mm).
+ 	constexpr static f64 LIFT_GRACE_RADIUS_MM = 5.0;
+ 
++	// A latched drag counts as still while no contact moves this far (mm).
++	constexpr static f64 DRAG_STILL_MM = 0.5;
++
+ private:
+ 	std::shared_ptr<UinputDevice> m_uinput = std::make_shared<UinputDevice>();
+ 
+@@ -126,6 +130,27 @@ private:
+ 	// When the last frame was seen.
+ 	std::chrono::steady_clock::time_point m_bridge_time {};
+ 
++	// Distance (mm) the pressing contact has to move after a press to start a drag. 0 disables.
++	f64 m_drag_start_mm = 0;
++
++	// Time (ms) the button bit has to stay released with all contacts still to end a drag.
++	f64 m_drag_release_still_ms = 0;
++
++	// Whether a drag is latched: firmware releases of the button bit are ignored.
++	bool m_drag_latched = false;
++
++	// The index of the contact that started the latched drag.
++	usize m_drag_index = 0;
++
++	// The raw state of the firmware button bit, as last reported.
++	bool m_fw_button = false;
++
++	// Positions (mm) from where the contacts have to stay still to end a latched drag.
++	std::map<usize, Vector2<f64>> m_drag_still_anchor {};
++
++	// Since when the contacts stayed still, with the button bit released.
++	std::chrono::steady_clock::time_point m_drag_still_since {};
++
+ 	// The last debounced (emitted) state of the touchpad button.
+ 	bool m_button_state = false;
+ 
+@@ -173,6 +198,8 @@ public:
+ 			m_overshoot = config.touchpad_overshoot;
+ 			m_disable_on_palm = config.touchpad_disable_on_palm;
+ 			m_lift_grace_ms = config.touchpad_lift_grace_ms;
++			m_drag_start_mm = config.touchpad_drag_start_mm;
++			m_drag_release_still_ms = config.touchpad_drag_release_still_ms;
+ 		} else {
+ 			m_uinput->set_propbit(INPUT_PROP_DIRECT);
+ 
+@@ -226,6 +253,7 @@ public:
+ 		m_blocked = this->is_blocked(contacts);
+ 
+ 		if (m_blocked) {
++			this->end_drag();
+ 			this->reset_bridge();
+ 			this->lift_all();
+ 		} else {
+@@ -236,6 +264,7 @@ public:
+ 
+ 		this->track_positions(contacts);
+ 		this->track_button_motion();
++		this->track_drag();
+ 
+ 		// The button bit may have been set before the hold time was over.
+ 		this->confirm_button();
+@@ -248,11 +277,16 @@ public:
+ 	 */
+ 	[[nodiscard]] i32 timeout_ms() const
+ 	{
+-		if (m_ghosts.empty())
++		const bool drag = this->drag_timer_active();
++
++		if (m_ghosts.empty() && !drag)
+ 			return -1;
+ 
+ 		const auto now = std::chrono::steady_clock::now();
+-		f64 remaining = m_lift_grace_ms;
++		f64 remaining = std::numeric_limits<f64>::max();
++
++		if (!m_ghosts.empty())
++			remaining = m_lift_grace_ms;
+ 
+ 		for (const auto &[index, ghost] : m_ghosts) {
+ 			const f64 gone =
+@@ -261,17 +295,25 @@ public:
+ 			remaining = std::min(remaining, m_lift_grace_ms - gone);
+ 		}
+ 
++		if (drag) {
++			const f64 still =
++				std::chrono::duration<f64, std::milli>(now - m_drag_still_since).count();
++
++			remaining = std::min(remaining, m_drag_release_still_ms - still);
++		}
++
+ 		// +1: a contact is released once it was gone for more than the grace time.
+ 		return casts::to<i32>(std::max(0.0, std::ceil(remaining)) + 1);
+ 	}
+ 
+ 	/*!
+-	 * Releases held contacts whose grace time is over. Called when no frame arrived in
+-	 * time, as the sensor may stop sending frames once all fingers are lifted.
++	 * Releases held contacts whose grace time is over, and a latched drag that stayed
++	 * still long enough. Called when no frame arrived in time, as the sensor may stop
++	 * sending frames once all fingers are lifted.
+ 	 */
+ 	void expire()
+ 	{
+-		if (m_ghosts.empty())
++		if (m_ghosts.empty() && !this->drag_timer_active())
+ 			return;
+ 
+ 		// Re-run the last frame: the real contacts stay as they are, expired ghosts lift.
+@@ -285,6 +327,8 @@ public:
+ 	 */
+ 	void update(const ipts::samples::Button &button)
+ 	{
++		m_fw_button = button.active;
++
+ 		// If the touch device is disabled, or all output is suppressed because of a
+ 		// palm, ignore the raw button sample too. Without this, a firm palm press that
+ 		// mechanically trips the click sensor would still register a click even though
+@@ -299,6 +343,17 @@ public:
+ 			return;
+ 		}
+ 
++		// During a latched drag the firmware bit is ignored: it drops out while the finger
++		// slides. A release only starts the stillness timer, a re-press just continues.
++		if (m_drag_latched) {
++			if (!button.active) {
++				m_drag_still_anchor = m_positions;
++				m_drag_still_since = std::chrono::steady_clock::now();
++			}
++
++			return;
++		}
++
+ 		// Release: immediate, and cancels a press that has not been confirmed yet.
+ 		if (!button.active) {
+ 			m_button_pending = false;
+@@ -368,6 +423,8 @@ public:
+ 	{
+ 		m_enabled = false;
+ 
++		this->end_drag();
++
+ 		// Lift all currently active contacts.
+ 		this->lift_all();
+ 		this->sync();
+@@ -643,6 +700,40 @@ private:
+ 		return max;
+ 	}
+ 
++	// How many contacts moved away from the button anchor, and the last one that did.
++	struct Motion {
++		usize movers = 0;
++		usize index = 0;
++	};
++
++	/*!
++	 * Counts the contacts that moved at least threshold (mm) away from the button anchor.
++	 *
++	 * @return nothing if the set of contacts differs from the one in the anchor.
++	 */
++	[[nodiscard]] std::optional<Motion> button_motion(const f64 threshold) const
++	{
++		if (m_positions.size() != m_button_anchor.size())
++			return std::nullopt;
++
++		Motion motion {};
++
++		for (const auto &[index, position] : m_positions) {
++			const auto anchor = m_button_anchor.find(index);
++
++			if (anchor == m_button_anchor.cend())
++				return std::nullopt;
++
++			if ((position - anchor->second).norm() < threshold)
++				continue;
++
++			motion.movers++;
++			motion.index = index;
++		}
++
++		return motion;
++	}
++
+ 	/*!
+ 	 * Rejects button presses that happen while contacts move.
+ 	 *
+@@ -663,18 +754,128 @@ private:
+ 				m_button_suppressed = true;
+ 			}
+ 		} else if (m_button_state) {
+-			const std::optional<f64> d = this->button_displacement();
++			const std::optional<Motion> motion = this->button_motion(m_button_max_move_mm);
+ 
+-			if (!d.has_value()) {
++			if (!motion.has_value()) {
+ 				// A contact came or went, measure from here on.
+ 				m_button_anchor = m_positions;
+-			} else if (m_positions.size() >= 2 && d.value() >= m_button_max_move_mm) {
++			} else if (motion->movers >= 2) {
++				// Only one moving contact is a drag, a resting thumb does not matter.
++				m_drag_latched = false;
+ 				m_button_suppressed = true;
+ 				this->emit_button(false);
+ 			}
+ 		}
+ 	}
+ 
++	/*!
++	 * Latches a drag, and ends it again.
++	 *
++	 * The firmware's button bit is a pressure threshold, and pressure falls while a finger
++	 * slides, so the bit drops out in the middle of a drag and does not come back. Once
++	 * a confirmed press is followed by one contact moving DragStartMm, firmware releases are
++	 * ignored. The drag ends when its contact lifts (LiftGraceMs is already applied to the
++	 * contacts), or when the bit is released and the contacts stay still for DragReleaseStillMs.
++	 */
++	void track_drag()
++	{
++		if (!m_drag_latched) {
++			if (m_drag_start_mm <= 0 || !m_button_state)
++				return;
++
++			const std::optional<Motion> motion = this->button_motion(m_drag_start_mm);
++
++			if (!motion.has_value()) {
++				m_button_anchor = m_positions;
++				return;
++			}
++
++			// Two or more moving contacts are a scroll, not a drag.
++			if (motion->movers != 1)
++				return;
++
++			m_drag_latched = true;
++			m_drag_index = motion->index;
++			m_drag_still_anchor = m_positions;
++			m_drag_still_since = std::chrono::steady_clock::now();
++			return;
++		}
++
++		if (!m_button_state || m_current.empty() || m_positions.count(m_drag_index) == 0) {
++			this->end_drag();
++			return;
++		}
++
++		if (!this->drag_timer_active())
++			return;
++
++		const auto now = std::chrono::steady_clock::now();
++		const std::optional<f64> d = this->still_displacement();
++
++		if (!d.has_value() || d.value() >= DRAG_STILL_MM) {
++			m_drag_still_anchor = m_positions;
++			m_drag_still_since = now;
++			return;
++		}
++
++		const f64 still =
++			std::chrono::duration<f64, std::milli>(now - m_drag_still_since).count();
++
++		if (still >= m_drag_release_still_ms)
++			this->end_drag();
++	}
++
++	/*!
++	 * Whether a latched drag waits for the contacts to stay still.
++	 */
++	[[nodiscard]] bool drag_timer_active() const
++	{
++		return m_drag_latched && !m_fw_button && m_drag_release_still_ms > 0;
++	}
++
++	/*!
++	 * Ends a latched drag and releases the button.
++	 */
++	void end_drag()
++	{
++		if (!m_drag_latched)
++			return;
++
++		m_drag_latched = false;
++		m_button_pending = false;
++		m_button_anchor.clear();
++
++		// If the bit is still set, do not press again until it was released.
++		m_button_suppressed = m_fw_button;
++
++		if (m_button_state)
++			this->emit_button(false);
++	}
++
++	/*!
++	 * Largest distance (mm) any contact moved away from the stillness anchor.
++	 *
++	 * @return nothing if the set of contacts differs from the one in the anchor.
++	 */
++	[[nodiscard]] std::optional<f64> still_displacement() const
++	{
++		if (m_positions.size() != m_drag_still_anchor.size())
++			return std::nullopt;
++
++		f64 max = 0;
++
++		for (const auto &[index, position] : m_positions) {
++			const auto anchor = m_drag_still_anchor.find(index);
++
++			if (anchor == m_drag_still_anchor.cend())
++				return std::nullopt;
++
++			max = std::max(max, (position - anchor->second).norm());
++		}
++
++		return max;
++	}
++
+ 	/*!
+ 	 * Builds the difference between the current and the last frame.
+ 	 * Contacts that were present in the last frame but not in this one have to be lifted.
+@@ -885,7 +1086,10 @@ private:
+ 		m_uinput->emit(EV_KEY, BTN_TOUCH, 0);
+ 
+ 		if (m_info.is_touchpad()) {
+-			m_uinput->emit(EV_KEY, BTN_LEFT, 0);
++			// A latched drag releases the button itself, when it ends.
++			if (!m_drag_latched)
++				m_uinput->emit(EV_KEY, BTN_LEFT, 0);
++
+ 			m_uinput->emit(EV_KEY, BTN_TOOL_FINGER, 0);
+ 			m_uinput->emit(EV_KEY, BTN_TOOL_DOUBLETAP, 0);
+ 			m_uinput->emit(EV_KEY, BTN_TOOL_TRIPLETAP, 0);
+diff --git i/src/core/generic/config.hpp w/src/core/generic/config.hpp
+index 526a767..cb7223c 100644
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -38,6 +38,8 @@ public:
+ 	f64 touchpad_button_hold_ms = 70;
+ 	f64 touchpad_button_max_move_mm = 1.5;
+ 	f64 touchpad_lift_grace_ms = 30;
++	f64 touchpad_drag_start_mm = 1.5;
++	f64 touchpad_drag_release_still_ms = 300;
+ 
+ 	// [Contacts]
+ 	std::string contacts_neutral = "mode";
+diff --git i/src/core/linux/config-loader.hpp w/src/core/linux/config-loader.hpp
+index 4966ed8..9ed17d8 100644
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -164,6 +164,8 @@ private:
+ 		this->get(ini, "Touchpad", "ButtonHoldMs", m_config.touchpad_button_hold_ms);
+ 		this->get(ini, "Touchpad", "ButtonMaxMoveMm", m_config.touchpad_button_max_move_mm);
+ 		this->get(ini, "Touchpad", "LiftGraceMs", m_config.touchpad_lift_grace_ms);
++		this->get(ini, "Touchpad", "DragStartMm", m_config.touchpad_drag_start_mm);
++		this->get(ini, "Touchpad", "DragReleaseStillMs", m_config.touchpad_drag_release_still_ms);
+ 
+ 		this->get(ini, "Contacts", "Neutral", m_config.contacts_neutral);
+ 		this->get(ini, "Contacts", "NeutralValue", m_config.contacts_neutral_value);

@@ -300,10 +300,10 @@ for line in txt.splitlines():
     if m:
         cur['dev'] = m.group(1)
         continue
-    m = re.match(r'^\s+pad(\d+): (Sink|Source)', line)
+    m = re.match(r'^\s+pad(\d+): (Sink|Source)', line, re.I)
     if m:
         pad = int(m.group(1))
-        cur['pads'][pad] = (m.group(2), [])
+        cur['pads'][pad] = (m.group(2).capitalize(), [])
         continue
     m = re.match(r'^\s+-> "(.+?)":(\d+) \[', line)
     if m and pad is not None:
