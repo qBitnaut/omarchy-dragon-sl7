@@ -98,6 +98,18 @@ All patches are GPL-2.0 and carry the upstream author, `Signed-off-by` chain,
 a `commit <sha> upstream.` line and `Origin:`/`Upstream-Status:` headers. Rework
 is limited to the items marked below.
 
+### Config: no Qualcomm Crypto Engine (7.2.8-6)
+
+`config.sl7` sets `# CONFIG_CRYPTO_DEV_QCE is not set`. On 7.2 `qcrypto`
+(`1dfa000.crypto`) takes a permanent 393600 kBps ALWAYS-tagged crypto to EBI1
+interconnect vote at probe and has no runtime PM, so it holds DDR out of
+collapse whenever it is bound. 7.3 marks the driver BROKEN (`df373d39c6f0`),
+and the ARMv8 Crypto Extensions cover the kernel's crypto. A 10 minute suspend
+on 7.2.8-5 with `qcrypto`, ath12k, `hci_uart` and USB wakeup removed still left
+`cxsd`, `ddr` and `aosd` at 0, so this is not expected to be sufficient alone;
+`sl7-sleepstats --trace` finds the remaining holders. `scripts/check-config.sh`
+now also asserts `# CONFIG_X is not set` lines from the fragment.
+
 ### 7.3 PDC pass-through and deepest idle state (Maulik Shah)
 
 Series "x1e80100: Enable PDC wake GPIOs and deepest idle state"

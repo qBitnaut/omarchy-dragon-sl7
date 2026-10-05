@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=17
+pkgrel=18
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -22,6 +22,7 @@ optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarch
             'mpv: sl7-powertest video'
             'bluez-utils: bluetoothctl in sl7-mac status'
             'v4l-utils: media-ctl and v4l2-ctl for sl7-ir-probe'
+            'pciutils: lspci in sl7-sleepstats --trace'
             'libcamera-tools: cam and qcam to test the webcam'
             'pipewire-libcamera: the webcam in browsers and video calls')
 backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
@@ -108,7 +109,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            'abdb569b769dbbfe5c52d3f38a846239c1862b24b53c974a83d87cc9f5649f5a'
+            '8d1ef731133ed83f14ac28be95f8e73ba9f90dd1f7d1e7aa8b5a77aa64edd164'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -129,7 +130,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'abae97fedcf6d965051b24c27d6e4755d96623243ab1a2c17b746b35ca2d098f'
             '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a'
             '41cf0f5821f9dc5bee37b55e32f220b022e8b8cf008d5269281b293f283c4c92'
-            '7dda4347b95960af00b4e280d6f042e297c4934f9891fcd7ec4f15c266d682f1')
+            '424e4583f1756581bca4ccc3ddd8915bd5966ad2e58f4b46803add3571188393')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"

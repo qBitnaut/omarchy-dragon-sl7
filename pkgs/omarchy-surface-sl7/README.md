@@ -398,6 +398,34 @@ that is why the baseline sets `ENABLE=no` first. The user part also holds 60 Hz:
 "before" run at 120 Hz, `systemctl --user stop omarchy-sl7-powermode` as well and run
 `omarchy-sl7-powermode ac`.
 
+### 12c. Finding what blocks SoC sleep: `sl7-sleepstats --trace`
+
+`sudo sl7-sleepstats` prints the `qcom_stats` counters (`cxsd`, `ddr` and `aosd` should count in
+a deep suspend). When they stay at 0, run the guided capture on battery:
+
+```
+sudo sl7-sleepstats --trace --minutes 10
+sudo sl7-sleepstats --trace --unload-suspects      # same, with the cheap holders removed
+```
+
+It writes `~/sl7-sleeptrace-<date>/` (owned by you, not root): an awake snapshot (cmd-db,
+`qcom_stats` including `ddr_stats`, `interconnect_summary` and its ALWAYS/untagged-with-bandwidth
+filter, `clk_summary` and its enabled filter, regulators, power domains, runtime-PM and
+wakeup-enabled devices, remoteprocs, `lspci -tv`), then arms the `rpmh`, `interconnect`, `clk`,
+`rpm` and `power:suspend_resume` tracepoints plus dynamic debug on `rpmh.c` and runs
+`systemctl suspend`. Keep the lid closed for N minutes (default 8) and wake it with the power
+button or lid. Afterwards the tracing state is restored (also on Ctrl-C) and `ANALYSIS.txt` is
+printed: (a) the final RPMh sleep set with BCM votes decoded (nonzero `MC0`/`SH0`/`ACV` means DDR
+is held), (b) `skipping RPMH req` addresses (`xo.lvl`/`cx.lvl` flagged), (c) `qcom_stats` and
+`ddr_stats` deltas with the ADSP and CDSP wake rates, (d) ALWAYS interconnect votes that never
+dropped to 0, (e) whether the two UARTs runtime-suspended, (f) whether PCIe re-initialised.
+
+`--unload-suspects` (also valid with `--suspend-test`) stops `bluetooth.service`, removes
+`qcrypto`, `hci_uart`, `btqca`, `ath12k_wifi7` and `ath12k`, and disables USB wakeup for the run, then
+reloads `ath12k_wifi7` and `hci_uart`, starts Bluetooth again if it was running, and restores the
+wakeup values, also after a failure. Wi-Fi and Bluetooth are off, and USB devices cannot wake the
+laptop, until it finishes. `lspci` comes from the optional `pciutils`.
+
 ### 10. Scriptlet
 
 `post_install`/`post_upgrade`: move the x86 module list aside, update the DTBs and UKI

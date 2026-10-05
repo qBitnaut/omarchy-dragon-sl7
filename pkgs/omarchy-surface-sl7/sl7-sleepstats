@@ -9,6 +9,15 @@
 #   sudo sl7-sleepstats --suspend-test        snapshot, systemctl suspend, wake it by
 #                                             hand, print counter deltas, hours asleep
 #                                             and watts
+#   sudo sl7-sleepstats --trace [--minutes N] guided capture of what keeps CX and DDR
+#                                             from collapsing: awake snapshot, RPMh and
+#                                             interconnect tracing across one suspend,
+#                                             and an automatic ANALYSIS.txt in
+#                                             ~/sl7-sleeptrace-<date>/
+#   ... --unload-suspects                     with --suspend-test or --trace: remove
+#                                             qcrypto, hci_uart, btqca, ath12k_wifi7,
+#                                             ath12k, stop bluetooth.service and disable
+#                                             USB wakeup for the run, then restore
 #
 # Needs root (debugfs) and CONFIG_QCOM_STATS (modprobe qcom_stats is tried).
 # Run --suspend-test on battery with the charger unplugged. Like sl7-powertest it
@@ -16,7 +25,9 @@
 # in 10 mWh), so use 45 minutes or more asleep.
 #
 # Test hooks (all optional): SL7_SYS, SL7_DEBUGFS, SL7_PROC, SL7_SUSPEND_CMD,
-# SL7_ALLOW_NONROOT=1, SL7_POLL_S.
+# SL7_ALLOW_NONROOT=1, SL7_POLL_S, SL7_TRACEFS (tracing directory, default
+# $SL7_SYS/kernel/tracing), SL7_TRACE_HOME (parent of the sl7-sleeptrace-* directory),
+# SL7_KMSG_FILE (read the kernel log from this file instead of journalctl).
 set -u
 
 sys=${SL7_SYS:-/sys}
@@ -24,6 +35,9 @@ debugfs=${SL7_DEBUGFS:-$sys/kernel/debug}
 proc=${SL7_PROC:-/proc}
 suspend_cmd=${SL7_SUSPEND_CMD:-systemctl suspend}
 poll_s=${SL7_POLL_S:-0.5}
+tracefs=${SL7_TRACEFS:-}
+trace_min=8
+unload=0
 
 gauge_step_mwh=10   # energy_now resolution of qcom-battmgr
 cycle_mwh=24        # fixed cost per suspend cycle (Dell 7441; re-measure on the SL7)
@@ -33,7 +47,8 @@ xo_hz=19200000      # qcom_stats durations are 19.2 MHz XO ticks
 
 usage() {
   cat << 'EOF'
-usage: sl7-sleepstats [--suspend-test] [--cycle-mwh N]
+usage: sl7-sleepstats [--suspend-test | --trace] [--minutes N] [--unload-suspects]
+                      [--cycle-mwh N]
 
   (no option)      print qcom_stats, power-domain and cpuidle counters
   --suspend-test   snapshot the counters and energy_now, run `systemctl suspend`,
@@ -41,8 +56,20 @@ usage: sl7-sleepstats [--suspend-test] [--cycle-mwh N]
                    watts (wake the laptop with the power button; the SL7 RTC has no
                    alarm)
   --cycle-mwh N    fixed per-cycle cost to subtract (default 24 mWh)
+  --trace          guided capture: awake snapshot (clocks, interconnect, regulators,
+                   power domains, runtime PM, wakeup, remoteprocs), RPMh/interconnect/
+                   clk/rpm tracing and `systemctl suspend`, then ANALYSIS.txt (final
+                   RPMh sleep set, held-at-active requests, qcom_stats deltas, ALWAYS
+                   interconnect votes that never dropped, UART runtime PM, PCIe
+                   re-init). Output: ~/sl7-sleeptrace-<date>/ of the invoking user
+  --minutes N      with --trace: how long to keep the laptop closed (default 8)
+  --unload-suspects
+                   with --suspend-test or --trace: stop bluetooth.service, remove
+                   qcrypto, hci_uart, btqca, ath12k_wifi7 and ath12k, disable USB wakeup;
+                   afterwards reload ath12k_wifi7 and hci_uart, start bluetooth and
+                   restore the wakeup values (also on failure or Ctrl-C)
 
-Run as root. For --suspend-test the charger must be unplugged.
+Run as root. For --suspend-test the charger must be unplugged; run --trace on battery too.
 EOF
 }
 
@@ -52,9 +79,24 @@ die() {
 }
 
 mode=show
+minutes_given=0
 while (($# > 0)); do
   case $1 in
-    --suspend-test) mode=suspend ;;
+    --suspend-test)
+      [[ $mode == show ]] || die "--suspend-test and --trace are exclusive"
+      mode=suspend
+      ;;
+    --trace)
+      [[ $mode == show ]] || die "--suspend-test and --trace are exclusive"
+      mode=trace
+      ;;
+    --minutes)
+      shift
+      [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || die "--minutes needs a positive integer"
+      trace_min=$1
+      minutes_given=1
+      ;;
+    --unload-suspects) unload=1 ;;
     --cycle-mwh)
       shift
       [[ ${1:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--cycle-mwh needs a number"
@@ -71,6 +113,9 @@ while (($# > 0)); do
   esac
   shift
 done
+
+[[ $minutes_given == 0 || $mode == trace ]] || die "--minutes needs --trace"
+[[ $unload == 0 || $mode != show ]] || die "--unload-suspects needs --suspend-test or --trace"
 
 if [[ ${SL7_ALLOW_NONROOT:-0} != 1 && $EUID -ne 0 ]]; then
   die "needs root (debugfs); run: sudo sl7-sleepstats"
@@ -146,8 +191,23 @@ domain_label() { # genpd state -> human label
   esac
 }
 
+# key count duration_ticks, from ddr_stats ("DDR LPM Stat Name:0xd0<TAB>count:N<TAB>Duration
+# (ticks):T" and "DDR Freq NMhz:<TAB>CP IDX:I<TAB>count:N<TAB>Duration (ticks):T")
+snap_ddr() {
+  local f=$debugfs/qcom_stats/ddr_stats
+  ((have_stats)) && [[ -r $f ]] || return 0
+  awk '
+    function grab(re, off,   v) { v = ""; if (match($0, re)) v = substr($0, RSTART + off, RLENGTH - off); return v }
+    /^DDR LPM Stat Name:/ { k = "lpm-" grab("Name:(0x)?[0-9a-fA-F]+", 5) }
+    /^DDR Freq/           { k = "freq-" grab("Freq [0-9]+", 5) "MHz-cp" grab("CP IDX:[0-9]+", 7) }
+    !/^DDR (LPM|Freq)/    { next }
+    { c = grab("count:[0-9]+", 6); d = grab("Duration \\(ticks\\):[0-9]+", 17)
+      if (k != "" && c != "") printf "%s %s %s\n", k, c, (d == "" ? 0 : d) }' "$f" 2> /dev/null
+}
+
 snapshot() { # dir
   snap_stats > "$1/stats"
+  snap_ddr > "$1/ddr"
   snap_genpd > "$1/genpd"
   snap_cpuidle > "$1/cpuidle"
 }
@@ -187,7 +247,7 @@ print_current() {
   fi
 }
 
-print_deltas() { # before-dir after-dir seconds_asleep
+print_stats_deltas() { # before-dir after-dir seconds_asleep
   local b=$1 a=$2 secs=$3
   printf '\n== qcom_stats deltas ==\n'
   if [[ -s $a/stats && -s $b/stats ]]; then
@@ -198,7 +258,7 @@ print_deltas() { # before-dir after-dir seconds_asleep
         printf "  %-12s +%-10d %+10.1f s", $1, dc, dd
         if (secs > 0 && dc > 0) printf "   (%.1f entries/s)", dc / secs
         printf "\n"
-        v[$1] = dc
+        v[$1] = dc; vd[$1] = dd
       }
       END {
         bad = 0
@@ -206,10 +266,27 @@ print_deltas() { # before-dir after-dir seconds_asleep
         for (i = 1; i <= n; i++) if (v[w[i]] > 0) bad = 1
         if (bad) print "  SoC collapse: YES"
         else print "  SoC collapse: NO (cxsd, ddr and aosd did not count)"
+        if (secs > 0) {
+          n = split("adsp cdsp", w, " ")
+          for (i = 1; i <= n; i++) if (w[i] in v)
+            printf "  %s: %.2f wakeups/s over %.0f s asleep, %.1f%% of the time in its sleep state\n",
+                   w[i], v[w[i]] / secs, secs, 100 * vd[w[i]] / secs
+        }
       }' "$b/stats" "$a/stats"
   else
     printf '  unavailable\n'
   fi
+  if [[ -s ${a}/ddr && -s ${b}/ddr ]]; then
+    printf '\n== ddr_stats deltas ==\n'
+    awk -v hz="$xo_hz" '
+      NR == FNR { c[$1] = $2; d[$1] = $3; next }
+      { printf "  %-24s +%-10d %+10.1f s\n", $1, $2 - c[$1], ($3 - d[$1]) / hz }' "$b/ddr" "$a/ddr"
+  fi
+}
+
+print_deltas() { # before-dir after-dir seconds_asleep
+  local b=$1 a=$2 secs=$3
+  print_stats_deltas "$b" "$a" "$secs"
   printf '\n== power-domain deltas ==\n'
   if [[ -s $a/genpd && -s $b/genpd ]]; then
     awk '
@@ -306,6 +383,523 @@ wait_gauge_step() {
 
 # --- modes ------------------------------------------------------------------------
 
+# --- --unload-suspects: remove the cheap holders for one run, always restore ------------
+
+suspects_active=0
+bt_was_active=0
+reload_mods=()
+
+warn() { printf 'warning: %s\n' "$*" >&2; }
+
+module_loaded() { grep -q "^$1 " "$proc/modules" 2> /dev/null; }
+
+usb_wakeup_files() {
+  local f
+  for f in "$sys"/devices/platform/soc@0/*.usb/power/wakeup "$sys"/devices/platform/soc@0/*/*.usb/power/wakeup; do
+    [[ -e $f ]] && printf '%s\n' "$f"
+  done
+}
+
+unload_suspects() {
+  local m f v
+  suspects_active=1 # set first: a failure half way still restores what was changed
+  : > "$tmp/wakeup.saved"
+  printf 'unloading the suspects (qcrypto, hci_uart, btqca, ath12k_wifi7, ath12k, bluetooth, USB wakeup)...\n'
+  for m in ath12k_wifi7 hci_uart; do
+    module_loaded "$m" && reload_mods+=("$m")
+  done
+  if systemctl is-active --quiet bluetooth.service 2> /dev/null; then
+    bt_was_active=1
+    systemctl stop bluetooth.service || warn "could not stop bluetooth.service"
+  fi
+  # hci_uart before btqca: btqca stays "in use" while hci_uart is loaded
+  for m in qcrypto hci_uart btqca ath12k_wifi7 ath12k; do
+    module_loaded "$m" || continue
+    modprobe -r "$m" || warn "modprobe -r $m failed"
+  done
+  while IFS= read -r f; do
+    v=$(< "$f")
+    printf '%s %s\n' "$f" "$v" >> "$tmp/wakeup.saved"
+    printf 'disabled\n' > "$f" 2> /dev/null || warn "cannot disable $f"
+  done < <(usb_wakeup_files)
+}
+
+restore_suspects() {
+  ((suspects_active)) || return 0
+  suspects_active=0
+  local f v m
+  while read -r f v; do
+    [[ -n $f && -n $v ]] && { printf '%s\n' "$v" > "$f" 2> /dev/null || warn "cannot restore $f"; }
+  done < "$tmp/wakeup.saved"
+  for m in "${reload_mods[@]}"; do
+    modprobe "$m" || warn "modprobe $m failed"
+  done
+  if ((bt_was_active)); then
+    systemctl start bluetooth.service || warn "could not start bluetooth.service"
+  fi
+  printf 'suspects restored (modules reloaded: %s; bluetooth %s; USB wakeup restored)\n' \
+    "${reload_mods[*]:-none}" "$([[ $bt_was_active == 1 ]] && echo started || echo 'was not running')"
+}
+
+# --- --trace: tracing state, always restored ---------------------------------------------
+
+trace_events=(rpmh/rpmh_send_msg interconnect/icc_set_bw clk/clk_disable clk/clk_unprepare
+  rpm/rpm_suspend power/suspend_resume)
+trace_saved=0
+trace_out=""
+trace_owner=""
+
+ddyn_control() { printf '%s' "$debugfs/dynamic_debug/control"; }
+
+save_trace_state() {
+  local e v
+  mkdir -p "$tmp/tstate"
+  cat "$tracefs/tracing_on" > "$tmp/tstate/tracing_on" 2> /dev/null
+  awk '{ print $1; exit }' "$tracefs/buffer_size_kb" > "$tmp/tstate/buffer_size_kb" 2> /dev/null
+  for e in "${trace_events[@]}"; do
+    v=$(cat "$tracefs/events/$e/enable" 2> /dev/null)
+    printf '%s\n' "$v" > "$tmp/tstate/ev.${e//\//_}"
+  done
+  printf '0\n' > "$tmp/tstate/ddyn"
+  if grep -Eq 'rpmh\.c:[0-9]+ .* =[^ ]*p' "$(ddyn_control)" 2> /dev/null; then
+    printf '1\n' > "$tmp/tstate/ddyn"
+  fi
+  trace_saved=1
+}
+
+restore_trace_state() {
+  ((trace_saved)) || return 0
+  trace_saved=0
+  local e v
+  printf '0\n' > "$tracefs/tracing_on" 2> /dev/null
+  if [[ $(< "$tmp/tstate/ddyn") == 0 ]]; then
+    printf 'file rpmh.c -p\n' > "$(ddyn_control)" 2> /dev/null
+  fi
+  for e in "${trace_events[@]}"; do
+    v=$(< "$tmp/tstate/ev.${e//\//_}")
+    [[ -n $v ]] && printf '%s\n' "$v" > "$tracefs/events/$e/enable" 2> /dev/null
+  done
+  v=$(< "$tmp/tstate/buffer_size_kb")
+  [[ $v =~ ^[0-9]+$ ]] && printf '%s\n' "$v" > "$tracefs/buffer_size_kb" 2> /dev/null
+  v=$(< "$tmp/tstate/tracing_on")
+  [[ -n $v ]] && printf '%s\n' "$v" > "$tracefs/tracing_on" 2> /dev/null
+  return 0
+}
+
+find_tracefs() {
+  if [[ -z $tracefs ]]; then
+    tracefs=$sys/kernel/tracing
+    if [[ ! -d $tracefs/events ]]; then
+      mount -t tracefs none "$tracefs" 2> /dev/null || true
+    fi
+    [[ -d $tracefs/events ]] || tracefs=$debugfs/tracing
+  fi
+  [[ -d $tracefs/events/rpmh/rpmh_send_msg ]] ||
+    die "no rpmh tracepoints under $tracefs (need CONFIG_FTRACE/trace events and the rpmh driver)"
+}
+
+kmsg_all() {
+  if [[ -n ${SL7_KMSG_FILE:-} ]]; then
+    cat "$SL7_KMSG_FILE"
+  else
+    journalctl -k -b --no-pager 2> /dev/null
+  fi
+}
+
+kmsg_since() { # epoch seconds
+  if [[ -n ${SL7_KMSG_FILE:-} ]]; then
+    cat "$SL7_KMSG_FILE"
+  else
+    journalctl -k -b --no-pager --since "@$1" 2> /dev/null
+  fi
+}
+
+dump_stats_raw() { # out file
+  local f
+  ((have_stats)) || return 0
+  for f in "$debugfs"/qcom_stats/*; do
+    [[ -f $f ]] || continue
+    printf '== %s\n' "${f##*/}"
+    cat "$f"
+  done > "$1" 2> /dev/null
+}
+
+# enabled (count > 0) or on in hardware (count 0: firmware leftovers) clocks. The 7.2
+# clk_summary header names its columns ("clock count count count rate accuracy phase
+# cycle enable consumer id"), so find the enable count (first "count") and the hardware
+# enable column ("enable") there instead of hard-coding $2 and $9.
+clk_on_filter() { # clk_summary
+  awk '
+    !hdr && $1 == "clock" {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "count" && !ec) ec = i
+        if ($i == "enable") hw = i
+      }
+      if (!ec) ec = 2
+      if (!hw) hw = 9
+      hdr = 1
+      next
+    }
+    !hdr { next }
+    NF >= hw && $ec ~ /^[0-9]+$/ && ($ec > 0 || $hw == "Y")' "$1"
+}
+
+awake_snapshot() { # out dir
+  local o=$1 d f
+  {
+    uname -r
+    cat "$proc/cmdline" "$sys/power/mem_sleep"
+  } > "$o/env" 2> /dev/null
+  cat "$debugfs/cmd-db" > "$o/cmd-db.txt" 2> /dev/null
+  dump_stats_raw "$o/qcom_stats.0"
+  {
+    grep -w qcrypto "$proc/modules" 2> /dev/null
+    ls "$sys/bus/platform/drivers/qcrypto" 2>&1
+  } > "$o/qcrypto.txt"
+  cat "$debugfs/interconnect/interconnect_summary" > "$o/icc.txt" 2> /dev/null
+  # request rows are "dev tag avg peak"; tag 7 is ALWAYS, 0 is untagged (treated as ALWAYS)
+  awk 'NF == 4 && ($2 == 0 || $2 == 7) && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && ($3 > 0 || $4 > 0)' \
+    "$o/icc.txt" > "$o/icc-sleepset-votes.txt"
+  cat "$debugfs/clk/clk_summary" > "$o/clk.txt" 2> /dev/null
+  clk_on_filter "$o/clk.txt" > "$o/clk-on.txt"
+  grep -E 'bi_tcxo|clkref|qupv3|pcie|usb|edp|disp' "$o/clk-on.txt" > "$o/clk-xo-suspects.txt"
+  cat "$debugfs/regulator/regulator_summary" > "$o/regulators.txt" 2> /dev/null
+  cat "$debugfs/pm_genpd/pm_genpd_summary" > "$o/genpd.txt" 2> /dev/null
+  for d in cx cx_ao mx mx_ao mmcx mmcx_ao ebi; do
+    [[ -r $debugfs/pm_genpd/$d/perf_state ]] && printf '%s %s\n' "$d" "$(< "$debugfs/pm_genpd/$d/perf_state")"
+  done > "$o/rpmhpd-perf.txt"
+  grep -l '^active' "$sys"/devices/platform/soc@0/*/power/runtime_status \
+    "$sys"/devices/platform/soc@0/*/*/power/runtime_status > "$o/rpm-active.txt" 2> /dev/null
+  grep -l enabled "$sys"/devices/platform/soc@0/*/power/wakeup "$sys"/devices/platform/soc@0/*/*/power/wakeup \
+    "$sys"/bus/pci/devices/*/power/wakeup > "$o/wakeup-enabled.txt" 2> /dev/null
+  for f in "$sys"/class/remoteproc/*; do
+    [[ -d $f ]] || continue
+    grep . "$f/name" "$f/state"
+  done > "$o/rproc.txt" 2> /dev/null
+  kmsg_all | grep -E 'sync_state\(\) pending|qcom-pdc|pdc' > "$o/boot-notes.txt"
+  if command -v lspci > /dev/null 2>&1; then
+    lspci -tv > "$o/lspci.txt" 2>&1
+  else
+    printf 'lspci not installed (pciutils)\n' > "$o/lspci.txt"
+  fi
+  return 0
+}
+
+# --- ANALYSIS.txt -------------------------------------------------------------------------
+
+# shared awk helpers: hex without strtonum (mawk-safe), and address normalisation
+awk_lib='
+function hex(s,   i, v, c) {
+  s = tolower(s); sub(/^0x/, "", s); v = 0
+  for (i = 1; i <= length(s); i++) {
+    c = index("0123456789abcdef", substr(s, i, 1)); if (c == 0) return -1
+    v = v * 16 + c - 1
+  }
+  return v
+}
+function norm(s) { s = tolower(s); sub(/^0x/, "", s); sub(/^0+/, "", s); return (s == "" ? "0" : s) }
+function field(re, off,   v) { v = ""; if (match($0, re)) v = substr($0, RSTART + off, RLENGTH - off); return v }'
+
+# cmd-db debugfs -> "addr<TAB>kind<TAB>name". Format (cmd-db.c): "Slave BCM (v1.0)", a rule,
+# then "0x%05x: <name> [<payload bytes>]" per entry.
+cmddb_to_tsv() {
+  awk "$awk_lib"'
+    /^Slave / { kind = $2; next }
+    /^0x[0-9a-fA-F]+:/ { a = $1; sub(/:$/, "", a); printf "%s\t%s\t%s\n", norm(a), kind, $2 }' "$1"
+}
+
+analysis_a() { # cmddb.tsv trace
+  printf '(a) Final RPMh sleep set (last [sleep] rpmh_send_msg block before machine_suspend begin)\n'
+  awk -F'\t' "$awk_lib"'
+    FILENAME == ARGV[1] { name[$1] = $3; kind[$1] = $2; next }
+    function copy_block(   i) { fn = n; for (i = 1; i <= n; i++) { fa[i] = ba[i]; fd[i] = bd[i] } }
+    /rpmh_send_msg:/ {
+      st = ""; if (match($0, /\[(sleep|wake|active)\]/)) st = substr($0, RSTART + 1, RLENGTH - 2)
+      a = field("addr: (0x)?[0-9a-fA-F]+", 6); d = field("data: (0x)?[0-9a-fA-F]+", 6)
+      if (a == "" || d == "") next
+      if (st == "sleep") {
+        if (!insl) { n = 0; delete ba; delete bd; delete seen; insl = 1 }
+        k = norm(a)
+        if (!(k in seen)) { seen[k] = ++n; ba[n] = a }
+        bd[seen[k]] = d
+      } else insl = 0
+      next
+    }
+    /suspend_resume: machine_suspend\[[0-9]+\] begin/ { if (!marker) { marker = 1; copy_block(); exit } }
+    END {
+      if (!marker) { copy_block(); print "  note: no machine_suspend begin marker in the trace; using the last [sleep] block in the file" }
+      if (fn == 0) { print "  none: no [sleep] rpmh_send_msg lines found (rpmh tracing off, or the sleep set was never flushed)"; exit }
+      printf "  %-9s %-14s %-4s %-12s %-14s %s\n", "addr", "name", "kind", "data", "decoded", "verdict"
+      for (i = 1; i <= fn; i++) {
+        k = norm(fa[i]); nm = (k in name) ? name[k] : "?"; kd = (k in kind) ? kind[k] : "?"
+        dv = hex(fd[i]); dec = ""; verdict = ""
+        if (kd == "BCM") {
+          x = int(dv / 16384) % 16384; y = dv % 16384
+          dec = sprintf("x=%d y=%d", x, y); nbcm++
+          if (x > 0 || y > 0) {
+            if (nm ~ /^(MC[0-9]*|SH[0-9]*|ACV)$/) { verdict = "DDR HELD: nonzero sleep vote"; ddr++; ddrl = ddrl " " nm }
+            else { verdict = "nonzero sleep vote"; oth++; othl = othl " " nm }
+          } else { verdict = "released"; rel++ }
+        } else if (kd == "?") {
+          dec = "(not in cmd-db)"
+        } else {
+          dec = sprintf("level %d", dv)
+          if (nm ~ /^(cx|xo|mx)\.lvl$/) { verdict = (dv > 0) ? "nonzero level" : "zero"; if (dv > 0) lvl = lvl " " nm }
+        }
+        line = sprintf("  0x%-7s %-14s %-4s %-12s %-14s %s", norm(fa[i]), nm, kd, fd[i], dec, verdict)
+        sub(/ +$/, "", line); print line
+      }
+      printf "  => %d sleep entries, %d BCM (%d released). DDR BCMs (MC0/SH0/ACV) with nonzero sleep vote: %d%s\n", fn, nbcm, rel, ddr, ddrl
+      printf "  => other BCMs with nonzero sleep vote: %d%s\n", oth, othl
+      if (lvl != "") printf "  => ARC levels nonzero in the sleep set:%s\n", lvl
+    }' "$1" "$2"
+}
+
+analysis_b() { # cmddb.tsv kmsg
+  printf '(b) "skipping RPMH req" (sleep value equals the wake value: held at the active level)\n'
+  awk -F'\t' "$awk_lib"'
+    FILENAME == ARGV[1] { name[$1] = $3; next }
+    /skipping RPMH req:/ {
+      s = field("a:(0x)?[0-9a-fA-F]+ s:(0x)?[0-9a-fA-F]+ w:(0x)?[0-9a-fA-F]+", 0)
+      if (s == "") next
+      split(s, p, " "); a = substr(p[1], 3); sv = substr(p[2], 3); w = substr(p[3], 3)
+      k = norm(a); cnt[k]++
+      if (!(k in seen)) { seen[k] = ++n; ord[n] = k; A[k] = a; S[k] = sv; W[k] = w }
+    }
+    END {
+      if (n == 0) { print "  none logged (no skipping lines in the kernel log; dynamic debug off, or nothing skipped)"; exit }
+      for (i = 1; i <= n; i++) {
+        k = ord[i]; nm = (k in name) ? name[k] : "?"; v = ""
+        unset = (S[k] ~ /^(0x)?[fF]{16}$/ || W[k] ~ /^(0x)?[fF]{16}$/ || S[k] ~ /^(0x)?[fF]{8}$/ || W[k] ~ /^(0x)?[fF]{8}$/)
+        if (unset) v = "no sleep or wake value registered"
+        else if (norm(S[k]) == norm(W[k]) && hex(S[k]) > 0) v = "held at its active value"
+        else if (norm(S[k]) == norm(W[k])) v = "sleep = wake = 0"
+        if (nm ~ /^(xo|cx)\.lvl$/) {
+          if (!unset && hex(S[k]) > 0 && norm(S[k]) == norm(W[k])) { v = "*** " v ": APPS HOLDS " toupper(substr(nm, 1, 2)); hold = hold " " nm }
+          else v = v " (" nm " listed, but not holding)"
+          flagged = flagged " " nm
+        }
+        printf "  a:0x%-7s %-12s s:%-12s w:%-12s x%d  %s\n", k, nm, S[k], W[k], cnt[k], v
+      }
+      printf "  => %d addresses skipped. xo.lvl/cx.lvl listed:%s\n", n, (flagged == "" ? " no" : flagged)
+      if (hold != "") printf "  => APPS holds:%s at a nonzero level\n", hold
+    }' "$1" "$2"
+}
+
+analysis_d() { # icc-sleepset-votes.txt trace
+  printf '(d) ALWAYS-tagged (or untagged) interconnect requests with bandwidth in the awake snapshot, versus icc_set_bw in the trace\n'
+  if [[ ! -s $1 ]]; then
+    printf '  none: no ALWAYS/untagged request with bandwidth in the awake snapshot\n'
+    return 0
+  fi
+  awk "$awk_lib"'
+    FILENAME == ARGV[1] {
+      if (!($1 in tag)) { ord[++n] = $1; tag[$1] = ($2 == 7 ? "ALWAYS" : "untagged") }
+      avg[$1] += $3; peak[$1] += $4; next
+    }
+    /icc_set_bw:/ {
+      dv = field(" dev=[^ ]+", 5); if (dv == "") next
+      a = field(" avg_bw=[0-9]+", 8); p = field(" peak_bw=[0-9]+", 9)
+      ev[dv]++
+      if (a + 0 == 0 && p + 0 == 0) zero[dv]++
+      la[dv] = a; lp[dv] = p
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        d = ord[i]; v = ""
+        if (!(d in ev)) { v = "HELD: no icc_set_bw event, the vote never changed"; held++; hl = hl " " d }
+        else if (!(d in zero)) { v = sprintf("HELD: never 0 in %d events (last avg=%s peak=%s)", ev[d], la[d], lp[d]); held++; hl = hl " " d }
+        else v = sprintf("dropped to 0 (%d of %d events; last avg=%s peak=%s)", zero[d], ev[d], la[d], lp[d])
+        printf "  %-22s %-8s awake avg=%d peak=%d kBps  %s\n", d, tag[d], avg[d], peak[d], v
+      }
+      printf "  => %d of %d paths never dropped to 0:%s\n", held + 0, n, (hl == "" ? " none" : hl)
+    }' "$1" "$2"
+}
+
+analysis_e() { # trace rpm-active.txt
+  local dev n last
+  printf '(e) UART runtime PM (rpm_suspend events; b88000.serial is the console-side UART, a98000.serial is Bluetooth UR15)\n'
+  for dev in b88000.serial a98000.serial; do
+    n=$(grep -c "rpm_suspend: $dev " "$1" 2> /dev/null || true)
+    last=$(grep "rpm_suspend: $dev " "$1" 2> /dev/null | tail -n 1 | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9.]+:$/) { sub(/:$/, "", $i); print $i; exit } }')
+    if [[ ${n:-0} -gt 0 ]]; then
+      printf '  %-16s rpm_suspend seen %s time(s), last at %s -> runtime-suspended\n' "$dev" "$n" "${last:-?}"
+    elif grep -q "/$dev/power/runtime_status" "$2" 2> /dev/null; then
+      printf '  %-16s NO rpm_suspend event and active in the awake snapshot -> did NOT runtime-suspend (blocker candidate)\n' "$dev"
+    else
+      printf '  %-16s NO rpm_suspend event, not active in the awake snapshot -> was already suspended (or absent)\n' "$dev"
+    fi
+  done
+  printf '  note: pm_runtime_force_suspend() does not emit rpm_suspend; a UART that suspends only that way shows nothing here\n'
+}
+
+analysis_f() { # kmsg
+  local c exit_line part lines
+  printf '(f) PCIe re-initialisation after the resume\n'
+  exit_line=$(grep -n 'PM: suspend exit' "$1" 2> /dev/null | tail -n 1 | cut -d: -f1)
+  if [[ -n $exit_line ]]; then
+    part=$(tail -n +"$exit_line" "$1")
+  else
+    part=$(cat "$1" 2> /dev/null)
+    printf '  note: no "PM: suspend exit" line in the kernel log; searching all of it\n'
+  fi
+  for c in 1bf8000 1c08000 1bd0000; do
+    lines=$(grep -c "$c\\.pcie.*link up" <<< "$part" || true)
+    if [[ ${lines:-0} -gt 0 ]]; then
+      printf '  %s.pcie: link up logged %s time(s) after the resume -> re-initialised (D3cold path)\n' "$c" "$lines"
+    elif grep -q "$c\\.pcie.*Device not found" <<< "$part"; then
+      printf '  %s.pcie: "Device not found" (slot empty)\n' "$c"
+    else
+      printf '  %s.pcie: no link-up line after the resume\n' "$c"
+    fi
+  done
+  if grep -Eq 'nvme nvme0: [0-9]+/[0-9]+/[0-9]+ default/read/poll queues' <<< "$part"; then
+    printf '  nvme0: re-initialised after the resume -> the PCIe controller was fully shut down; PCIe is not the blocker\n'
+  else
+    printf '  nvme0: no re-init line after the resume -> the link was kept up (1 kBps ALWAYS vote plus clkref/XO held)\n'
+  fi
+  if grep -q 'Timeout waiting for L2 entry' <<< "$part"; then
+    printf '  "Timeout waiting for L2 entry!" logged: an endpoint did not acknowledge\n'
+  fi
+}
+
+write_analysis() { # out dir, before dir, after dir, seconds asleep
+  local o=$1 b=$2 a=$3 secs=$4
+  cmddb_to_tsv "$o/cmd-db.txt" > "$tmp/cmddb.tsv"
+  [[ -s $tmp/cmddb.tsv ]] || printf 'warning: cmd-db is empty; addresses cannot be named\n' >&2
+  {
+    printf 'sl7-sleepstats --trace analysis\nkernel %s, mem_sleep %s, asleep about %.0f s\n\n' \
+      "$(head -n 1 "$o/env" 2> /dev/null)" "$(tail -n 1 "$o/env" 2> /dev/null)" "$secs"
+    analysis_a "$tmp/cmddb.tsv" "$o/suspend.trace"
+    printf '\n'
+    analysis_b "$tmp/cmddb.tsv" "$o/kmsg.txt"
+    printf '\n(c) qcom_stats deltas across the suspend'
+    print_stats_deltas "$b" "$a" "$secs"
+    printf '\n'
+    analysis_d "$o/icc-sleepset-votes.txt" "$o/suspend.trace"
+    printf '\n'
+    analysis_e "$o/suspend.trace" "$o/rpm-active.txt"
+    printf '\n'
+    analysis_f "$o/kmsg.txt"
+  } > "$o/ANALYSIS.txt"
+}
+
+do_trace() {
+  local owner="" home start_epoch mem_sleep boot0 mono0 boot1 mono1 asleep susp0 susp1 e
+
+  find_tracefs
+  ((have_stats)) || warn "qcom_stats unavailable: the counters in the analysis will be empty"
+  [[ -r $debugfs/cmd-db ]] || warn "$debugfs/cmd-db is missing: RPMh addresses cannot be named"
+  [[ -w $tracefs/tracing_on ]] || die "cannot write $tracefs/tracing_on"
+
+  if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+    owner=$SUDO_USER
+    home=$(getent passwd "$owner" | cut -d: -f6)
+  fi
+  home=${SL7_TRACE_HOME:-${home:-${HOME:-/root}}}
+  trace_out=$home/sl7-sleeptrace-$(date +%Y%m%d-%H%M)
+  mkdir -p "$trace_out" || die "cannot create $trace_out"
+  trace_owner=$owner
+  chown_out
+  printf 'writing to %s\n' "$trace_out"
+
+  if ac_online; then
+    warn "the charger is connected: unplug it and run on battery, or the SoC will not be in its normal suspend state"
+  fi
+  mem_sleep=$(cat "$sys/power/mem_sleep" 2> /dev/null || true)
+  if [[ $mem_sleep != *"[deep]"* ]]; then
+    warn "mem_sleep is \"${mem_sleep:-?}\", not [deep]: this will not test the deep suspend path"
+  fi
+
+  if ((unload)); then
+    {
+      grep -w qcrypto "$proc/modules" 2> /dev/null
+      ls "$sys/bus/platform/drivers/qcrypto" 2>&1
+    } > "$trace_out/qcrypto-before-unload.txt"
+    unload_suspects
+  fi
+
+  printf '5a: awake snapshot...\n'
+  awake_snapshot "$trace_out"
+
+  mkdir -p "$tmp/before" "$tmp/after"
+  save_trace_state
+  printf '5b: arming tracing (%s), 32768 KB buffer, dynamic debug on rpmh.c...\n' "${trace_events[*]}"
+  printf '0\n' > "$tracefs/tracing_on"
+  : > "$tracefs/trace"
+  printf '32768\n' > "$tracefs/buffer_size_kb" || warn "cannot set buffer_size_kb"
+  for e in "${trace_events[@]}"; do
+    printf '1\n' > "$tracefs/events/$e/enable" || warn "cannot enable event $e"
+  done
+  printf 'file rpmh.c +p\n' > "$(ddyn_control)" 2> /dev/null ||
+    warn "dynamic debug unavailable: no \"skipping RPMH req\" lines (section b will be empty)"
+
+  snapshot "$tmp/before"
+  start_epoch=$(date +%s)
+  boot0=$(boottime_s)
+  mono0=$(mono_s)
+  susp0=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
+  printf '1\n' > "$tracefs/tracing_on"
+
+  sync
+  printf '\n*** Suspending now (%s). Keep the lid closed and leave the laptop alone for %s minutes,\n' \
+    "$suspend_cmd" "$trace_min"
+  printf '*** then wake it with the power button or by opening the lid. The tracing state is\n'
+  printf '*** restored afterwards, also if you press Ctrl-C.\n\n'
+  # shellcheck disable=SC2086  # the command is a word list on purpose
+  if ! $suspend_cmd; then
+    warn "'$suspend_cmd' failed"
+  fi
+
+  # resume: stop first, so the analysis window is the suspend
+  printf '0\n' > "$tracefs/tracing_on"
+  printf 'file rpmh.c -p\n' > "$(ddyn_control)" 2> /dev/null
+  boot1=$(boottime_s)
+  mono1=$(mono_s)
+  susp1=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
+  cat "$tracefs/trace" > "$trace_out/suspend.trace"
+  dump_stats_raw "$trace_out/qcom_stats.1"
+  snapshot "$tmp/after"
+  kmsg_since "$start_epoch" > "$trace_out/kmsg.txt"
+  grep -E '(1bf8000|1c08000|1bd0000)\.pcie|nvme nvme0|PM: suspend (entry|exit)' "$trace_out/kmsg.txt" > "$trace_out/pcie.txt"
+  printf 'resumed; stopping tracing and restoring the system...\n'
+  restore_trace_state
+  restore_suspects
+
+  asleep=$(awk -v b1="$boot1" -v b0="$boot0" 'BEGIN { printf "%.3f", b1 - b0 }')
+  if [[ -n $mono0 && -n $mono1 ]]; then
+    asleep=$(awk -v b1="$boot1" -v b0="$boot0" -v m1="$mono1" -v m0="$mono0" \
+      'BEGIN { printf "%.3f", (b1 - b0) - (m1 - m0) }')
+  fi
+  write_analysis "$trace_out" "$tmp/before" "$tmp/after" "$asleep"
+  chown_out
+  cat "$trace_out/ANALYSIS.txt"
+  if [[ $susp0 != '?' && $susp1 != '?' && $susp1 -le $susp0 ]]; then
+    warn "suspend_stats/success did not increase: no suspend happened, the analysis is meaningless"
+  elif awk -v a="$asleep" -v m="$trace_min" 'BEGIN { exit !(a < m * 30) }'; then
+    warn "asleep only $(awk -v a="$asleep" 'BEGIN { printf "%.0f", a }') s, under half of the requested $trace_min minutes: DDR/CX counters may not have had time to move"
+  fi
+  printf '\nfull capture: %s (ANALYSIS.txt, suspend.trace, kmsg.txt, qcom_stats.0/.1 and the 5a snapshot files)\n' "$trace_out"
+}
+
+chown_out() {
+  [[ -n $trace_owner && -d $trace_out ]] || return 0
+  chown -R "$trace_owner:" "$trace_out" 2> /dev/null || true
+}
+
+cleanup_done=0
+cleanup() {
+  ((cleanup_done)) && return 0
+  cleanup_done=1
+  restore_trace_state
+  restore_suspects
+  chown_out
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 do_show() {
   snapshot "$tmp"
   print_current "$tmp"
@@ -323,6 +917,8 @@ do_suspend() {
   if [[ $mem_sleep != *"[deep]"* ]]; then
     printf 'warning: mem_sleep is "%s", not [deep]: this will not test the deep suspend path\n' "${mem_sleep:-?}" >&2
   fi
+
+  ((unload)) && unload_suspects
 
   local e_first
   e_first=$(energy_uwh)
@@ -412,4 +1008,5 @@ do_suspend() {
 case $mode in
   show) do_show ;;
   suspend) do_suspend ;;
+  trace) do_trace ;;
 esac

@@ -47,3 +47,9 @@ CONFIG_VIDEO_VD55G=m
 CONFIG_LEDS_CLASS_FLASH=m
 CONFIG_LEDS_QCOM_FLASH=m
 CONFIG_V4L2_FLASH_LED_CLASS=m
+
+# No Qualcomm Crypto Engine. On 7.2 qcrypto (1dfa000.crypto) holds a permanent
+# 393600 kBps ALWAYS-tagged crypto -> EBI1 interconnect vote with no runtime PM,
+# which keeps DDR from collapsing in suspend. 7.3 marks it BROKEN (df373d39c6f0),
+# and the ARMv8 Crypto Extensions cover the kernel's crypto needs.
+# CONFIG_CRYPTO_DEV_QCE is not set
