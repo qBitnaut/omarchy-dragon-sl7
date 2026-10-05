@@ -1,0 +1,206 @@
+daemon: Re-enable multitouch when a touchpad falls back to legacy reports
+
+spi-hid can reset the SL7 touchpad without emitting any uevent (a refresh with
+an unchanged report descriptor CRC creates no new hid device). The pad then
+drops back to its fallback (mouse) mode and sends plain HID reports instead of
+touch data, while a running iptsd never notices: pointer moves, two-finger
+scroll is gone, and only a second restart of the unit brings it back.
+
+The runner now watches for that. Touchpads only. Evidence of a reset is a
+legacy report: an input report whose ID is neither touch data nor the button
+report, or, if the button report is a full mouse report (the descriptor gives
+it X / Y), a button report with non-zero motion bytes. Three such reports
+without touch data in the last 300 ms make the runner switch the device to
+singletouch and back to multitouch (what a restart does), at most once per
+backoff period (500 ms, doubled per failed attempt). Touch data arriving at all
+proves multitouch mode works: it clears the counters, and legacy-looking
+reports interleaved with touch data never trigger anything, so a false
+positive costs nothing. After 3 failed recoveries the loop ends and iptsd
+exits, so systemd restarts the unit with a fresh mode switch.
+
+IPTSD_MODE_WATCHDOG=0 in the environment turns it off.
+
+diff --git i/src/core/linux/runner.hpp w/src/core/linux/runner.hpp
+index 02cd2d3..576c805 100644
+--- i/src/core/linux/runner.hpp
++++ w/src/core/linux/runner.hpp
+@@ -16,8 +16,11 @@
+ #include <spdlog/spdlog.h>
+ 
+ #include <atomic>
++#include <chrono>
++#include <cstdlib>
+ #include <filesystem>
+ #include <memory>
++#include <string_view>
+ #include <thread>
+ #include <type_traits>
+ #include <vector>
+@@ -50,6 +53,38 @@ private:
+ 	// The target buffer for reading HID reports.
+ 	std::vector<u8> m_buffer {};
+ 
++	/*
++	 * Mode watchdog (touchpads only)
++	 *
++	 * spi-hid can reset the touchpad without any uevent (a refresh with an unchanged report
++	 * descriptor emits nothing). The device then falls back to mouse mode and sends legacy
++	 * reports instead of touch data, while this process keeps running unaware. Legacy
++	 * reports with no touch data around them are the signal; the cure is to switch the
++	 * device through singletouch back to multitouch, like a restart would.
++	 */
++
++	// Legacy reports (with no touch data around them) needed to trigger a recovery.
++	constexpr static usize WATCHDOG_REPORTS = 3;
++
++	// Touch data this recent means the device is in multitouch mode; legacy reports
++	// seen alongside it are ignored.
++	constexpr static auto WATCHDOG_TOUCH_GRACE = 300ms;
++
++	// Wait after a mode change before judging again; doubled for every failed recovery.
++	constexpr static auto WATCHDOG_BACKOFF = 500ms;
++
++	// Failed in-process recoveries before giving up and exiting (systemd restarts us).
++	constexpr static usize WATCHDOG_MAX_FAILURES = 3;
++
++	using Clock = std::chrono::steady_clock;
++
++	bool m_watchdog = true;
++	usize m_legacy_reports = 0;
++	usize m_recoveries = 0;
++	bool m_have_touch = false;
++	Clock::time_point m_last_touch {};
++	Clock::time_point m_last_mode_change {};
++
+ 	/*
+ 	 * deferred initialization
+ 	 */
+@@ -74,6 +109,11 @@ public:
+ 
+ 		m_buffer.resize(m_ipts.buffer_size());
+ 
++		// IPTSD_MODE_WATCHDOG=0 turns the mode watchdog off.
++		const char *watchdog = std::getenv("IPTSD_MODE_WATCHDOG");
++		m_watchdog = info.type == ipts::Device::Type::Touchpad &&
++			     !(watchdog != nullptr && std::string_view {watchdog} == "0");
++
+ 		const u16 vendor = info.vendor;
+ 		const u16 product = info.product;
+ 
+@@ -89,6 +129,52 @@ public:
+ 		}
+ 	}
+ 
++	/*!
++	 * Handles a report that is only sent outside multitouch mode.
++	 *
++	 * @return false if the device cannot be recovered and the loop should end.
++	 */
++	bool on_legacy_report()
++	{
++		if (!m_watchdog)
++			return true;
++
++		const auto now = Clock::now();
++
++		// Touch data is flowing: the device is in multitouch mode, whatever else it sends.
++		if (m_have_touch && now - m_last_touch < WATCHDOG_TOUCH_GRACE) {
++			m_legacy_reports = 0;
++			return true;
++		}
++
++		m_legacy_reports++;
++
++		if (m_legacy_reports < WATCHDOG_REPORTS)
++			return true;
++
++		if (now - m_last_mode_change < WATCHDOG_BACKOFF * (1u << m_recoveries))
++			return true;
++
++		if (m_recoveries >= WATCHDOG_MAX_FAILURES) {
++			spdlog::error("Device keeps sending legacy reports, giving up");
++			return false;
++		}
++
++		spdlog::warn("Device sent legacy reports without touch data, re-enabling multitouch");
++
++		// Book-keeping first, so a failing set_mode() cannot cause a tight retry loop.
++		m_recoveries++;
++		m_legacy_reports = 0;
++		m_last_mode_change = Clock::now();
++
++		m_ipts.set_mode(ipts::Device::Mode::Singletouch);
++		std::this_thread::sleep_for(50ms);
++		m_ipts.set_mode(ipts::Device::Mode::Multitouch);
++
++		m_last_mode_change = Clock::now();
++		return true;
++	}
++
+ 	/*!
+ 	 * The application instance that is being run.
+ 	 *
+@@ -127,6 +213,7 @@ public:
+ 
+ 		// Enable multitouch mode
+ 		m_ipts.set_mode(ipts::Device::Mode::Multitouch);
++		m_last_mode_change = Clock::now();
+ 
+ 		// Signal the application that the data flow has started.
+ 		m_application->on_start();
+@@ -152,7 +239,16 @@ public:
+ 				const usize size = m_device->read(m_buffer);
+ 				const gsl::span<u8> data {m_buffer.data(), size};
+ 
++				// Checked first: the button report may be a full mouse report.
++				if (m_watchdog && m_ipts.is_legacy_data(data) && !on_legacy_report())
++					break;
++
+ 				if (m_ipts.is_touch_data(m_buffer)) {
++					// Touch data proves multitouch mode works; forgive past recoveries.
++					m_last_touch = Clock::now();
++					m_have_touch = true;
++					m_legacy_reports = 0;
++					m_recoveries = 0;
+ 					m_application->process(data);
+ 				} else if (m_ipts.is_button_data(m_buffer)) {
+ 					m_application->process_button_report(data);
+diff --git i/src/ipts/device.hpp w/src/ipts/device.hpp
+index 958b431..1c801d1 100644
+--- i/src/ipts/device.hpp
++++ w/src/ipts/device.hpp
+@@ -215,6 +215,34 @@ public:
+ 
+ 		return m_button_report->report_id == buffer[0];
+ 	}
++
++	/*!
++	 * Checks whether a report is legacy (mouse mode) pointer data.
++	 *
++	 * A touchpad that was reset by the host driver drops back to its fallback mode, where it
++	 * sends plain HID reports instead of touch data. Those are either reports with an ID that
++	 * is neither touch data nor the button report, or, if the button report is a full mouse
++	 * report (it has X / Y fields), a button report that carries motion.
++	 *
++	 * @param[in] buffer The buffer that was read from the device.
++	 * @return Whether the buffer holds a report that is only sent outside multitouch mode.
++	 */
++	[[nodiscard]] bool is_legacy_data(const gsl::span<u8> buffer) const
++	{
++		if (buffer.size() < 2 || is_touch_data(buffer))
++			return false;
++
++		if (!is_button_data(buffer))
++			return true;
++
++		// Generic Desktop page, X and Y usages.
++		const bool has_motion = m_button_report->has_usage(0x0001, 0x30) ||
++					m_button_report->has_usage(0x0001, 0x31);
++		if (!has_motion)
++			return false;
++
++		return std::any_of(buffer.begin() + 2, buffer.end(), [](u8 b) { return b != 0; });
++	}
+ };
+ 
+ } // namespace iptsd::ipts

@@ -1,7 +1,7 @@
 pkgbase = iptsd-sl7
 	pkgdesc = Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)
 	pkgver = 3.1.0.r20260717
-	pkgrel = 10
+	pkgrel = 11
 	url = https://github.com/alex-lentz/iptsd
 	arch = aarch64
 	license = GPL-2.0-or-later
@@ -34,6 +34,7 @@ pkgbase = iptsd-sl7
 	source = 0001-daemon-require-button-hold-time.patch
 	source = 0002-daemon-button-motion-gating.patch
 	source = 0003-daemon-lift-grace.patch
+	source = 0004-runner-reenable-multitouch-on-legacy-reports.patch
 	sha256sums = ce9935fb7c38365f4fa65070e819bf901e10082c5fb2ea67e49b3a60b225ed92
 	sha256sums = 2c1ffc2088dd9e65f18e79f1e1b6d3fbcb815e75843ebed8142da6f96f89bbb0
 	sha256sums = c58408721cd808a51c4970d6e2a8397a136b899bcf6904069646c8f4ea6b86ef
@@ -45,5 +46,6 @@ pkgbase = iptsd-sl7
 	sha256sums = c79e82423445434063ce5fc84db251580109b5ba5ba7c727357b395dd21faf76
 	sha256sums = 3562a392621760912fb3f1cda9cef9a64ceb75551edec784eba4044f47d851f8
 	sha256sums = ba7b12f31613d1ce83b451c3b4218d57083e20495602e110208e43f4efda5bbc
+	sha256sums = bf6048d530ab401fb1e040e12a77383a5d29c5e95431809e993b91126c438794
 
 pkgname = iptsd-sl7

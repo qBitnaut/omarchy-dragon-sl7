@@ -1,0 +1,92 @@
+#!/bin/bash
+# Surface Laptop 7 touchpad defaults for the user's Hyprland config.
+#
+# Tap-to-click is off by default on the SL7: Hyprland's tapping gave false left
+# clicks and repeated right clicks during two-finger scrolls (a two-finger tap is
+# a right click). Omarchy's defaults cannot be changed from a package, and
+# ~/.config/hypr/input.lua is the user's own file, so this appends one marked
+# block to it, ONCE per user:
+#
+#   - nothing is done while input.lua does not exist (Omarchy creates it; the
+#     user service retries at the next login);
+#   - nothing is appended if input.lua already sets tap_to_click itself;
+#   - after the first run a state file is written and the file is never touched
+#     again, so deleting or editing the block (tap_to_click = true) sticks.
+#
+# The block is loaded after Omarchy's defaults and is plain Lua in the user's file,
+# so later lines in input.lua override it. The running Hyprland gets the value
+# through `hyprctl eval` (`hyprctl keyword` does not work with the Lua parser);
+# the config is never reloaded from here.
+#
+# Usage: omarchy-sl7-touchpad-defaults [--check]
+#   --check   report what would happen, change nothing (exit 0 applied/not needed,
+#             1 pending)
+set -u
+
+input=${OMARCHY_SL7_HYPR_INPUT:-$HOME/.config/hypr/input.lua}
+state=${OMARCHY_SL7_TOUCHPAD_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-surface-sl7/touchpad-defaults}
+lua='hl.config({ input = { touchpad = { tap_to_click = false } } })'
+
+check=0
+case ${1:-} in
+  --check) check=1 ;;
+  '') ;;
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+  *) echo "omarchy-sl7-touchpad-defaults: unknown option: $1" >&2; exit 2 ;;
+esac
+
+say() { echo "omarchy-sl7-touchpad-defaults: $*"; }
+
+# An uncommented tap_to_click anywhere in the file counts as the user's choice.
+user_sets_tap() {
+  grep -v '^[[:space:]]*--' "$input" | grep -q 'tap_to_click'
+}
+
+hypr_env() {
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && return 0
+  local d rt=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+  d=$(ls -dt "$rt"/hypr/*/ 2>/dev/null | head -n 1)
+  [[ -n $d ]] || return 1
+  d=${d%/}
+  HYPRLAND_INSTANCE_SIGNATURE=${d##*/}
+  export HYPRLAND_INSTANCE_SIGNATURE
+}
+
+apply_live() {
+  command -v hyprctl >/dev/null 2>&1 && hypr_env || return 0
+  hyprctl eval "$lua" >/dev/null 2>&1 || true
+}
+
+if [[ -e $state ]]; then
+  ((check)) && say "already applied or declined ($state)"
+  exit 0
+fi
+if [[ ! -f $input ]]; then
+  say "$input does not exist yet; will retry at the next login"
+  ((check)) && exit 1
+  exit 0
+fi
+
+if user_sets_tap; then
+  say "$input already sets tap_to_click; leaving it alone"
+  ((check)) && exit 0
+else
+  if ((check)); then
+    say "pending: would append tap_to_click = false to $input"
+    exit 1
+  fi
+  # Make sure the block starts on its own line.
+  if [[ -s $input && -n $(tail -c 1 "$input") ]]; then echo >>"$input"; fi
+  {
+    echo
+    echo '-- omarchy-surface-sl7: tap-to-click is off by default on the Surface Laptop 7'
+    echo '-- (false clicks and repeated right clicks during two-finger scrolls). Added once;'
+    echo '-- the package never touches this file again. Set it to true to turn tapping on.'
+    echo "$lua"
+  } >>"$input" || { say "could not write $input" >&2; exit 0; }
+  say "appended tap_to_click = false to $input"
+  apply_live
+fi
+
+mkdir -p "${state%/*}" && echo 1 >"$state"
+exit 0

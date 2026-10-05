@@ -65,8 +65,11 @@ iptsd version.
 ## Tap-to-click
 
 Not an iptsd option (`[Touchpad]` has only `Disable`, `DisableOnPalm`, `Overshoot`,
-`ButtonDebounceMs`, plus the patched-in keys below). It is a libinput setting; disable it in the compositor, for
-Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package.
+`ButtonDebounceMs`, plus the patched-in keys below). It is a libinput setting that the
+compositor owns. Hyprland's default tapping gave false left clicks and repeated right
+clicks (a two-finger tap) during two-finger scrolls on the SL7, so `omarchy-surface-sl7`
+turns it off once per user (`tap_to_click = false` appended to `~/.config/hypr/input.lua`,
+see its README, "Touchpad defaults"). Set it to `true` there to get tapping back.
 
 ## Licensing
 
@@ -109,6 +112,25 @@ Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package
   code is unpublished; this is an independent implementation). 30 ms is a few
   sensor frames, well under a deliberate tap-lift-tap; ELLX's own comment
   suggests 70 ms was too long.
+- `0004-runner-reenable-multitouch-on-legacy-reports.patch` (applied in `prepare()`, after
+  0003): mode watchdog, touchpads only. spi-hid can reset the pad without any uevent (a
+  refresh whose report-descriptor CRC is unchanged creates no new hid device, so udev and the
+  `iptsd-sl7-restart` helper never hear of it). The pad then falls back to mouse mode and a
+  running iptsd keeps waiting for touch data; two-finger scroll is gone until the unit is
+  restarted, sometimes twice. The runner now counts legacy reports: input reports whose ID is
+  neither touch data nor the button report, plus, if the button report is a full mouse report
+  (its descriptor has X/Y), button reports with non-zero motion bytes. Those only exist outside
+  multitouch mode. Three of them with no touch data in the last 300 ms switch the device to
+  singletouch and back to multitouch (what a restart does), at most once per 500 ms, doubled
+  per failed attempt. Touch data at all proves multitouch works: it resets the counters, and
+  legacy-looking reports interleaved with touch data never trigger anything, so a false
+  positive is harmless. After 3 failed recoveries the loop ends and iptsd exits; systemd
+  restarts the unit with a fresh mode switch. The journal shows
+  `Device sent legacy reports without touch data, re-enabling multitouch` (`sl7-doctor`
+  reports a count). Not active for the touchscreen (its pen reports have their own IDs).
+  `IPTSD_MODE_WATCHDOG=0` in the unit environment disables it. The signal is unverified on
+  hardware for the exact legacy report IDs: if the pad's mouse mode reuses the button report
+  without X/Y fields, the daemon cannot see it and the old restart paths still apply.
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset

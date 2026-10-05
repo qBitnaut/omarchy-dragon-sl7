@@ -91,6 +91,25 @@ for id in 0C77 0C6E; do
   else fail "no hidraw node for 045E:$id (device not enumerated)"; fi
 done
 
+# iptsd's mode watchdog (iptsd-sl7 patch 0004) re-enables multitouch by itself when
+# the touchpad falls back to mouse mode; surface that it had to.
+recov=$(journalctl -b -o cat --no-pager -u 'iptsd@*.service' --grep 'sent legacy reports without touch data' 2>/dev/null | wc -l)
+if [[ $recov =~ ^[0-9]+$ ]] && ((recov > 0)); then
+  warn "touchpad fell back to mouse mode $recov time(s) this boot; iptsd re-enabled multitouch itself (spi-hid reset?)"
+fi
+if journalctl -b -o cat --no-pager -u 'iptsd@*.service' --grep 'keeps sending legacy reports' 2>/dev/null | grep -q .; then
+  warn "iptsd gave up re-enabling touchpad multitouch at least once this boot and was restarted by systemd"
+fi
+
+# Tap-to-click is off by default (appended once to ~/.config/hypr/input.lua).
+if [[ -x /usr/bin/omarchy-sl7-touchpad-defaults && -d $HOME/.config/hypr ]]; then
+  if /usr/bin/omarchy-sl7-touchpad-defaults --check >/dev/null 2>&1; then
+    pass "tap-to-click default applied (or set by you in input.lua)"
+  else
+    warn "tap-to-click default not applied yet (run: omarchy-sl7-touchpad-defaults)"
+  fi
+fi
+
 if grep -Eq '^[[:space:]]*BOOT_ORDER="?linux-sl7([ ,"]|$)' "$limine_default" 2>/dev/null; then
   pass "BOOT_ORDER starts with linux-sl7"
 else

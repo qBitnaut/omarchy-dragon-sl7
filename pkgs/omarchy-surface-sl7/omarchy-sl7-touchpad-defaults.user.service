@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Laptop 7 touchpad defaults (tap-to-click off, once)
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionPathExists=/usr/bin/omarchy-sl7-touchpad-defaults
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omarchy-sl7-touchpad-defaults
+
+[Install]
+WantedBy=graphical-session.target

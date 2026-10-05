@@ -192,6 +192,28 @@ use this tool for the SL7.
   or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting (off) when a connection is
   re-activated; run `sudo omarchy-surface-sl7-power wifi-powersave enable` to stop that.
 
+### 8f. Touchpad defaults (tap-to-click off)
+
+Hyprland's default tap-to-click gave false left clicks and repeated right clicks (a
+two-finger tap) during two-finger scrolls on the SL7. Omarchy's defaults
+(`default/hypr/input.lua`) belong to `omarchy-settings` and `~/.config/hypr/input.lua` is the
+user's own file, so there was no existing mechanism: `omarchy-sl7-touchpad-defaults` (run by
+`omarchy-sl7-touchpad-defaults.service`, a user unit wanted by `graphical-session.target`, so
+it covers new installs at first login and existing ones at the next login after the update)
+appends
+
+```
+hl.config({ input = { touchpad = { tap_to_click = false } } })
+```
+
+to `~/.config/hypr/input.lua` under a comment, once, and applies it to the running Hyprland
+with `hyprctl eval` (never a config reload). It does nothing while `input.lua` is missing
+(retried at the next login) or when `input.lua` already sets `tap_to_click` itself, and after
+the first run a state file (`~/.local/state/omarchy-surface-sl7/touchpad-defaults`) stops it
+from ever editing the file again, so removing the block or setting `true` sticks. The block is
+Lua in the user's file, so anything below it wins. Run it by hand with
+`omarchy-sl7-touchpad-defaults`, preview with `--check`. `sl7-doctor` warns while it is pending.
+
 ### 9. Upstream leaf
 
 `surface-laptop-7.sh` (installed under `/usr/share/doc`) is an Omarchy-style
@@ -215,7 +237,9 @@ modules in the initramfs, firmware, iptsd units, `BOOT_ORDER`, uki.conf, no acti
 applied, whether they match the source), PSR state (`msm.psr_enabled`, whether this boot
 used the PSR test entry, PSR debugfs nodes and dmesg lines when readable; informational only)
 and VRR state (`msm.vrr_enabled`, whether this boot used the VRR test entry, the eDP
-`vrr_capable` property from `modetest`, debugfs `vrr_enabled`, Hyprland's `vrr`; read-only).
+`vrr_capable` property from `modetest`, debugfs `vrr_enabled`, Hyprland's `vrr`; read-only),
+the pending tap-to-click default (8f) and, from the journal, how often iptsd's mode watchdog had to
+re-enable touchpad multitouch this boot (warn only).
 Exit 1 on any failure.
 
 ### 11b. Optional kernel test entries (`omarchy-sl7-test-entry`)

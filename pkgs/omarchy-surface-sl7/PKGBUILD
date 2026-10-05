@@ -6,13 +6,13 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=11
+pkgrel=12
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT' 'ISC')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7>=7.2.8-3' 'iptsd-sl7>=3.1.0.r20260717-8' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
+depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7>=7.2.8-3' 'iptsd-sl7>=3.1.0.r20260717-11' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'jq' 'glib2' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'
@@ -69,6 +69,8 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'omarchy-sl7-powermode'
         'omarchy-surface-sl7-powermode.service'
         'omarchy-sl7-powermode.user.service'
+        'omarchy-sl7-touchpad-defaults'
+        'omarchy-sl7-touchpad-defaults.user.service'
         'power.conf'
         'sl7-powertest'
         'omarchy-sl7-psr-entry'
@@ -90,7 +92,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            'c267c6ea6bc5cce19698c3780248e834842328d2f31c8716a4ce88db8706fa8a'
+            '80969441562baf8eb9e315dfc23dc627fd3ed11481ac8d78302464f15a0b6357'
             '825fad0cedd4803b3abc0116613d55380f476beec6c2f845dcac3e7a3934ffae'
             'b2b08c6b796cc43f3b807b9c083bb906577edfa7027a588867f9488fa92a439c'
             '897147e955439937365d1ae2e44c051faada34cf75684e9f74b391c73219585a'
@@ -102,7 +104,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '5c40b0b83adc9b5fed69ed3616ce46e350dfa30745b91d6409ad6271e7f87cf9'
+            'c4c4e6fe4d5f2cbb9091952f5f6d8b0673a3b67f4b9f4bd8a61fde69f1d70fba'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -114,6 +116,8 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '6dc205ff6d9a2b6e178e8fa35a3971ac40bd817254c02b7a03339d58c5998a28'
             '5e3c6ab285f06d1564b51f978156f9e2fe6cf21e5c25db2013720b2fe5f581d0'
             '43be05503a70fa3badf65785b9230d5997a23f1b9f93ff380a8f77fd63951d76'
+            '9c7cdc52e2e47585fd813f8e34d217708665a5a65f2514bdfda122c715483a88'
+            '1b2d124782a26a26b4ea6245a425b5b29c402f7d2e511116156612269b71f589'
             '9b6e16a7fd17caa108ac20e13f22b836b8b248296b97856ea29fe032144be593'
             '1e01dc25d19bcf37ddcf5de66de3c7e2757dd0db22e0717a8ed90a99caae6170'
             '345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff'
@@ -219,6 +223,14 @@ package() {
   install -dm755 "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
   ln -s ../omarchy-sl7-powermode.service \
     "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/omarchy-sl7-powermode.service"
+
+  # 8b2. touchpad defaults: tap-to-click off, appended once per user to
+  # ~/.config/hypr/input.lua by a user service (new and existing installs)
+  install -Dm755 omarchy-sl7-touchpad-defaults "$pkgdir/usr/bin/omarchy-sl7-touchpad-defaults"
+  install -Dm644 omarchy-sl7-touchpad-defaults.user.service \
+    "$pkgdir/usr/lib/systemd/user/omarchy-sl7-touchpad-defaults.service"
+  ln -s ../omarchy-sl7-touchpad-defaults.service \
+    "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/omarchy-sl7-touchpad-defaults.service"
 
   # 8c. measurement harness
   install -Dm755 sl7-powertest "$pkgdir/usr/bin/sl7-powertest"
