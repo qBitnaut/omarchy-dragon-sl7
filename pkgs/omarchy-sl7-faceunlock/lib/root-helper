@@ -1,0 +1,119 @@
+#!/bin/bash
+# omarchy-sl7-faceunlock privileged helper. Run through sudo by the app, or as
+# root by the package scriptlet. Every subcommand validates its arguments;
+# nothing here reads the caller's environment for paths (see common.sh).
+
+SL7_SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SL7_LIB=${SL7_SELF%/*}
+# shellcheck source=common.sh
+source "$SL7_LIB/common.sh"
+# shellcheck source=pam.sh
+source "$SL7_LIB/pam.sh"
+# shellcheck source=howdy.sh
+source "$SL7_LIB/howdy.sh"
+
+usage() {
+  cat <<'USAGE'
+usage: root-helper [--dry-run] COMMAND [ARGS]
+  enable STACK                howdy disable 0, then pam-enable
+  pam-enable STACK            sudo | polkit | lock
+  pam-disable STACK|all
+  pam-state                   stack=state lines
+  configure DEVICE DARK TIMEOUT
+  faces-add USER LABEL | faces-remove USER ID | faces-clear USER
+  faces-json USER             JSON array
+  sync USER                   refresh snapshot and enrolled marker
+  howdy-disable 0|1
+  howdy-test USER             live preview (howdy test), no images saved
+  off [--keep-howdy]          emergency off: howdy disable 1 + remove every PAM line
+USAGE
+}
+
+[[ ${1:-} == --dry-run ]] && {
+  DRY_RUN=1
+  shift
+}
+
+if ! sl7_is_root && [[ ${SL7_ASSUME_ROOT:-0} != 1 ]]; then
+  die "root-helper must run as root (use sudo)"
+fi
+
+cmd=${1:-}
+shift || true
+
+if [[ $DRY_RUN != 1 && $cmd != pam-state && $cmd != faces-json ]]; then
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  if [[ -d $STATE_DIR ]]; then
+    exec 9>"$STATE_DIR/lock"
+    flock -w 10 9 || die "another omarchy-sl7-faceunlock change is running"
+  fi
+fi
+
+case $cmd in
+pam-enable)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  pam_enable "$1"
+  ;;
+enable)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  if command -v "$HOWDY_BIN" >/dev/null 2>&1; then
+    howdy_disable 0 || die "howdy disable 0 failed"
+  fi
+  pam_enable "$1"
+  ;;
+pam-disable)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  if [[ $1 == all ]]; then pam_disable_all; else pam_disable "$1"; fi
+  ;;
+pam-state) pam_status_lines ;;
+configure)
+  [[ $# == 3 ]] || { usage >&2; exit 2; }
+  howdy_configure "$1" "$2" "$3"
+  ;;
+faces-add)
+  [[ $# == 2 ]] || { usage >&2; exit 2; }
+  faces_add "$1" "$2"
+  ;;
+faces-remove)
+  [[ $# == 2 ]] || { usage >&2; exit 2; }
+  faces_remove "$1" "$2"
+  ;;
+faces-clear)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  faces_clear "$1"
+  ;;
+faces-json)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  valid_user "$1" || die "invalid user: $1"
+  faces_json_for "$1"
+  ;;
+sync)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  valid_user "$1" || die "invalid user: $1"
+  sync_snapshot "$1"
+  ;;
+howdy-test)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  valid_user "$1" || die "invalid user: $1"
+  "$HOWDY_BIN" test -U "$1"
+  ;;
+howdy-disable)
+  [[ $# == 1 ]] || { usage >&2; exit 2; }
+  howdy_disable "$1"
+  ;;
+off)
+  rc=0
+  if [[ ${1:-} != --keep-howdy ]]; then
+    command -v "$HOWDY_BIN" >/dev/null 2>&1 && { howdy_disable 1 || rc=1; }
+  fi
+  pam_disable_all || rc=1
+  # The lock screen button disappears with its PAM file; drop the marker too.
+  [[ $DRY_RUN == 1 ]] || rm -f "$STATE_DIR"/enrolled-* 2>/dev/null
+  audit "off rc=$rc"
+  exit "$rc"
+  ;;
+*)
+  usage >&2
+  exit 2
+  ;;
+esac

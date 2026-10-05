@@ -1,0 +1,158 @@
+#!/bin/bash
+# omarchy-sl7-faceunlock: Face Unlock for the Surface Laptop 7 on Omarchy.
+#
+# Interactive (no arguments): a gum TUI, meant to run in Omarchy's floating
+# terminal. Subcommands are scriptable and are the interface a future
+# Quickshell panel will call.
+#
+# MIT License, (c) 2026 qBitnaut. See LICENSE.
+
+SL7_SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SL7_BINDIR=${SL7_SELF%/*}
+if [[ -f $SL7_BINDIR/lib/common.sh ]]; then
+  SL7_LIB=$SL7_BINDIR/lib
+else
+  SL7_LIB=/usr/lib/sl7-faceunlock
+fi
+
+# shellcheck source=lib/common.sh
+source "$SL7_LIB/common.sh"
+# shellcheck source=lib/pam.sh
+source "$SL7_LIB/pam.sh"
+# shellcheck source=lib/howdy.sh
+source "$SL7_LIB/howdy.sh"
+# shellcheck source=lib/lock.sh
+source "$SL7_LIB/lock.sh"
+# shellcheck source=lib/menu.sh
+source "$SL7_LIB/menu.sh"
+# shellcheck source=lib/tui.sh
+source "$SL7_LIB/tui.sh"
+
+# The privileged helper is always the root-owned installed copy, except in
+# tests (SL7_ASSUME_ROOT=1), so no environment variable can redirect sudo.
+if [[ ${SL7_ASSUME_ROOT:-0} == 1 ]]; then
+  SL7_HELPER=$SL7_LIB/root-helper
+else
+  SL7_HELPER=/usr/lib/sl7-faceunlock/root-helper
+fi
+
+usage() {
+  cat <<'USAGE'
+omarchy-sl7-faceunlock [--dry-run] [COMMAND]
+
+  (no command)                  interactive TUI
+  status [--json]
+  setup                         the wizard
+  faces list [--json] [--cached]
+  faces add LABEL               password required
+  faces remove ID               password required
+  faces clear                   password required
+  auth status [--json]
+  auth enable sudo|polkit|lock  password required
+  auth disable sudo|polkit|lock|all
+  lock install|apply|update|remove|status
+  --off                         emergency off: howdy disable 1 + remove every PAM line
+  --remove                      interactive removal
+  --menu-install [--auto]       add the Omarchy menu rows (per user)
+  --menu-remove
+  --version, --help
+
+--dry-run prints what would change and writes nothing.
+USAGE
+}
+
+need_tty() {
+  [[ -t 0 && -t 1 ]] || die "this needs a terminal; use a subcommand or omarchy-launch-floating-terminal-with-presentation"
+}
+
+main() {
+  if [[ ${1:-} == --dry-run ]]; then
+    DRY_RUN=1
+    shift
+  fi
+  local cmd=${1:-}
+  shift || true
+
+  case $cmd in
+  "")
+    need_tty
+    ui_main
+    ;;
+  status)
+    if [[ ${1:-} == --json ]]; then status_json; else status_text; fi
+    ;;
+  setup)
+    need_tty
+    omarchy_gum_env
+    ui_wizard
+    ;;
+  faces)
+    local sub=${1:-}
+    shift || true
+    case $sub in
+    list)
+      local json
+      if [[ ${1:-} == --cached || ${2:-} == --cached ]]; then
+        json=$(faces_list_cached_json)
+      else
+        json=$(faces_list_json) || exit 1
+      fi
+      if [[ ${1:-} == --json || ${2:-} == --json ]]; then printf '%s\n' "$json"; else faces_print "$json"; fi
+      ;;
+    add)
+      [[ $# == 1 ]] || die "usage: faces add LABEL"
+      faces_add_cli "$1"
+      ;;
+    remove)
+      [[ $# == 1 ]] || die "usage: faces remove ID"
+      faces_remove_cli "$1"
+      ;;
+    clear) faces_clear_cli ;;
+    *) usage >&2; exit 2 ;;
+    esac
+    ;;
+  auth)
+    local sub=${1:-}
+    shift || true
+    case $sub in
+    status)
+      if [[ ${1:-} == --json ]]; then auth_status_json; else pam_status_lines; fi
+      ;;
+    enable)
+      [[ $# == 1 ]] || die "usage: auth enable sudo|polkit|lock"
+      auth_enable_cli "$1"
+      ;;
+    disable)
+      [[ $# == 1 ]] || die "usage: auth disable sudo|polkit|lock|all"
+      auth_disable_cli "$1"
+      ;;
+    *) usage >&2; exit 2 ;;
+    esac
+    ;;
+  lock)
+    case ${1:-} in
+    install) lock_install ;;
+    apply) lock_reapply ;;
+    update) lock_update ;;
+    remove) lock_remove ;;
+    status) say "installed=$(lock_installed && echo yes || echo no) patched=$(lock_patched && echo yes || echo no) state=$(lock_enabled_state)" ;;
+    *) usage >&2; exit 2 ;;
+    esac
+    ;;
+  --off | off) off_cli ;;
+  --remove | remove)
+    need_tty
+    ui_remove
+    ;;
+  --menu-install) menu_install "${1:-}" ;;
+  --menu-remove) menu_remove ;;
+  --version) say "omarchy-sl7-faceunlock $SL7_VERSION" ;;
+  -h | --help | help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+  esac
+}
+
+main "$@"

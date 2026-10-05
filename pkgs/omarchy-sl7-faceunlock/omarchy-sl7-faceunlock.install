@@ -1,0 +1,41 @@
+# Package scriptlet for omarchy-sl7-faceunlock.
+#
+# pre_remove restores every PAM file we touched, using our own markers, before
+# the helper that knows how is deleted. It never fails the transaction: a
+# broken removal must not leave the machine half-uninstalled, and the manual
+# recipe is printed instead.
+
+_helper=/usr/lib/sl7-faceunlock/root-helper
+
+post_install() {
+  # Per-user, once: the menu rows are merged at the user's next login (or on the
+  # first run of the app). Enable the user unit for everyone.
+  systemctl --global enable omarchy-sl7-faceunlock-menu.service >/dev/null 2>&1 || true
+  echo '[face unlock] Run once per user to show the menu rows now:'
+  echo '[face unlock]   omarchy-sl7-faceunlock --menu-install'
+  echo '[face unlock] Then: Omarchy menu > Setup > Security > Face Unlock'
+  echo '[face unlock] This package does not touch /etc/pam.d until you turn a stack on.'
+  echo '[face unlock] Keep a root shell open while you do:  sudo -i'
+}
+
+post_upgrade() {
+  systemctl --global enable omarchy-sl7-faceunlock-menu.service >/dev/null 2>&1 || true
+}
+
+pre_remove() {
+  if [[ -x $_helper ]]; then
+    echo '[face unlock] restoring PAM files from our markers...'
+    "$_helper" off || {
+      echo '[face unlock] automatic restore reported a problem. By hand:' >&2
+      echo '[face unlock]   sudo sed -i "/^# sl7-faceunlock BEGIN/,/^# sl7-faceunlock END/d" /etc/pam.d/sudo /etc/pam.d/polkit-1' >&2
+      echo '[face unlock]   sudo rm -f /etc/pam.d/omarchy-lock-face' >&2
+    }
+  fi
+  systemctl --global disable omarchy-sl7-faceunlock-menu.service >/dev/null 2>&1 || true
+}
+
+post_remove() {
+  echo '[face unlock] PAM lines removed. Enrolled faces stay in howdy-next (sudo howdy clear).'
+  echo '[face unlock] Per-user leftovers: the menu rows (omarchy-sl7-faceunlock --menu-remove,'
+  echo '[face unlock] run before removal) and the nate.howdy-lock plugin (omarchy plugin remove nate.howdy-lock).'
+}

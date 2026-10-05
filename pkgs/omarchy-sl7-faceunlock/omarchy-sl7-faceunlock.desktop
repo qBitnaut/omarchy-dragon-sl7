@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Face Unlock
+Comment=Set up and manage IR face unlock (Surface Laptop 7)
+Exec=omarchy-launch-floating-terminal-with-presentation omarchy-sl7-faceunlock
+Icon=camera-web
+Terminal=false
+Categories=System;Security;Settings;

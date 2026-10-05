@@ -1,0 +1,10 @@
+[Unit]
+Description=Add the Face Unlock rows to the Omarchy menu (once per user, idempotent)
+ConditionPathExists=/usr/bin/omarchy-sl7-faceunlock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omarchy-sl7-faceunlock --menu-install --auto
+
+[Install]
+WantedBy=default.target

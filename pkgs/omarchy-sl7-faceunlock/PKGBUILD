@@ -1,0 +1,52 @@
+# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+#
+# Face Unlock setup app for Omarchy on the Surface Laptop 7: a gum TUI that
+# configures howdy-next against the sl7-ir-bridge camera, manages enrolled
+# faces and edits the PAM stacks (sudo, polkit, lock screen) with backups.
+# Pure bash and data files, so it is architecture independent; it is only
+# useful alongside howdy-next and sl7-ir-bridge from this repository.
+
+pkgname=omarchy-sl7-faceunlock
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Omarchy-styled Face Unlock setup and face manager for the Surface Laptop 7 (howdy-next, IR bridge, PAM, lock screen)'
+arch=('any')
+url='https://github.com/qBitnaut/omarchy-dragon-sl7'
+license=('MIT')
+depends=('bash' 'howdy-next' 'sl7-ir-bridge' 'gum' 'jq' 'sudo' 'systemd' 'pam'
+         'gawk' 'sed' 'grep' 'diffutils' 'coreutils' 'util-linux' 'patch' 'git')
+optdepends=('omarchy: the floating terminal launcher, menu and plugin manager'
+            'v4l-utils: the one-frame camera check in the wizard'
+            'pamtester: authenticate against omarchy-lock-face from the Test menu')
+install=omarchy-sl7-faceunlock.install
+# lib/ is installed straight from $startdir (the checkout): makepkg's source
+# array only handles top-level files.
+source=('omarchy-sl7-faceunlock'
+        'omarchy-sl7-faceunlock-menu.service'
+        'omarchy-sl7-faceunlock.desktop'
+        'README.md'
+        'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  local lib="$pkgdir/usr/lib/sl7-faceunlock"
+  install -Dm755 omarchy-sl7-faceunlock "$pkgdir/usr/bin/omarchy-sl7-faceunlock"
+
+  local f
+  for f in common.sh pam.sh howdy.sh lock.sh menu.sh tui.sh; do
+    install -Dm644 "$startdir/lib/$f" "$lib/$f"
+  done
+  install -Dm755 "$startdir/lib/root-helper" "$lib/root-helper"
+  install -Dm755 "$startdir/lib/lid-closed" "$lib/lid-closed"
+  install -Dm644 "$startdir/lib/lock-patch/howdy-lock-pam.patch" "$lib/lock-patch/howdy-lock-pam.patch"
+  install -Dm644 "$startdir/lib/lock-patch/LICENSE.nate8199" "$lib/lock-patch/LICENSE.nate8199"
+
+  install -Dm644 omarchy-sl7-faceunlock-menu.service \
+    "$pkgdir/usr/lib/systemd/user/omarchy-sl7-faceunlock-menu.service"
+  install -Dm644 omarchy-sl7-faceunlock.desktop \
+    "$pkgdir/usr/share/applications/omarchy-sl7-faceunlock.desktop"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$startdir/lib/lock-patch/LICENSE.nate8199" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.nate8199"
+  install -dm755 "$pkgdir/var/lib/sl7-faceunlock"
+}

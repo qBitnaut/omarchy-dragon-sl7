@@ -1,0 +1,25 @@
+#!/bin/bash
+# omarchy-sl7-faceunlock lid gate, run by pam_exec before pam_howdy.
+# Exit 0 when the lid is closed (pam_howdy is then skipped), 1 otherwise.
+#
+# howdy's abort_if_lid_closed and Omarchy's omarchy-hw-laptop-closed only read
+# /proc/acpi/button/lid, which a devicetree machine such as the Surface
+# Laptop 7 does not have. logind knows the real switch state.
+#
+# SL7_LID_STATE=closed|open overrides the lookup (tests only).
+
+PATH=/usr/bin:/bin
+
+case ${SL7_LID_STATE:-} in
+closed) exit 0 ;;
+open) exit 1 ;;
+esac
+
+for state in /proc/acpi/button/lid/*/state; do
+  [[ -r $state ]] || continue
+  [[ $(<"$state") == *closed* ]] && exit 0
+done
+
+out=$(busctl --system get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager LidClosed 2>/dev/null) || exit 1
+[[ $out == "b true" ]]

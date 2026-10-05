@@ -1,0 +1,181 @@
+--- a/Service.qml
++++ b/Service.qml
+@@ -5,6 +5,11 @@
+ import Quickshell.Wayland
+ import qs.Commons
+
++// sl7-faceunlock: PAM patch (omarchy-sl7-faceunlock lock apply).
++// Face unlock authenticates through the PAM service omarchy-lock-face
++// (pam_howdy, via howdy-next's setuid helper) instead of running howdy-git's
++// compare.py as the user. Everything else is nate8199's Howdy Lock, unchanged.
++
+ Item {
+   id: root
+
+@@ -23,8 +28,7 @@
+   property bool howdyAuthenticating: false
+   property bool pendingHowdy: false
+   property bool howdyCancelled: false
+-  property bool howdyKillPending: false
+-  property int howdyAttempts: 0
++    property int howdyAttempts: 0
+   property bool howdyFaceLockedOut: false
+   readonly property int maxFaceAttempts: 5
+   property bool passwordPamConfigured: false
+@@ -128,10 +132,9 @@
+   // Kills an in-flight face scan and marks its eventual exit event so a scan
+   // started right after it cannot misread the dead process's result.
+   function stopHowdyScan() {
+-    if (!howdyCompareProc.running) return
++    if (!howdyPam.active) return
+     howdyCancelled = true
+-    howdyKillPending = true
+-    howdyCompareProc.running = false
++    howdyPam.abort()
+   }
+
+   function resetAuthenticationState() {
+@@ -239,7 +242,7 @@
+
+   function startHowdy() {
+     if (!lockRequested || !howdyConfigured) return
+-    if (howdyCompareProc.running || howdyAuthenticating || authenticatingPassword) return
++    if (howdyPam.active || howdyAuthenticating || authenticatingPassword) return
+     if (howdyFaceLockedOut) {
+       failureMessage = "Face unlock disabled — use your password"
+       runWake()
+@@ -256,16 +259,15 @@
+     howdyAuthenticating = true
+     runWake()
+     howdyWatchdog.restart()
+-    howdyCompareProc.running = true
+-    if (!howdyCompareProc.running) {
++    if (!howdyPam.start()) {
+       howdyAuthenticating = false
+       howdyWatchdog.stop()
+-      handleHowdyFailure()
++      handleHowdyFailure("Face unlock unavailable")
+     }
+   }
+
+   function cancelHowdy() {
+-    if (!howdyAuthenticating && !howdyCompareProc.running && !pendingHowdy) return
++    if (!howdyAuthenticating && !howdyPam.active && !pendingHowdy) return
+
+     pendingHowdy = false
+     howdyCancelled = true
+@@ -276,12 +278,7 @@
+     logEvent("howdy-cancelled")
+   }
+
+-  function handleHowdyFinished(matched, exitCode) {
+-    if (howdyKillPending) {
+-      howdyKillPending = false
+-      return
+-    }
+-
++  function handleHowdyFinished(matched, reason) {
+     var wasAuthenticating = howdyAuthenticating
+     howdyAuthenticating = false
+     howdyWatchdog.stop()
+@@ -300,11 +297,6 @@
+       return
+     }
+
+-    var reason = "Face not recognized"
+-    if (exitCode === 10) reason = "No face model enrolled"
+-    else if (exitCode === 13) reason = "IR image too dark"
+-    else if (exitCode === 14) reason = "Camera unavailable"
+-    else if (exitCode !== 11) reason = "Face unlock failed (" + exitCode + ")"
+     handleHowdyFailure(reason)
+   }
+
+@@ -471,41 +463,27 @@
+     }
+   }
+
+-  Process {
+-    id: howdyCompareProc
+-    workingDirectory: "/usr/lib/howdy"
+-    // Absolute path, not bare "python3": a lock-screen auth path shouldn't
+-    // silently depend on whatever python3 resolves to in a mutable PATH.
+-    // Any version manager that shims python3 ahead of /usr/bin (mise,
+-    // pyenv, asdf, an activated venv inherited into the session) points
+-    // this at an interpreter that doesn't have Howdy's dependencies
+-    // (dlib, cv2, ...) installed, since those are only present in the
+-    // system Python's site-packages. Fails as an immediate, silent
+-    // ModuleNotFoundError with no camera activity — easy to mistake for a
+-    // hardware/config problem instead of an environment one.
+-    command: ["env", "-u", "DISPLAY", "-u", "WAYLAND_DISPLAY",
+-              "-u", "PYTHONPATH", "-u", "PYTHONHOME", "-u", "PYTHONSTARTUP",
+-              "/usr/bin/python3", "/usr/lib/howdy/compare.py", root.userName]
+-    // Silent unless compare.py actually writes something — a crash
+-    // traceback, for example. Without this, failures here are close to
+-    // undiagnosable: exitCode alone doesn't distinguish "wrong python3
+-    // found no module" from a dozen other causes.
+-    stdout: StdioCollector {
+-      waitForEnd: true
+-      onStreamFinished: if (text) console.log("[howdy-compare stdout]", text)
+-    }
+-    stderr: StdioCollector {
+-      waitForEnd: true
+-      onStreamFinished: if (text) console.log("[howdy-compare stderr]", text)
++  PamContext {
++    id: howdyPam
++    config: "omarchy-lock-face"
++    user: root.userName
++
++    // completed and error can both fire for one scan; the second call finds
++    // howdyAuthenticating already false and returns.
++    onCompleted: function(result) {
++      root.handleHowdyFinished(result === PamResult.Success,
++                               result === PamResult.Error ? "Face unlock unavailable" : "Face not recognized")
+     }
+-    onExited: function(exitCode) {
+-      root.handleHowdyFinished(exitCode === 0, exitCode)
++
++    onError: function(error) {
++      root.handleHowdyFinished(false, "Face unlock unavailable")
+     }
+   }
+
+   Timer {
+     id: howdyWatchdog
+-    interval: 8000
++    // howdy's own timeout is 4 s; never let a scan hold the camera past 5 s.
++    interval: 5000
+     repeat: false
+     onTriggered: {
+       if (!root.howdyAuthenticating) return
+@@ -550,13 +528,16 @@
+
+   Process {
+     id: howdyCheckProc
+-    // Only trust face auth assets that the session cannot rewrite: the model
+-    // and compare.py must be root-owned and not group/world-writable.
++    // The models are root-only, so the session cannot read them. Trust the
++    // PAM service and the enrolled marker written by omarchy-sl7-faceunlock
++    // instead, and only when root owns them and the session cannot rewrite them.
+     command: ["bash", "-c", [
+-      "m=/etc/howdy/models/${USER}.dat",
+-      "[[ -f /usr/lib/howdy/compare.py && -f $m ]] || { echo no; exit 0; }",
+-      "[[ $(stat -c %u /usr/lib/howdy/compare.py) == 0 && $(stat -c %u $m) == 0 ]] || { echo no; exit 0; }",
+-      "[[ -z $(find /usr/lib/howdy/compare.py $m -perm /go+w -print -quit) ]] || { echo no; exit 0; }",
++      "f=/etc/pam.d/omarchy-lock-face",
++      "m=/var/lib/sl7-faceunlock/enrolled-${USER}",
++      "[[ -f $f && -s $m && -e /usr/lib/security/pam_howdy.so ]] || { echo no; exit 0; }",
++      "[[ $(stat -c %u $f) == 0 && $(stat -c %u $m) == 0 ]] || { echo no; exit 0; }",
++      "[[ -z $(find $f $m -perm /go+w -print -quit) ]] || { echo no; exit 0; }",
++      "grep -q 'pam_howdy[.]so' $f || { echo no; exit 0; }",
+       "echo yes"
+     ].join("; ")]
+     stdout: StdioCollector { id: howdyCheckStdout; waitForEnd: true }
+@@ -738,7 +719,7 @@
+     }
+
+     function cancelHowdy(): string {
+-      if (!root.howdyAuthenticating && !howdyCompareProc.running && !root.pendingHowdy) return "idle"
++      if (!root.howdyAuthenticating && !howdyPam.active && !root.pendingHowdy) return "idle"
+       root.cancelHowdy()
+       return "ok"
+     }

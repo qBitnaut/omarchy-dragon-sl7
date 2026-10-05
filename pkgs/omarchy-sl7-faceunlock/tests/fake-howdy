@@ -1,0 +1,45 @@
+#!/bin/bash
+# Stand-in for the howdy CLI in tests. State lives in $FAKE_HOWDY_DIR.
+d=${FAKE_HOWDY_DIR:?}
+mkdir -p "$d"
+touch "$d/models" "$d/log"
+cmd=${1:-}
+shift
+label=""
+id=""
+args=()
+while (($#)); do
+  case $1 in
+  -U) shift 2 ;;
+  --plain | -y) shift ;;
+  *) args+=("$1"); shift ;;
+  esac
+done
+echo "$cmd ${args[*]}" >>"$d/log"
+case $cmd in
+version) echo "howdy-next 3.4.2 (fake)" ;;
+list)
+  [[ -s $d/models ]] || { echo "No face models found."; exit 1; }
+  cat "$d/models"
+  echo
+  ;;
+add)
+  label=${args[0]:-}
+  next=$(($(wc -l <"$d/models") + 1))
+  case $label in
+  *,* | *\"*) q=${label//\"/\"\"}; label="\"$q\"" ;;
+  esac
+  echo "$next,2026-10-05 12:00:0$next,$label" >>"$d/models"
+  echo "Scan complete"
+  ;;
+remove)
+  id=${args[0]}
+  grep -v "^$id," "$d/models" >"$d/m2"
+  mv "$d/m2" "$d/models"
+  ;;
+clear) : >"$d/models" ;;
+set) echo "${args[0]}=${args[1]}" >>"$d/config.set" ;;
+disable) echo "${args[0]}" >"$d/disabled" ;;
+test) echo "preview" ;;
+*) exit 1 ;;
+esac
