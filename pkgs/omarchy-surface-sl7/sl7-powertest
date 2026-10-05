@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -30,6 +31,8 @@ from pathlib import Path
 GAUGE_STEP_MWH = 10.0  # energy_now resolution of qcom-battmgr
 SUSPEND_CYCLE_MWH = 24.0  # fixed cost per suspend cycle (Dell 7441; re-measure)
 SYNC_TIMEOUT_S = 300.0
+SYNC_PROGRESS_S = 30.0  # progress line interval while waiting for a gauge update
+SYNC_STALE_S = 60.0  # at ~2.3 W the gauge steps every ~15 s; longer means frozen
 POLL_S = 0.5
 
 ROOT = os.environ.get("SL7_SYSROOT", "")  # test hook: prefix for /sys, /proc/cmdline, /run
@@ -206,6 +209,67 @@ class Brightness:
         if self.orig is not None:
             run(["brightnessctl", "-q", "-c", "backlight", "set", str(self.orig)])
             self.orig = None
+
+
+class StayAwake:
+    """Omarchy's own keep-awake toggle (omarchy-toggle-idle).
+
+    The Quickshell idle service honours only this toggle's state file, not
+    systemd-inhibit, so the screensaver would otherwise start mid-run. The
+    prior state is recorded and put back by restore().
+    """
+
+    def __init__(self):
+        self.prior = None  # True when keep-awake was already on
+
+    @staticmethod
+    def _cmd():
+        return None if ROOT else shutil.which("omarchy-toggle-idle")
+
+    def enable(self):
+        exe = self._cmd()
+        if exe is None:
+            return False
+        out = run([exe, "status"])
+        try:
+            self.prior = bool(json.loads(out)["enabled"])
+        except (TypeError, ValueError, KeyError):
+            self.prior = None
+            return False
+        if not self.prior:
+            run([exe, "stay-awake"])
+        return True
+
+    def restore(self):
+        exe = self._cmd()
+        if exe is not None and self.prior is False:
+            run([exe, "allow-idle"])
+        self.prior = None
+
+
+class SyncWait:
+    """Progress and frozen-gauge hints while waiting for energy_now to change."""
+
+    def __init__(self, label, since, energy):
+        self.label, self.since, self.energy = label, since, energy
+        self.next_progress = since + SYNC_PROGRESS_S
+        self.hinted = False
+
+    def tick(self, now, energy):
+        waited = now - self.since
+        if now >= self.next_progress:
+            self.next_progress += SYNC_PROGRESS_S
+            print("%s gauge sync: energy_now %s mWh, unchanged for %d s"
+                  % (self.label, "?" if energy is None else "%.0f" % energy, waited))
+        if waited >= SYNC_STALE_S and not self.hinted:
+            self.hinted = True
+            if self.label == "end":
+                print("end gauge sync: the gauge looks frozen (no change for %d s). Plugging the charger "
+                      "in ends the run now; the window ends at the last gauge step either way." % waited)
+            else:
+                print("%s gauge sync: the gauge looks frozen (no change for %d s). Plug the charger in for "
+                      "~10 s and unplug it to wake the gauge; the run will continue automatically when it "
+                      "updates." % (self.label, waited))
 
 
 # --- samplers -----------------------------------------------------------------------
@@ -414,12 +478,17 @@ def workload_run(args, workload, launcher=None):
     cfg = {}
     hsh = ""
     old = {s: signal.signal(s, _sig) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    awake = StayAwake()
     try:
+        awake_on = awake.enable()
+        if not awake_on and not ROOT:
+            notes.append("omarchy keep-awake toggle unavailable; the screensaver may interrupt the run")
         pinned = bright.pin()
         if pinned is None:
             notes.append("brightness not pinned (brightnessctl failed)")
         extra = launcher.config() if launcher else {}
         extra["inhibited"] = bool(os.environ.get("SL7_POWERTEST_INHIBITED"))
+        extra["keep_awake"] = awake_on
         cfg = capture_config(pinned, extra)
         hsh = config_hash(cfg)
         out.write(json.dumps({"type": "config", "t": round(time.time(), 3), "workload": workload,
@@ -437,41 +506,74 @@ def workload_run(args, workload, launcher=None):
         e_ref = e_last = e_seen
         run_until = None
         sync_end_from = started
+        woke = False
+        t_step = e_step = None  # wall time and value of the last gauge step in the run
         print("%s: waiting for a fresh gauge update (up to %d s)..." % (workload, SYNC_TIMEOUT_S))
+        wait = SyncWait("start", started, e_seen)
         while True:
             now = time.monotonic()
             if ac_online() or read(bat / "status") == "Charging":
-                raise Abort("charger plugged in during the run")
+                if phase == "run":
+                    raise Abort("charger plugged in during the run")
+                if phase == "sync-end":
+                    # Charging would add energy; end the window at the last gauge step.
+                    notes.append("charger plugged in during the end sync; window ends at the last gauge step")
+                    t1, e1 = t_step, e_step
+                    break
+                # Gauge-wake nudge during a sync wait: tolerated. Once unplugged, the
+                # baseline is retaken from the gauge and the wait starts over.
+                if not woke:
+                    print("charger seen during gauge sync; unplug it to continue (the wait restarts)")
+                woke = True
+                time.sleep(POLL_S)
+                continue
+            if woke:
+                woke = False
+                e_ref = e_last = energy_mwh(bat)
+                wait = SyncWait("start" if phase == "sync-start" else "end", now, e_ref)
+                if phase == "sync-start":
+                    started = now
+                else:
+                    sync_end_from = now
+                print("charger unplugged; waiting for a fresh gauge update from %s mWh"
+                      % ("?" if e_ref is None else "%.0f" % e_ref))
             if mpv is not None and mpv.poll() is not None:
                 raise Abort("mpv exited early (code %s)" % mpv.returncode)
             e = energy_mwh(bat)
             if e is not None and e_last is not None and e > e_last + 0.5:
                 raise Abort("energy_now rose (charging?)")
             if e is not None:
+                if phase != "sync-start" and e != e_last:
+                    t_step, e_step = time.time(), e
                 e_last = e
             if phase == "sync-start":
                 if e is not None and e != e_ref:
                     t0, e0 = time.time(), e
+                    t_step, e_step = t0, e0
                     run_until = now + args.minutes * 60.0
                     next_minute = now + 60.0
                     phase = "run"
                     print("clock started: %.0f mWh at %s, running %.1f min" % (e0, time.strftime("%H:%M:%S"), args.minutes))
                 elif now - started > SYNC_TIMEOUT_S:
                     raise Abort("energy_now never updated (gauge stale?)")
+                else:
+                    wait.tick(now, e)
             elif phase == "run":
                 if now >= run_until:
                     e_ref = e
                     phase = "sync-end"
                     sync_end_from = now
+                    wait = SyncWait("end", now, e)
                     print("run done; waiting for a fresh gauge update to stop the clock...")
             elif phase == "sync-end":
                 if e is not None and e != e_ref:
                     t1, e1 = time.time(), e
                     break
                 if now - sync_end_from > SYNC_TIMEOUT_S:
-                    notes.append("end gauge sync timed out; window ends at the last sample")
-                    e1, t1 = e_ref, time.time()
+                    notes.append("end gauge sync timed out; window ends at the last gauge step")
+                    t1, e1 = t_step, e_step
                     break
+                wait.tick(now, e)
             if now >= next_sample:
                 mons = hypr_monitors()
                 rec = sample(bat, idle, mons)
@@ -499,6 +601,7 @@ def workload_run(args, workload, launcher=None):
         if launcher:
             launcher.stop()
         bright.restore()
+        awake.restore()
     summ = summarize(samples, t0 or time.time(), t1 or time.time(), e0, e1, cfg, hsh, meta)
     out.write(json.dumps(summ) + "\n")
     out.close()

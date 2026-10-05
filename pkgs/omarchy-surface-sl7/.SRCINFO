@@ -1,7 +1,7 @@
 pkgbase = omarchy-surface-sl7
 	pkgdesc = Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer
 	pkgver = 0.1.0
-	pkgrel = 13
+	pkgrel = 14
 	url = https://github.com/qBitnaut/omarchy-dragon-sl7
 	install = omarchy-surface-sl7.install
 	arch = aarch64
@@ -125,7 +125,7 @@ pkgbase = omarchy-surface-sl7
 	sha256sums = 9c7cdc52e2e47585fd813f8e34d217708665a5a65f2514bdfda122c715483a88
 	sha256sums = 1b2d124782a26a26b4ea6245a425b5b29c402f7d2e511116156612269b71f589
 	sha256sums = 9b6e16a7fd17caa108ac20e13f22b836b8b248296b97856ea29fe032144be593
-	sha256sums = 1e01dc25d19bcf37ddcf5de66de3c7e2757dd0db22e0717a8ed90a99caae6170
+	sha256sums = 44bf2513d18f8105c80622e32038772e3ccaa2d5da462b0de68e50cd907fe538
 	sha256sums = 345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff
 	sha256sums = 7a8f55c5eda5173139aef60f32cba0fdc6dddeeaa1e1d8a3fad8d0d2320b89de
 	sha256sums = f8ee702857020a022d89598c4bfa3d9ed4e5e091f7d94e20b9dc0197c14213ce
