@@ -1,0 +1,20 @@
+pkgbase = howdy-next-models
+	pkgdesc = YuNet and SFace ONNX models for howdy-next (pinned OpenCV Zoo revisions)
+	pkgver = 3.4.2
+	pkgrel = 1
+	url = https://github.com/opencv/opencv_zoo
+	arch = any
+	license = MIT
+	license = Apache-2.0
+	noextract = face_detection_yunet_2026may.onnx
+	noextract = face_recognition_sface_2021dec_int8.onnx
+	source = face_detection_yunet_2026may.onnx::https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/face_detection_yunet_2026may.onnx
+	source = face_recognition_sface_2021dec_int8.onnx::https://github.com/opencv/opencv_zoo/raw/088c3571ec70df15100a5e4c26894d95951e92e9/models/face_recognition_sface/face_recognition_sface_2021dec_int8.onnx
+	source = YUNET-MIT.txt::https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/LICENSE
+	source = SFACE-APACHE-2.0.txt::https://github.com/opencv/opencv_zoo/raw/088c3571ec70df15100a5e4c26894d95951e92e9/models/face_recognition_sface/LICENSE
+	sha256sums = ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0
+	sha256sums = 2b0e941e6f16cc048c20aee0c8e31f569118f65d702914540f7bfdc14048d78a
+	sha256sums = c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958
+	sha256sums = cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+
+pkgname = howdy-next-models

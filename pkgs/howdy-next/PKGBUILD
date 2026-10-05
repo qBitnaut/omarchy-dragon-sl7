@@ -1,0 +1,97 @@
+# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+#
+# howdy-next (C++ reimplementation of Howdy face authentication) for aarch64.
+# Based on the AUR package howdy-next by nathawat
+# (https://aur.archlinux.org/packages/howdy-next, AUR git 554051d, 2026-09-26),
+# which is licensed like upstream; differences:
+#   - arch=('aarch64') only (built in CI on ALARM)
+#   - depends on howdy-next-models instead of `howdy download-models`
+#   - sha256 instead of b2 checksums; the setuid state is asserted in package()
+#   - no PAM changes (the setup app edits /etc/pam.d, with backups)
+
+pkgname=howdy-next
+pkgver=3.4.2
+pkgrel=1
+pkgdesc='Modern C++ reimplementation of Howdy facial authentication on Linux (aarch64, models in howdy-next-models)'
+arch=('aarch64')
+url='https://codeberg.org/nathawat/howdy-next'
+license=('GPL-3.0-or-later')
+depends=(
+	'acl'
+	'curl>=7.85.0'
+	'glibc>=2.36'
+	'howdy-next-models'
+	'libevdev'
+	'libinih>=59'
+	'openssl'
+	'opencv>=5.0.0'
+	'pam'
+	'qt6-base'
+	'yyjson>=0.12.0'
+)
+makedepends=(
+	'cmake>=3.31'
+	'gettext'
+)
+optdepends=(
+	'linux-enable-ir-emitter: Enables infrared cameras that are not directly enabled out-of-the-box'
+)
+provides=('howdy')
+conflicts=(
+	'howdy'
+	'howdy-next-git'
+)
+backup=('etc/howdy/config.ini')
+install=howdy-next.install
+
+# Release tag v3.4.2 (tag object 5f44399f8a03, commit 06f82530403f).
+_tag="v${pkgver}"
+source=(
+	"${pkgname}-${pkgver}.tar.gz::${url}/archive/${_tag}.tar.gz"
+	'polkit-agent-helper-howdy.conf'
+)
+sha256sums=('e2e3afabc3d6d3fd696ec0ab6a1f144b6254449216b390be579864a6fd26c50a'
+            '2283fc4684751caa41e87023755bba5c3468475b6ed632b13a4ac6e9c748c512')
+
+build() {
+	cmake \
+		-S "$srcdir/howdy-next" \
+		-B "$srcdir/build" \
+		-DCMAKE_BUILD_TYPE=None \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
+		-DCMAKE_INSTALL_LIBEXECDIR=lib \
+		-DHOWDY_LICENSES_INSTALL_DIR="share/licenses/$pkgname"
+
+	cmake --build "$srcdir/build"
+}
+
+check() {
+	# Default suite only: unit tests and install-layout checks, all headless.
+	# The privileged PAM/setuid end-to-end tests (HOWDY_ENABLE_PRIVILEGED_TESTS)
+	# and the camera e2e preset are off by default and stay off here.
+	ctest \
+		--test-dir "$srcdir/build" \
+		--output-on-failure
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+
+	# Arch provides GPL-3.0-or-later through the licenses package.
+	rm "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+	# Relax polkit-agent-helper sandbox directives required by Howdy,
+	# as recommended by polkit (see polkit-agent-helper(8)).
+	install -Dm644 "$srcdir/polkit-agent-helper-howdy.conf" \
+		"$pkgdir/usr/lib/systemd/system/polkit-agent-helper@.service.d/10-howdy.conf"
+
+	# Setuid guard: upstream installs exactly one setuid file, the auth helper.
+	# Anything else setuid/setgid, or a helper with other modes, fails the build.
+	local found
+	found=$(find "$pkgdir" -type f -perm /6000 -printf '%P %m\n')
+	if [[ $found != 'usr/lib/howdy/howdy-auth-helper 4755' ]]; then
+		echo "unexpected setuid/setgid files: ${found:-<none>}" >&2
+		return 1
+	fi
+}

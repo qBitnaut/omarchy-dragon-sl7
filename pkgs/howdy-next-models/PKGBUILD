@@ -1,0 +1,41 @@
+# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+#
+# YuNet (face detection) and SFace (face recognition, int8) ONNX models for
+# howdy-next, from OpenCV Zoo at the exact revisions and sha256 that
+# howdy-next v3.4.2 pins in howdy/include/model_assets/opencv_model_manifest.hpp.
+# Installed where howdy-next looks for them (HOWDY_MODELS_DIR=/usr/share/howdy/models),
+# so no model is downloaded at install time. To bump, see README.md.
+
+pkgname=howdy-next-models
+pkgver=3.4.2
+pkgrel=1
+pkgdesc='YuNet and SFace ONNX models for howdy-next (pinned OpenCV Zoo revisions)'
+arch=('any')
+url='https://github.com/opencv/opencv_zoo'
+license=('MIT' 'Apache-2.0')
+
+_yunet_rev=26cc381e4d2594bb9f47a26eb8fd96c94a13660d
+_sface_rev=088c3571ec70df15100a5e4c26894d95951e92e9
+_yunet_model=face_detection_yunet_2026may.onnx
+_sface_model=face_recognition_sface_2021dec_int8.onnx
+_raw="$url/raw"
+
+# Plain file names on purpose: the raw URLs end in the model file name, but the
+# licenses are both called LICENSE upstream.
+source=("$_yunet_model::$_raw/$_yunet_rev/models/face_detection_yunet/$_yunet_model"
+        "$_sface_model::$_raw/$_sface_rev/models/face_recognition_sface/$_sface_model"
+        "YUNET-MIT.txt::$_raw/$_yunet_rev/models/face_detection_yunet/LICENSE"
+        "SFACE-APACHE-2.0.txt::$_raw/$_sface_rev/models/face_recognition_sface/LICENSE")
+noextract=("$_yunet_model" "$_sface_model")
+sha256sums=('ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0'
+            '2b0e941e6f16cc048c20aee0c8e31f569118f65d702914540f7bfdc14048d78a'
+            'c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958'
+            'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30')
+
+package() {
+	install -Dm644 "$_yunet_model" "$pkgdir/usr/share/howdy/models/$_yunet_model"
+	install -Dm644 "$_sface_model" "$pkgdir/usr/share/howdy/models/$_sface_model"
+
+	install -Dm644 YUNET-MIT.txt "$pkgdir/usr/share/licenses/$pkgname/YUNET-MIT.txt"
+	install -Dm644 SFACE-APACHE-2.0.txt "$pkgdir/usr/share/licenses/$pkgname/SFACE-APACHE-2.0.txt"
+}

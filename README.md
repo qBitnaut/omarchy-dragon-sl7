@@ -46,8 +46,8 @@ SigLevel = Required DatabaseOptional
 Server = https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64
 ```
 
-- `.github/workflows/publish-repo.yml` runs after linux-sl7, iptsd-sl7, omarchy-surface-sl7 and
-  omarchy-sl7-keyring succeed on main (and on manual dispatch). It takes their latest artifacts
+- `.github/workflows/publish-repo.yml` runs after linux-sl7, iptsd-sl7, omarchy-surface-sl7,
+  omarchy-sl7-keyring and howdy-next succeed on main (and on manual dispatch). It takes their latest artifacts
   plus the packages already on the release, refuses firmware files, signs every package
   (`gpg --detach-sign`), runs `repo-add --sign`, keeps the current and previous version of each
   package, and replaces the assets. Concurrent runs queue.

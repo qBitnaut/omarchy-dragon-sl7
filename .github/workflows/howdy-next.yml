@@ -1,0 +1,79 @@
+name: howdy-next
+
+# Builds howdy-next (aarch64) and howdy-next-models in the pinned Arch Linux
+# ARM builder and uploads both packages as one artifact. publish-repo.yml
+# picks the artifact up (see its fetch list).
+
+on:
+  push:
+    paths:
+      - 'pkgs/howdy-next/**'
+      - 'pkgs/howdy-next-models/**'
+      - '.github/workflows/howdy-next.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Arch Linux ARM build environment (omacom/omarchy-pkg-builder, aarch64),
+  # pinned by digest, the same image as linux-sl7.
+  BUILDER_IMAGE: ghcr.io/omacom/omarchy-pkg-builder@sha256:a0cedbe8fb2f15aa34217ddd8a74a5e12003dc442f16f1825ab2b9e023488a63
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Lint (shellcheck, trailing whitespace)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck libarchive-tools
+          shellcheck -s bash -S warning pkgs/howdy-next/howdy-next.install pkgs/howdy-next/ci-build.sh
+          if grep -rIn '[[:space:]]$' pkgs/howdy-next pkgs/howdy-next-models; then
+            echo "trailing whitespace found" >&2
+            exit 1
+          fi
+
+      # Checksums are verified by makepkg (sha256sums in each PKGBUILD).
+      - name: Build packages in the Arch Linux ARM builder
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm --platform linux/arm64 --user 0 \
+            -v "$PWD/pkgs:/src:ro" \
+            -v "$PWD/out:/out" \
+            "$BUILDER_IMAGE" \
+            bash /src/howdy-next/ci-build.sh
+          ls -l out
+
+      - name: Verify the packages
+        run: |
+          set -euo pipefail
+          hn=$(ls out/howdy-next-3*.pkg.tar.zst)
+          models=$(ls out/howdy-next-models-*.pkg.tar.zst)
+          bsdtar -tvf "$hn"
+          # exactly one setuid file, the upstream auth helper, mode 4755
+          suid=$(bsdtar -tvf "$hn" | grep -E '^.{3}[sS]|^.{6}[sS]' | awk '{print $1, $NF}' || true)
+          [ "$suid" = "-rwsr-xr-x usr/lib/howdy/howdy-auth-helper" ] || {
+            echo "unexpected setuid files: $suid" >&2; exit 1; }
+          # nothing under /etc/pam.d
+          if bsdtar -tf "$hn" | grep -q 'etc/pam.d'; then
+            echo "package must not ship PAM files" >&2; exit 1
+          fi
+          mkdir x && bsdtar -C x -xf "$hn"
+          file x/usr/lib/security/pam_howdy.so x/usr/bin/howdy | tee /dev/stderr | grep -c 'ARM aarch64' | grep -qx 2
+          bsdtar -tf "$models" | grep -E 'share/howdy/models/face_detection_yunet_2026may.onnx$'
+          bsdtar -tf "$models" | grep -E 'share/howdy/models/face_recognition_sface_2021dec_int8.onnx$'
+          bsdtar -tf "$models" | grep -E 'share/licenses/howdy-next-models/(YUNET-MIT|SFACE-APACHE-2.0).txt$'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: howdy-next-aarch64
+          path: out/*.pkg.tar.zst
+          if-no-files-found: error
