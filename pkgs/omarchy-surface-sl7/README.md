@@ -226,13 +226,15 @@ never touched. All are disabled by default.
 ```
 sudo omarchy-sl7-test-entry enable psr|vrr|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
 sudo omarchy-sl7-test-entry disable NAME                      # remove it
-omarchy-sl7-test-entry list                                   # presets and entries
+omarchy-sl7-test-entry list                                   # presets, state, and what is in limine.conf
+sudo omarchy-sl7-test-entry cleanup                           # remove every test entry and its state
 omarchy-sl7-test-entry status [NAME]
 ```
 
 Presets: `psr` = `msm.psr_enabled=1`, `vrr` = `msm.vrr_enabled=1`. Any other NAME needs PARAMS.
-`omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset, and the
-old `psr-entry.enabled` state file is honoured).
+`omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset). The old r6
+`psr-entry.enabled` state file, hook and block are removed on upgrade (`cleanup --legacy`);
+PSR is not carried over.
 
 How it works: limine-entry-tool has no per-entry command line variants, and it rewrites
 `limine.conf` on every UKI rebuild. So `omarchy-sl7-test-entry` copies the live linux-sl7 entry

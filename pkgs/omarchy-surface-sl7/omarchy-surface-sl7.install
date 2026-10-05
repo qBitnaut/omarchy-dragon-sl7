@@ -49,6 +49,9 @@ _sl7_setup() {
   "$_sl7_dir/ath12k-board-update" || true
   "$_sl7_dir/update-uki-dtbs" || true
   "$_sl7_dir/set-boot-order" || true
+  # r6 left a psr-entry state file, hook and limine.conf block: drop them and
+  # regenerate the enabled test entries (idempotent).
+  /usr/bin/omarchy-sl7-test-entry cleanup --legacy || true
   # The battery pacman hook only fires on omarchy (re)installs: apply now.
   "$_sl7_dir/omarchy-sl7-battery-patch" || true
 

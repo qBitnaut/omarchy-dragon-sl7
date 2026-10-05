@@ -7,7 +7,13 @@
 #
 #   omarchy-sl7-test-entry enable NAME [PARAMS...]   add the entry
 #   omarchy-sl7-test-entry disable NAME              remove the entry
-#   omarchy-sl7-test-entry list                      presets and entries
+#   omarchy-sl7-test-entry list                      presets, state, and what is
+#                                                    really in limine.conf
+#   omarchy-sl7-test-entry cleanup [--legacy]        remove ALL our entries and
+#                                                    state (--legacy: only the
+#                                                    r6 psr-entry leftovers; the
+#                                                    enabled new-style entries
+#                                                    are regenerated)
 #   omarchy-sl7-test-entry status [NAME]
 #
 # Presets (PARAMS default to the preset's own):
@@ -27,8 +33,10 @@
 set -euo pipefail
 
 state_dir=${OMARCHY_SL7_TEST_STATE_DIR:-/etc/omarchy-surface-sl7/test-entries}
-# State file of the old omarchy-sl7-psr-entry (still honoured as "psr").
+# Leftovers of the old omarchy-sl7-psr-entry (r6): state file and post hook.
+# Never honoured as state any more; `cleanup` removes them.
 legacy_psr=${OMARCHY_SL7_PSR_STATE:-/etc/omarchy-surface-sl7/psr-entry.enabled}
+legacy_hook=${OMARCHY_SL7_LEGACY_HOOK:-/etc/boot/hooks/post.d/80-omarchy-sl7-psr-entry}
 limine_default=${OMARCHY_SL7_LIMINE_DEFAULT:-/etc/default/limine}
 export source_id=linux-sl7
 tag_new="### BEGIN omarchy-sl7-test-entry "
@@ -36,7 +44,7 @@ tag_old="### BEGIN omarchy-sl7-psr-entry"
 export tag_new tag_old
 
 usage() {
-  echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME]" >&2
+  echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME] | cleanup [--legacy]" >&2
   echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), vrr (msm.vrr_enabled=1, EXPERIMENTAL)" >&2
   exit 2
 }
@@ -86,21 +94,35 @@ enabled_entries() {
         [[ -n $p ]] && printf '%s\t%s\n' "$n" "$p"
       done
     fi
-    if [[ -e $legacy_psr && ! -e $state_dir/psr ]]; then
-      printf 'psr\t%s\n' "$(preset_params psr)"
-    fi
   } | sort
 }
 
 is_enabled() { enabled_entries | cut -f1 | grep -qx -- "$1"; }
 
-# stdin: limine.conf; stdout: the same without any of our blocks (including
-# the old omarchy-sl7-psr-entry one).
+# stdin: limine.conf; stdout: the same without any of our blocks: new-style
+# markers, r6 omarchy-sl7-psr-entry markers, and (marker-independent) any
+# "linux-sl7 (... test)" entry. With -v mode=list it prints the titles and
+# cmdlines of what would be removed instead.
 strip_block() {
-  awk '
-    index($0, ENVIRON["tag_new"]) == 1 || index($0, ENVIRON["tag_old"]) == 1 { skip = 1; next }
-    skip && (index($0, "### END omarchy-sl7-test-entry") == 1 || index($0, "### END omarchy-sl7-psr-entry") == 1) { skip = 0; next }
-    !skip { print }'
+  awk -v mode="${1:-strip}" '
+    function is_header(l) { return l ~ /^[ \t]*\/+[^\/]/ }
+    function is_begin(l) { return index(l, "### BEGIN omarchy-sl7-test-entry") == 1 || index(l, "### BEGIN omarchy-sl7-psr-entry") == 1 }
+    function is_end(l) { return index(l, "### END omarchy-sl7-test-entry") == 1 || index(l, "### END omarchy-sl7-psr-entry") == 1 }
+    function is_legacy_title(l) { return l ~ /^[ \t]*\/+[ \t]*linux-sl7 \([A-Za-z0-9 -]+ test\)[ \t]*$/ }
+    function show(l) { sub(/^[ \t]+/, "", l); print l }
+    {
+      if (tskip && (is_header($0) || is_begin($0) || is_end($0))) tskip = 0
+      if (skip && is_header($0) && ++hdrs > 1) skip = 0
+      if (is_begin($0)) { skip = 1; hdrs = 0; next }
+      if (skip && is_end($0)) { skip = 0; next }
+      if (is_end($0)) next
+      if (!skip && is_legacy_title($0)) tskip = 1
+      if (skip || tskip) {
+        if (mode == "list" && (is_header($0) || $0 ~ /^[ \t]*(kernel_)?cmdline:/)) show($0)
+        next
+      }
+      if (mode != "list") print
+    }'
 }
 
 # stdin: limine.conf; stdout: with the entry (env: entry_name, param, tag)
@@ -283,6 +305,22 @@ case $cmd in
       [[ -n $name ]] || continue
       [[ -n $(preset_params "$name") ]] || printf '%-4s %-8s %s\n' "$name" enabled "$params"
     done < <(enabled_entries)
+    if conf=$(find_conf); then
+      echo "in $conf:"
+      found=$(strip_block list <"$conf" 2>/dev/null || true)
+      if [[ -n $found ]]; then sed 's/^/  /' <<<"$found"; else echo "  (none of our entries)"; fi
+    fi
+    ;;
+  cleanup)
+    need_root "$@"
+    case ${2:-} in
+      "") rm -f "${state_dir:?}"/* ;;
+      --legacy) ;;
+      *) usage ;;
+    esac
+    rm -f "${legacy_psr:?}" "${legacy_hook:?}"
+    apply || true
+    reenroll
     ;;
   status)
     if [[ -n ${2:-} ]]; then
