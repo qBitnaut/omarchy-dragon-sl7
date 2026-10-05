@@ -784,6 +784,35 @@ write_analysis() { # out dir, before dir, after dir, seconds asleep
   } > "$o/ANALYSIS.txt"
 }
 
+# `systemctl suspend` only queues the request and returns at once. Block until
+# the kernel has completed a suspend/resume cycle (suspend_stats success or fail
+# counters move), so nothing runs while the system is going down: tracing stops
+# too early and reloaded modules (ath12k) race the suspend otherwise. Test hooks
+# with SL7_SUSPEND_CMD set skip the wait unless SL7_WAIT_RESUME=1.
+wait_for_resume() { # success-before fail-before
+  local ok0=$1 fail0=$2 ok fail n=0
+  if [[ -n ${SL7_SUSPEND_CMD:-} && ${SL7_WAIT_RESUME:-0} != 1 ]]; then
+    return 0
+  fi
+  [[ $ok0 =~ ^[0-9]+$ ]] || { sleep 20; return 0; }
+  while :; do
+    ok=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '%s' "$ok0")
+    fail=$(cat "$sys/power/suspend_stats/fail" 2> /dev/null || printf '%s' "$fail0")
+    if ((ok > ok0)); then
+      return 0
+    fi
+    if [[ $fail =~ ^[0-9]+$ && $fail0 =~ ^[0-9]+$ ]] && ((fail > fail0)); then
+      warn "the suspend attempt failed (suspend_stats/fail increased)"
+      return 1
+    fi
+    if ((n == 120)); then
+      warn "no suspend after 120 s; is something inhibiting sleep? still waiting (Ctrl-C to abort)"
+    fi
+    n=$((n + 1))
+    sleep 1
+  done
+}
+
 do_trace() {
   local owner="" home start_epoch mem_sleep boot0 mono0 boot1 mono1 asleep susp0 susp1 e
 
@@ -839,6 +868,8 @@ do_trace() {
   boot0=$(boottime_s)
   mono0=$(mono_s)
   susp0=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
+  local fail0
+  fail0=$(cat "$sys/power/suspend_stats/fail" 2> /dev/null || printf '?')
   printf '1\n' > "$tracefs/tracing_on"
 
   sync
@@ -850,6 +881,7 @@ do_trace() {
   if ! $suspend_cmd; then
     warn "'$suspend_cmd' failed"
   fi
+  wait_for_resume "$susp0" "$fail0" || true
 
   # resume: stop first, so the analysis window is the suspend
   printf '0\n' > "$tracefs/tracing_on"
@@ -937,6 +969,8 @@ do_suspend() {
   boot0=$(boottime_s)
   mono0=$(mono_s)
   susp0=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
+  local fail0
+  fail0=$(cat "$sys/power/suspend_stats/fail" 2> /dev/null || printf '?')
 
   sync
   printf 'suspending now (%s). Wake the laptop with the power button.\n' "$suspend_cmd"
@@ -944,6 +978,7 @@ do_suspend() {
   if ! $suspend_cmd; then
     die "'$suspend_cmd' failed"
   fi
+  wait_for_resume "$susp0" "$fail0" || true
 
   # resume
   local t_resume mono1 ac_at_resume=0 susp1
