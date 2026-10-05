@@ -1,4 +1,4 @@
-# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+# Maintainer: qBitnaut <19711592+qBitnaut@users.noreply.github.com>
 #
 # YuNet (face detection) and SFace (face recognition, int8) ONNX models for
 # howdy-next, from OpenCV Zoo at the exact revisions and sha256 that

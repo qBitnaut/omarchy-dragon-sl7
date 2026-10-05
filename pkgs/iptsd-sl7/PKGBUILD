@@ -1,4 +1,4 @@
-# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+# Maintainer: qBitnaut <19711592+qBitnaut@users.noreply.github.com>
 #
 # iptsd with Surface Laptop 7 touchpad support (HID-over-SPI 045E:0C77), built
 # from the alex-lentz/iptsd fork pinned to an exact commit.

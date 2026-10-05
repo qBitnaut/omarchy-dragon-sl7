@@ -1,5 +1,5 @@
 # shellcheck shell=bash disable=SC2034,SC2154
-# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+# Maintainer: qBitnaut <19711592+qBitnaut@users.noreply.github.com>
 #
 # On-demand bridge from the Surface Laptop 7 IR camera (CAMSS raw node) to a
 # v4l2loopback device, for howdy-next. Pure C, direct V4L2/media ioctls. The

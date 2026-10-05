@@ -1,16 +1,116 @@
+```text
+                 ▄▄▄
+ ▄█████▄    ▄███████████▄    ▄███████   ▄███████   ▄███████   ▄█   █▄    ▄█   █▄
+███   ███  ███   ███   ███  ███   ███  ███   ███  ███   ███  ███   ███  ███   ███
+███   ███  ███   ███   ███  ███   ███  ███   ███  ███   █▀   ███   ███  ███   ███
+███   ███  ███   ███   ███ ▄███▄▄▄███ ▄███▄▄▄██▀  ███       ▄███▄▄▄███▄ ███▄▄▄███
+███   ███  ███   ███   ███ ▀███▀▀▀███ ▀███▀▀▀▀    ███      ▀▀███▀▀▀███  ▀▀▀▀▀▀███
+███   ███  ███   ███   ███  ███   ███ ██████████  ███   █▄   ███   ███  ▄██   ███
+███   ███  ███   ███   ███  ███   ███  ███   ███  ███   ███  ███   ███  ███   ███
+ ▀█████▀    ▀█   ███   █▀   ███   █▀   ███   ███  ███████▀   ███   █▀    ▀█████▀
+                                       ███   █▀
+```
+
 # omarchy-dragon-sl7
 
-Omarchy on the Surface Laptop 7. The Snapdragon X Plus (X1P-64-100) model
-comes first, with X Elite support where it is cheap to add. This project is a
-thin overlay on upstream omacom/omarchy and omarchy-iso dragon branches. It
-ships its own linux-sl7 kernel, and firmware is fetched at install time and
-never redistributed.
+**Omarchy for the Microsoft Surface Laptop 7 (Snapdragon X)**
+
+> Unofficial community port. Not affiliated with or endorsed by Omarchy/Basecamp, Microsoft or Qualcomm.
+
+The logo above is Omarchy's (MIT licensed).
+
+This project is a thin overlay on upstream omacom/omarchy and omarchy-iso (dragon
+branches). It ships its own `linux-sl7` kernel, a touchpad daemon, an add-on package
+with the device glue, and a signed package repository. Firmware is fetched at install
+time and never redistributed.
 
 ## Status
 
-Planning / pre-alpha. Nothing to install yet. See [PLAN.md](PLAN.md).
+**Alpha.** In daily use on a 13.8" Surface Laptop 7 with a Snapdragon X Plus
+(X1P-64-100, 16 GB). The X Elite models and the 15" model are untested and
+best-effort: the device trees and packages cover them, but nobody has booted them.
+Expect rough edges, and read [What works](#what-works) before you wipe a disk. See
+[PLAN.md](PLAN.md) for the longer plan and research notes.
 
-## Updating an existing install
+## What works
+
+Measured on the 13.8" X1P. "Works" means used daily without known problems;
+"Partial" means it runs with a documented gap or has not been checked as thoroughly.
+
+| Feature | Status | Notes |
+|---|---|---|
+| Keyboard | Works | Surface Aggregator modules in the initramfs, so it also works at the LUKS prompt. The prompt can be blank for the first boots: type blind. |
+| Touchpad | Works | `iptsd-sl7` (a fork with Surface Laptop 7 fixes). Tap-to-click is off by default (it caused false clicks while scrolling; set `tap_to_click = true` in `~/.config/hypr/input.lua` to bring it back). Drag latch keeps click-and-drag held, lift-and-continue bridges brief lifts, and a watchdog re-enables multitouch if the pad falls back to mouse mode. |
+| Touchscreen | Partial | SPI touch modules only (the 13.8" unit here). Units with the I2C module are not covered. Pen is untested. |
+| Display | Works | Native 2304x1536 at 120 Hz. |
+| Variable refresh (VRR) | Experimental | Off by default; boot entry `linux-sl7 (VRR test)`. No measurable idle power gain in a first test. |
+| Panel self refresh (PSR) | Not yet | Known broken: the panel goes black when idle. Keep it off. |
+| GPU acceleration | Works | Adreno via `msm`; the zap shader comes from the Microsoft MSI. |
+| Hardware video decode (Iris) | Not yet | The kernel driver is built, but the device tree node is not enabled yet. Video decodes in software. |
+| Wi-Fi | Works | WCN7850 with a board-file fix and the factory MAC restored. |
+| Bluetooth | Partial | Works with the factory address restored (it does not work at all without it); less tested than Wi-Fi. |
+| Audio | Partial | Speakers and microphones work with the kernel volume caps. The Pro Audio profile is deliberately blocked to protect the speakers. Headphone jack quality is unverified. |
+| Battery percentage and charging | Works | `qcom_battmgr` patch for capacity; Omarchy's battery scripts are patched to see the Qualcomm gauge. |
+| USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s). USB4 and Thunderbolt bandwidth is not available yet. |
+| Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume. See [power results](#power-and-performance-results-so-far) for the drain. |
+| Front webcam | Partial | OV02C10 through libcamera's software ISP. No tuning yet, so expect poor colour. |
+| IR camera | Partial | Raw capture works (ST VD55G0, 644x604 greyscale) through `sl7-ir-bridge`. |
+| Face unlock | Experimental | howdy-next plus a setup app. The IR emitter is not enabled yet, so recognition needs daylight or an external IR source. |
+| CPU frequency scaling | Works | All three clusters, `schedutil`, with the SCMI sustained-frequency fix. |
+| Power mode on AC/battery | Works | Caps CPU and GPU frequency and enables Wi-Fi power save on battery; restores everything on AC. 60 Hz switching on battery is opt-in. |
+| Firmware | Works | Fetched from Microsoft's Surface Laptop 7 driver MSI, never shipped here. |
+| Hibernation | Not yet | Blocked upstream. |
+
+## Install
+
+### Fresh install from the installer ISO
+
+> The ISO is the least-tested path. The kit's own README records a full ISO build
+> and a boot on the SL7 as not yet verified. If you already run Omarchy on the
+> machine, [update in place](#updating-an-existing-install) instead.
+
+The installer **wipes the disk you pick** and does not keep Windows.
+
+1. **Get the ISO.** It is not published as a release asset (it is larger than
+   GitHub's 2 GiB asset limit). Build it with the `installer-iso` workflow: push a
+   change under `installer/` or `upstream.lock` to your fork, or run
+   `gh workflow run installer-iso.yml`. The artifact `omarchy-sl7-installer-iso`
+   holds the ISO and its `.sha256` and expires after 14 days. It consumes the
+   `linux-sl7` build named in `upstream.lock`, which also expires: re-run
+   `linux-sl7.yml` and update `LINUX_SL7_RUN_ID` if the download step fails.
+2. **Get the firmware.** Download Microsoft's Surface Laptop 7 driver MSI
+   (`SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi`) and extract it with
+   `msitools` into `$SL7_MSI/extracted/` (the kit reads
+   `extracted/ProgramFiles64Folder/SurfaceUpdate`). The kit checks the files against
+   `$SL7_MSI/SHA256SUMS.extracted`. The stick carries firmware for your own device:
+   do not share it. Skip this step with `--no-firmware` only if you accept that the
+   installer then looks for a Windows driver store, which is gone after the wipe.
+3. **Write the stick** (16 GB or larger) from an Arch-based host:
+   ```
+   sudo pacman -S --needed dosfstools mtools util-linux python github-cli
+   tools/installer-kit/make-install-usb.sh --device /dev/sdX --from-ci latest
+   tools/installer-kit/make-install-usb.sh --device /dev/sdX --iso FILE   # FILE.sha256 next to it
+   ```
+   Check the device with `lsblk -o NAME,MODEL,SIZE,TRAN,RM`. Run it as yourself, not
+   with `sudo`. It verifies the checksum, refuses non-removable devices, and makes you
+   type the device path. It adds a small `SL7DATA` partition with the firmware.
+4. **Secure Boot off.** Power off, hold Volume Up and press Power to enter the Surface
+   UEFI, then Security > Secure Boot: None.
+5. **Boot the stick.** Plug it into the **USB-A port** (the live image keeps the DSP
+   driver off because starting it resets USB-C) and stay on AC power. Hold Volume Down
+   while pressing Power, or pick the stick in the UEFI boot menu. Expect a black screen
+   for a minute or two.
+6. **Run the installer.** Choose the **internal NVMe, not the stick**, and set a LUKS
+   passphrase. The unlock prompt may be blank on early boots: type the passphrase
+   blind and press Enter.
+7. **First boot.** Reboot without the stick. The machine should land in `linux-sl7`
+   (the stock `linux-aarch64` entry stays as a rescue kernel and has no internal
+   keyboard). Check with `uname -r` (contains `sl7`) and `sl7-doctor`.
+
+Troubleshooting and the layout of the stick are in
+[tools/installer-kit/README.md](tools/installer-kit/README.md).
+
+### Updating an existing install
 
 For an Omarchy install on a Surface Laptop 7 that was not installed from our ISO. Download,
 read, then run (`curl ... | bash` also works):
@@ -35,6 +135,93 @@ enables the repository at first boot.
 If a later Omarchy change drops the repository, `sudo omarchy-sl7-repo-ensure` puts it back
 (it also runs after `omarchy`/`omarchy-settings` upgrades, at boot, and from an
 `omarchy refresh pacman` hook). `sl7-doctor` reports the state.
+
+### Day to day
+
+- `omarchy update` carries our packages (`linux-sl7`, `iptsd-sl7`, `omarchy-surface-sl7`
+  and the face unlock packages), because the repository sits above Omarchy's in
+  `pacman.conf`.
+- After a kernel update, **power off and on** rather than rebooting. A warm reboot
+  can leave some devices in a state a full power cycle clears.
+- Run `sl7-doctor` after updates to check the kernel, firmware, repository and power
+  state.
+
+## Tools
+
+All ship in `omarchy-surface-sl7` unless noted.
+
+| Tool | What it does |
+|---|---|
+| `sl7-doctor` | Read-only health check: kernel and device tree, cpufreq, initramfs modules, firmware, touch, boot order, repository, power mode, PSR and VRR state. Exits 1 on failure. |
+| `sl7-powertest` | Measures idle or video power from the battery gauge with a pinned brightness, and compares two runs. |
+| `sl7-sleepstats` | Prints SoC sleep counters (`cxsd`, `ddr`, `aosd`); `--trace` finds what blocks deep sleep, `--suspend-test` runs a measured suspend. |
+| `sl7-ir-probe` | Read-only camera probe: sensor binding, media topology and a 30-frame IR capture. |
+| `omarchy-sl7-powermode` | Applies or shows the AC or battery power mode (frequency caps, Wi-Fi power save). |
+| `omarchy-sl7-test-entry` | Adds optional boot entries for experiments (`psr`, `vrr`, `ir-test`); off by default. |
+| `omarchy-sl7-faceunlock` | Face Unlock setup and face manager (Omarchy menu: Setup > Security > Face Unlock). Package `omarchy-sl7-faceunlock`. |
+| `sl7-ir-bridge` | On-demand bridge from the IR camera to a stable V4L2 device, `/dev/v4l/by-id/sl7-ir-camera`. Package `sl7-ir-bridge`. |
+
+## Power and performance results so far
+
+Measured on the 13.8" X1P-64-100 (16 GB). Numbers are from `sl7-powertest` and the
+battery gauge, which steps in 10 mWh, so short runs are coarse.
+
+### Idle
+
+About **2.9 W** at 30% brightness with the browser closed, on battery, measured over
+20 minutes with the battery gauge. An earlier bug in the measuring tool overstated
+the savings; these are the corrected numbers.
+
+### Suspend
+
+Deep suspend, 8 to 10 minute traces with `sl7-sleepstats --trace`:
+
+| Metric (8-10 min deep suspend) | 7.2.8-7/-9 (before) | 7.2.8-11 (after) |
+|---|---|---|
+| **DDR self-refresh** (qcom_stats `ddr`, `lpm-0xd4`) | 0% of suspend, 0 entries | **~95% of suspend** (419 of 442 s; 584 of 615 s) |
+| DDR bandwidth votes in the RPMh sleep set | MC0/SH0/SH1 held | all released |
+| PCIe links (NVMe, Wi-Fi) | kept up through suspend | powered off, relinked on resume (Gen4 x4, Gen3 x2) |
+| ADSP wakeups | ~104/s | ~11.5/s |
+| XO (crystal) | held | still held (one prepare) |
+| CX power collapse (`cxsd`) | no | not yet |
+| Suspend power (overnight) | 0.8-0.9 W (8 h 25 min, 16% of 48.6 Wh, 7.2.8-4) | **measurement pending** |
+
+To our knowledge, this is the first published DDR self-refresh in suspend on a
+shipping Snapdragon X (X1E/X1P) laptop under Linux, with all DSPs running. The only
+earlier CX/DDR collapse we found was on Qualcomm's reference CRD with an experimental
+branch that disables the ADSP. Reports from the Dell Inspiron 7441, Latitude 7455,
+Yoga Slim 7x and IdeaPad Slim 5x show `ddr` at 0.
+
+The overnight watts on the new kernel are not measured yet, and we do not estimate
+them: DDR in self-refresh is a precondition for lower drain, not a measurement of it.
+CX power collapse is not reached yet because one XO prepare still holds.
+
+### What made the difference
+
+From the `linux-sl7` README (Power sections):
+
+- The 7.3 PDC pass-through and `domain_ss3` deepest-idle backport.
+- The 7.4 pmdomain and cpuidle-psci backport (cores that never come online no longer
+  pin their cluster).
+- qcom-geni serial force suspend, so the Surface Aggregator UART stops holding clocks.
+- The ps883x retimer releasing its XO clock while in reset.
+- PCIe root ports reaching D3hot (`d4c79b63d82d`), so the NVMe and Wi-Fi links power
+  off.
+- The Qualcomm Crypto Engine driver disabled (it held a permanent DDR vote).
+- `schedutil` with the SCMI sustained-frequency fix for cpufreq.
+
+### Known
+
+- VRR showed no measurable idle gain in a first test.
+- PSR blanks the panel, so it stays off.
+
+## Roadmap
+
+- **IR emitter:** staged and safety-gated. Stage A (nothing fires) is in; the channel
+  test stays disabled until reviewed.
+- **Runtime power tuning** with a per-rail power meter.
+- **Rebase on Linux 7.3** when it is released, dropping the patches that land in it.
+- **USB4** once a host-router driver is posted upstream.
 
 ## Repository
 
@@ -70,13 +257,26 @@ Surface Laptop 7 driver MSI. The .gitignore blocks firmware and captures.
 ## License
 
 - Scripts and packaging are MIT licensed (see LICENSE).
-- Kernel patches under pkgs/linux-sl7 (when added) are GPL-2.0, like the Linux kernel they modify.
+- Kernel patches under pkgs/linux-sl7/patches are GPL-2.0, like the Linux kernel they modify.
+- iptsd-sl7 (the iptsd fork) is GPL-2.0-or-later; howdy-next is GPL-3.0-or-later.
 - Microsoft/Qualcomm firmware is never included and remains under its own license.
+- The Omarchy logo is Omarchy's, under the MIT license.
 
 ## Credits
 
-Built on the work of the community: omacom/omarchy dragon work,
-denislopt/omarchy-surface-laptop7, bryce-hoehn/linux-surface-laptop-7,
-ProgrammerIn-wonderland/ELLX-Kernel,
-ItsLucas/surface-laptop-7-ubuntu-kernel, dwhinham/linux-sp11, and
-linux-surface.
+Built on the work of the community:
+
+- **Omarchy** (omacom/omarchy, omarchy-iso, omarchy-pkgs) and its dragon branches.
+- **Surface Laptop 7 ports:** denislopt/omarchy-surface-laptop7, bryce-hoehn/linux-surface-laptop-7
+  (touchpad calibration by Oliver White), ProgrammerIn-wonderland/ELLX-Kernel,
+  ItsLucas/surface-laptop-7-ubuntu-kernel, dwhinham/linux-sp11, and linux-surface.
+- **alex-lentz/iptsd:** the iptsd fork with Surface Laptop 7 touchpad support.
+- **valeronm/sl7-mac:** factory Wi-Fi and Bluetooth addresses.
+- **nathawat/howdy-next:** face authentication; the AUR package it builds on.
+- **nate8199/omarchy-plugin-howdy-face:** the lock screen overlay we patch.
+- **v4l2loopback:** the virtual camera device behind `sl7-ir-bridge`.
+- **petm5/vd55g** (and ST's GPL firmware arrays): the VD55G0 IR sensor driver.
+- **scuggo** (and Nikkuss): the msm variable refresh patch and QSPI work.
+- **Kernel patch authors** credited in each patch: Maulik Shah, Ulf Hansson, Abel Vesa,
+  Manivannan Sadhasivam, Bryan O'Donoghue, Jens Glathe, Liviu Nicoara, Jiajie Chen
+  and rafaelguariento, among others.

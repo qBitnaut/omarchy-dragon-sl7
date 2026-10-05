@@ -1,4 +1,4 @@
-# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+# Maintainer: qBitnaut <19711592+qBitnaut@users.noreply.github.com>
 #
 # pacman keyring for the omarchy-sl7 repository (modelled on archlinuxarm-keyring).
 # Ships the repository signing key as /usr/share/pacman/keyrings/omarchy-sl7.{gpg,-trusted,-revoked};
