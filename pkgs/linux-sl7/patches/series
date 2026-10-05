@@ -120,3 +120,7 @@
 0070-SL7-usb-typec-mux-ps883x-Drop-the-XO-clock-while-in-reset.patch
 0071-SL7-PCI-host-common-dwc-Log-why-D3cold-is-vetoed.patch
 0072-PCI-Allow-D3-for-native-hotplug-capable-Root-Ports-.patch
+
+# 13. IR emitter bring-up, stage A (SL7 local): PM8550 flash LED safety lockout + romulus13 discovery nodes
+0080-SL7-leds-qcom-flash-IR-emitter-safety-lockout.patch
+0081-SL7-arm64-dts-qcom-x1e80100-romulus13-IR-flash-discovery-LEDs.patch

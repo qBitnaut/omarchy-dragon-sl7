@@ -1,0 +1,437 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 20:00:00 -0500
+Subject: [PATCH] SL7 local: leds: qcom-flash: IR emitter safety lockout
+
+SL7 local: leds: qcom-flash: IR emitter safety lockout
+
+The Surface Laptop 7 IR illuminator is a PM8550 flash LED driven by
+Windows at 700 mA, on a channel nobody has identified yet. The stock
+driver is not safe to point at an unknown eye-facing emitter: torch mode
+disables the hardware safety timer, probe and remove() leave the
+channel state alone, and the v4l2-flash sub-device exposes torch and
+external strobe to user space. This patch adds, for LED nodes marked
+color = <LED_COLOR_ID_IR> only (every other LED behaves as before):
+
+ - Torch lockout. brightness_set_blocking() refuses any non-zero value
+   with -EPERM and only switches the channel off for zero. set_flash_current()
+   refuses TORCH_MODE with a non-zero current as a second check, the
+   external strobe op refuses, and no v4l2-flash sub-device is created.
+   The LED core queues brightness writes, so a sysfs write of 255 still
+   returns success; the refusal is in the log ("torch refused") and the
+   channel stays off.
+ - Hard clamps in code, below whatever the device tree says: flash
+   current at most 700 mA in total, flash timeout at most 100 ms, torch
+   clamp at most 5 mA per channel. The safety timer is never disabled for
+   an IR LED (the timeout is clamped to at least one 10 ms step). The
+   default flash current is the lowest step.
+ - All channels and the module are switched off in remove() and in a new
+   .shutdown(), whatever the software state. A register snapshot is
+   logged again at remove, after the all-off.
+ - A read-only register snapshot at probe, one dev_info line per register
+   (STATUS, CHAN_TIMER, ITARGET, MODULE_EN, IRESOLUTION, CHAN_STROBE,
+   CHAN_EN and the thermal and torch clamp registers), taken before the
+   driver's first write. It shows what the firmware or Windows left in the
+   PMIC (the IR channel, if Windows configured it, has ITARGET 0x37 for
+   700 mA).
+ - A bind gate: the probe refuses any node set containing an IR LED unless
+   the module parameter ir_test=1 (read-only at run time), before any
+   register is touched. The parameter is set only by the modprobe
+   gate shipped in omarchy-surface-sl7 (it requires sl7.ir_test=1 on the
+   kernel command line), so a normal boot, a plain modprobe --ignore-install
+   or an insmod can not bind the driver to the IR nodes.
+
+While there: the v4l2-flash release loops started at index leds_count,
+which is one past the last LED in remove() (an out of bounds read, and a
+bogus pointer for any LED without a v4l2-flash device, such as the IR
+ones). Replace both by a loop over the LEDs registered so far that skips
+NULL entries. Drop the mutex_destroy() in remove(): the devm-managed LED
+class devices are unregistered after remove() returns and switch
+themselves off through callbacks that take that lock.
+
+Hardware strobe (the qcom,ir-hw-strobe property of the plan) is not
+added here: nothing consumes it before Stage C, which adds it.
+
+Rationale: SL7 local safety layer for the IR emitter bring-up (see
+research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md, stage A). Not for
+upstream as it stands.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+--- a/drivers/leds/flash/leds-qcom-flash.c
++++ b/drivers/leds/flash/leds-qcom-flash.c
+@@ -5,12 +5,15 @@
+ 
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
++#include <linux/dev_printk.h>
+ #include <linux/leds.h>
+ #include <linux/led-class-flash.h>
+ #include <linux/module.h>
++#include <linux/moduleparam.h>
+ #include <linux/platform_device.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
++#include <dt-bindings/leds/common.h>
+ #include <media/v4l2-flash-led-class.h>
+ 
+ /* registers definitions */
+@@ -76,6 +79,28 @@
+ 
+ #define UA_PER_MA			1000
+ 
++/*
++ * SL7 local: IR illuminator safety (omarchy-dragon-sl7, not for upstream).
++ *
++ * An LED node with color = <LED_COLOR_ID_IR> drives the Surface Laptop 7 IR
++ * emitter. The device tree already carries per-LED limits; these are a second,
++ * independent layer in code that no device tree edit can raise. For an IR LED:
++ *  - torch mode is refused (the PMIC safety timer is off in torch mode),
++ *  - the flash current is clamped to SL7_IR_FLASH_MAX_UA in total, the torch
++ *    clamp register to TORCH_IRES_UA per channel,
++ *  - the safety timer is always on and at most SL7_IR_TIMEOUT_MAX_MS,
++ *  - no v4l2-flash sub-device is created (no torch, no external strobe),
++ *  - the driver binds only when the module parameter ir_test is set.
++ */
++#define SL7_IR_FLASH_MAX_UA		700000
++#define SL7_IR_TIMEOUT_MAX_MS		100
++#define SL7_IR_TIMEOUT_MIN_MS		FLASH_TIMER_STEP_MS
++
++static bool ir_test;
++module_param(ir_test, bool, 0400);
++MODULE_PARM_DESC(ir_test,
++		 "SL7 local: allow binding to IR emitter LED nodes (set only by the sl7.ir_test=1 modprobe gate, default off)");
++
+ /* thermal threshold constants */
+ #define OTST_3CH_MIN_VAL		3
+ #define OTST1_4CH_MIN_VAL		0
+@@ -167,6 +192,8 @@
+ 
+ struct qcom_flash_data {
+ 	struct v4l2_flash	**v4l2_flash;
++	struct regmap		*regmap;	/* SL7 local: for the remove snapshot */
++	u32			reg_base;
+ 	struct regmap_field     *r_fields[REG_MAX_COUNT];
+ 	struct mutex		lock;
+ 	enum hw_type		hw_type;
+@@ -190,6 +217,7 @@
+ 	u8				*chan_id;
+ 	u8				chan_count;
+ 	bool				enabled;
++	bool				ir;	/* SL7 local: IR emitter, see SL7_IR_* */
+ };
+ 
+ static int set_flash_module_en(struct qcom_flash_led *led, bool en)
+@@ -344,6 +372,14 @@
+ 	u8 shift, ires_mask = 0, ires_val = 0, chan_id;
+ 	int i, rc;
+ 
++	if (led->ir) {
++		/* SL7 local: no torch for the IR emitter, hard flash ceiling */
++		if (mode == TORCH_MODE && current_ma)
++			return -EPERM;
++		current_ma = min_t(u32, current_ma,
++				   SL7_IR_FLASH_MAX_UA / UA_PER_MA);
++	}
++
+ 	/*
+ 	 * Split the current across the channels and set the
+ 	 * IRESOLUTION and ITARGET registers accordingly.
+@@ -393,6 +429,11 @@
+ 
+ 	/* set SAFETY_TIMER for all the channels connected to the same LED */
+ 	timeout_ms = min_t(u32, timeout_ms, led->max_timeout_ms);
++	if (led->ir) {
++		/* SL7 local: the timer is never disabled and never above 100 ms */
++		timeout_ms = clamp_t(u32, timeout_ms, SL7_IR_TIMEOUT_MIN_MS,
++				     SL7_IR_TIMEOUT_MAX_MS);
++	}
+ 
+ 	for (i = 0; i < led->chan_count; i++) {
+ 		chan_id = led->chan_id[i];
+@@ -448,6 +489,62 @@
+ 	return 0;
+ }
+ 
++/*
++ * SL7 local: switch every channel and the module off, whatever the software
++ * state. Used on remove and on shutdown, so a reboot, kexec or module removal
++ * never leaves an emitter armed. Best effort: tries everything, returns the
++ * first error.
++ */
++static int qcom_flash_all_off(struct qcom_flash_data *flash_data)
++{
++	int rc, rc2;
++
++	rc = regmap_field_write(flash_data->r_fields[REG_CHAN_EN], 0);
++	rc2 = regmap_field_write(flash_data->r_fields[REG_MODULE_EN], 0);
++	if (!rc)
++		rc = rc2;
++
++	mutex_lock(&flash_data->lock);
++	flash_data->chan_en_bits = 0;
++	flash_data->total_ma = 0;
++	mutex_unlock(&flash_data->lock);
++
++	return rc;
++}
++
++/*
++ * SL7 local: read-only dump of the flash module registers, one dev_info line
++ * per register (never a write). reg_base + [first, last] per hardware type
++ * covers STATUS, CHAN_TIMER, ITARGET, MODULE_EN, IRESOLUTION, CHAN_STROBE and
++ * CHAN_EN. Taken at probe before the first write (what the firmware, or
++ * Windows before a warm reboot, left behind) and again at remove after the
++ * channels were switched off.
++ */
++static void qcom_flash_snapshot(struct device *dev, struct regmap *regmap,
++				u32 reg_base, enum hw_type type, const char *when)
++{
++	static const u8 ranges_4ch[][2] = { { 0x00, 0x09 }, { 0x3e, 0x4e }, { 0x78, 0x7a }, { 0xed, 0xed } };
++	static const u8 ranges_3ch[][2] = { { 0x00, 0x0a }, { 0x40, 0x4c }, { 0x56, 0x58 }, { 0xea, 0xec } };
++	const u8 (*ranges)[2] = type == QCOM_MVFLASH_4CH ? ranges_4ch : ranges_3ch;
++	int n = type == QCOM_MVFLASH_4CH ? ARRAY_SIZE(ranges_4ch) : ARRAY_SIZE(ranges_3ch);
++	u32 val;
++	int i, reg, rc;
++
++	dev_info(dev, "SL7 register snapshot (%s, read-only), base %#x, %s:\n",
++		 when, reg_base, type == QCOM_MVFLASH_4CH ? "4ch" : "3ch");
++	for (i = 0; i < n; i++) {
++		for (reg = ranges[i][0]; reg <= ranges[i][1]; reg++) {
++			rc = regmap_read(regmap, reg_base + reg, &val);
++			if (rc)
++				dev_info(dev, "SL7 snapshot %s: reg %#06x read failed (%d)\n",
++					 when, reg_base + reg, rc);
++			else
++				dev_info(dev, "SL7 snapshot %s: reg %#06x = %#04x\n",
++					 when, reg_base + reg, val);
++		}
++	}
++}
++
+ static inline struct qcom_flash_led *flcdev_to_qcom_fled(struct led_classdev_flash *flcdev)
+ {
+ 	return container_of(flcdev, struct qcom_flash_led, flash);
+@@ -590,6 +687,33 @@
+ 	bool enable = !!brightness;
+ 	int rc;
+ 
++	if (led->ir) {
++		/*
++		 * SL7 local: torch has no hardware safety timer. Refuse any
++		 * non-zero brightness; zero only switches the LED off (no
++		 * register is programmed for torch). The LED core queues
++		 * brightness writes, so the sysfs write itself still returns
++		 * success: the refusal shows in the log and the channel stays
++		 * off. Reset the cached value so reads show 0.
++		 */
++		if (brightness) {
++			dev_warn_ratelimited(led_cdev->dev,
++					     "SL7: torch refused on the IR emitter LED\n");
++			led_cdev->brightness = LED_OFF;
++			return -EPERM;
++		}
++
++		rc = set_flash_strobe(led, SW_STROBE, false);
++		if (rc)
++			return rc;
++
++		rc = update_allowed_flash_current(led, &current_ma, false);
++		if (rc < 0)
++			return rc;
++
++		return set_flash_module_en(led, false);
++	}
++
+ 	rc = set_flash_strobe(led, SW_STROBE, false);
+ 	if (rc)
+ 		return rc;
+@@ -633,6 +757,10 @@
+ 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
+ 	int rc;
+ 
++	/* SL7 local: hardware strobe is not enabled for the IR emitter yet */
++	if (led->ir)
++		return -EPERM;
++
+ 	rc = set_flash_module_en(led, enable);
+ 	if (rc)
+ 		return rc;
+@@ -712,6 +840,24 @@
+ }
+ #endif
+ 
++/*
++ * SL7 local: release the v4l2-flash sub-devices of the LEDs registered so far.
++ * IR LEDs have none (NULL entry). Replaces the open-coded loops, which started
++ * at index leds_count (one past the last LED on remove) and so could free a
++ * pointer that was never set.
++ */
++static void qcom_flash_release_v4l2(struct qcom_flash_data *flash_data)
++{
++	int i;
++
++	for (i = (int)flash_data->leds_count - 1; i >= 0; i--) {
++		if (flash_data->v4l2_flash[i]) {
++			v4l2_flash_release(flash_data->v4l2_flash[i]);
++			flash_data->v4l2_flash[i] = NULL;
++		}
++	}
++}
++
+ static int qcom_flash_register_led_device(struct device *dev,
+ 		struct fwnode_handle *node, struct qcom_flash_led *led)
+ {
+@@ -719,11 +865,15 @@
+ 	struct led_init_data init_data;
+ 	struct led_classdev_flash *flash = &led->flash;
+ 	struct led_flash_setting *brightness, *timeout;
+-	u32 current_ua, timeout_us;
++	u32 current_ua, timeout_us, color;
+ 	u32 channels[4];
+ 	int i, rc, count;
+ 	u8 torch_clamp;
+ 
++	/* SL7 local: color = <LED_COLOR_ID_IR> marks the IR emitter */
++	led->ir = !fwnode_property_read_u32(node, "color", &color) &&
++		  color == LED_COLOR_ID_IR;
++
+ 	count = fwnode_property_count_u32(node, "led-sources");
+ 	if (count <= 0) {
+ 		dev_err(dev, "No led-sources specified\n");
+@@ -770,6 +920,8 @@
+ 	}
+ 
+ 	current_ua = min_t(u32, current_ua, TORCH_CURRENT_MAX_UA * led->chan_count);
++	if (led->ir)	/* SL7 local: torch clamp at the 5 mA hardware step */
++		current_ua = min_t(u32, current_ua, TORCH_IRES_UA * led->chan_count);
+ 	led->max_torch_current_ma = current_ua / UA_PER_MA;
+ 
+ 	torch_clamp = (current_ua / led->chan_count) / TORCH_IRES_UA;
+@@ -790,12 +942,16 @@
+ 
+ 		current_ua = min_t(u32, current_ua, FLASH_CURRENT_MAX_UA * led->chan_count);
+ 		current_ua = min_t(u32, current_ua, FLASH_TOTAL_CURRENT_MAX_UA);
++		if (led->ir)
++			current_ua = min_t(u32, current_ua, SL7_IR_FLASH_MAX_UA);
+ 
+ 		/* Initialize flash class LED device brightness settings */
+ 		brightness = &flash->brightness;
+ 		brightness->min = brightness->step = FLASH_IRES_UA * led->chan_count;
+ 		brightness->max = current_ua;
+ 		brightness->val = min_t(u32, current_ua, FLASH_CURRENT_DEFAULT_UA);
++		if (led->ir)	/* SL7 local: start at the lowest step */
++			brightness->val = brightness->min;
+ 
+ 		led->max_flash_current_ma = current_ua / UA_PER_MA;
+ 		led->flash_current_ma = brightness->val / UA_PER_MA;
+@@ -808,6 +964,9 @@
+ 		}
+ 
+ 		timeout_us = min_t(u32, timeout_us, FLASH_TIMEOUT_MAX_US);
++		if (led->ir)
++			timeout_us = min_t(u32, timeout_us,
++					   SL7_IR_TIMEOUT_MAX_MS * USEC_PER_MSEC);
+ 
+ 		/* Initialize flash class LED device timeout settings */
+ 		timeout = &flash->timeout;
+@@ -832,6 +991,10 @@
+ 		return rc;
+ 	}
+ 
++	/* SL7 local: no v4l2-flash sub-device (torch, external strobe) for IR */
++	if (led->ir)
++		return 0;
++
+ 	return qcom_flash_v4l2_init(dev, led, node);
+ }
+ 
+@@ -849,6 +1012,24 @@
+ 	if (!flash_data)
+ 		return -ENOMEM;
+ 
++	/*
++	 * SL7 local: an IR emitter node binds only with ir_test=1. Checked
++	 * first, before any register access, so a normal boot (or a plain
++	 * modprobe/insmod that bypasses the modprobe gate) never touches the
++	 * hardware for these nodes.
++	 */
++	if (!ir_test) {
++		device_for_each_child_node_scoped(dev, child) {
++			u32 color;
++
++			if (!fwnode_property_read_u32(child, "color", &color) &&
++			    color == LED_COLOR_ID_IR) {
++				dev_warn(dev, "SL7: IR emitter LED node present but ir_test=0, not binding\n");
++				return -ENODEV;
++			}
++		}
++	}
++
+ 	regmap = dev_get_regmap(dev->parent, NULL);
+ 	if (!regmap) {
+ 		dev_err(dev, "Failed to get parent regmap\n");
+@@ -912,6 +1093,11 @@
+ 		return -ENODEV;
+ 	}
+ 
++	/* SL7 local: read-only snapshot before the driver's first write */
++	qcom_flash_snapshot(dev, regmap, reg_base, flash_data->hw_type, "probe");
++	flash_data->regmap = regmap;
++	flash_data->reg_base = reg_base;
++
+ 	for (i = 0; i < REG_MAX_COUNT; i++)
+ 		regs[i].reg += reg_base;
+ 
+@@ -953,8 +1139,7 @@
+ 
+ 	return regmap_field_write(flash_data->r_fields[REG_TORCH_CLAMP], flash_data->torch_clamp);
+ release:
+-	while (flash_data->v4l2_flash[flash_data->leds_count] && flash_data->leds_count)
+-		v4l2_flash_release(flash_data->v4l2_flash[flash_data->leds_count--]);
++	qcom_flash_release_v4l2(flash_data);
+ 	return rc;
+ }
+ 
+@@ -962,10 +1147,29 @@
+ {
+ 	struct qcom_flash_data *flash_data = platform_get_drvdata(pdev);
+ 
+-	while (flash_data->v4l2_flash[flash_data->leds_count] && flash_data->leds_count)
+-		v4l2_flash_release(flash_data->v4l2_flash[flash_data->leds_count--]);
++	/* SL7 local: nothing stays armed after the driver is gone */
++	if (qcom_flash_all_off(flash_data))
++		dev_err(&pdev->dev, "SL7: failed to switch the flash channels off\n");
++
++	qcom_flash_release_v4l2(flash_data);
++
++	qcom_flash_snapshot(&pdev->dev, flash_data->regmap, flash_data->reg_base,
++			    flash_data->hw_type, "remove, after all-off");
++
++	/*
++	 * SL7 local: no mutex_destroy() here. The devm-managed LED class devices
++	 * are unregistered after remove() returns and switch themselves off
++	 * through the brightness callback, which takes this lock.
++	 */
++}
++
++static void qcom_flash_led_shutdown(struct platform_device *pdev)
++{
++	struct qcom_flash_data *flash_data = platform_get_drvdata(pdev);
+ 
+-	mutex_destroy(&flash_data->lock);
++	/* SL7 local: reboot, kexec and poweroff leave every channel off */
++	if (flash_data)
++		qcom_flash_all_off(flash_data);
+ }
+ 
+ static const struct of_device_id qcom_flash_led_match_table[] = {
+@@ -981,6 +1185,7 @@
+ 	},
+ 	.probe = qcom_flash_led_probe,
+ 	.remove = qcom_flash_led_remove,
++	.shutdown = qcom_flash_led_shutdown,
+ };
+ 
+ module_platform_driver(qcom_flash_led_driver);

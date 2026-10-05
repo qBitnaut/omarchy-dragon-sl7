@@ -26,7 +26,8 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest` |
-| 8d | optional kernel test boot entries, PSR (known broken) and VRR (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8d | optional kernel test boot entries, PSR (known broken), VRR (experimental) and the IR emitter test boot (`ir-test`), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8g | IR emitter load gate and the disabled Stage B channel test tool (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
@@ -249,14 +250,15 @@ must not be in the normal command line. The default entry, `default_entry` and `
 never touched. All are disabled by default.
 
 ```
-sudo omarchy-sl7-test-entry enable psr|vrr|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
+sudo omarchy-sl7-test-entry enable psr|vrr|ir-test|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
 sudo omarchy-sl7-test-entry disable NAME                      # remove it
 omarchy-sl7-test-entry list                                   # presets, state, and what is in limine.conf
 sudo omarchy-sl7-test-entry cleanup                           # remove every test entry and its state
 omarchy-sl7-test-entry status [NAME]
 ```
 
-Presets: `psr` = `msm.psr_enabled=1`, `vrr` = `msm.vrr_enabled=1`. Any other NAME needs PARAMS.
+Presets: `psr` = `msm.psr_enabled=1`, `vrr` = `msm.vrr_enabled=1`, `ir-test` = `sl7.ir_test=1 panic=5`
+(entry "linux-sl7 (IR test)", fixed parameters, section 11c). Any other NAME needs PARAMS.
 `omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset). The old r6
 `psr-entry.enabled` state file, hook and block are removed on upgrade (`cleanup --legacy`);
 PSR is not carried over.
@@ -313,6 +315,68 @@ Test steps:
    normal entry with `--label normal`, then `sl7-powertest compare ...-normal.jsonl ...-vrr.jsonl`
    (VRR does not lower an idle desktop's refresh by itself; the gain is for varying content).
 7. Done: `sudo omarchy-sl7-test-entry disable vrr` and boot the normal entry.
+
+### 11c. IR emitter test boot and `sl7-ir-emitter-test` (Stage A and B of the IR emitter plan)
+
+Plan: `research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md`. The IR illuminator is a PM8550 flash LED on
+an unknown channel. This is the build-only part: **nothing in this package fires the emitter.**
+
+**What exists.** linux-sl7 patch 0080 (leds-qcom-flash IR safety) and 0081 (romulus13 DT) describe
+four IR LEDs, `ir:flash-1` to `ir:flash-4`, one per PM8550 flash channel, each limited to 12.5 mA
+flash and a 10 ms hardware timer, torch refused. They are in the DTB of every boot entry but can
+bind only on the IR test boot entry.
+
+**The gate (two independent layers).**
+
+1. `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf` has an `install leds_qcom_flash` rule. Without
+   `sl7.ir_test=1` on `/proc/cmdline` it exits 0 without loading the module (quiet for udev's alias
+   load, nothing binds). With it, it loads the module with `ir_test=1`.
+2. The driver itself refuses to bind to a node set that holds an IR LED unless its module
+   parameter `ir_test` is set (read-only at run time), before touching any register. So an
+   `insmod` or `modprobe --ignore-install` on a normal boot still binds nothing.
+
+The command line token comes from the entry: `sudo omarchy-sl7-test-entry enable ir-test` adds
+"linux-sl7 (IR test)" with `sl7.ir_test=1 panic=5` appended (`disable ir-test` and `cleanup` remove
+it). The normal entry never carries it. Kill switch at the Limine menu: `module_blacklist=leds_qcom_flash`.
+If the module was already loaded before the rule applied (initramfs), `modprobe -r leds_qcom_flash`
+then `modprobe leds_qcom_flash` on the test entry.
+
+**Stage A check (read-only, no approval needed).**
+
+```
+sl7-ir-emitter-test --status
+```
+
+Normal boot: approval absent, `sl7.ir_test=1: no`, `leds_qcom_flash: not loaded`, 0 `ir:flash-*`
+LEDs, and `ls /sys/class/leds | grep ir:` empty. IR test boot: `ir_test=Y` and 4 LEDs, each with
+`max_flash_brightness=12500` and `max_flash_timeout=10000`. `dmesg | grep 'SL7 snapshot'` shows the
+read-only PMIC register snapshot taken at probe. Note: `echo 255 > .../ir:flash-N/brightness`
+returns success (the LED core queues brightness writes), but the driver refuses it ("SL7: torch
+refused on the IR emitter LED") and the channel stays off.
+
+**Stage B tool, disabled.** `sl7-ir-emitter-test --i-have-read-the-plan --channel N [--repeat R]`
+fires one 12.5 mA x 10 ms pulse (R = 1..3, 1 s apart) on one channel through the LED class sysfs
+(`flash_strobe=0`, `flash_brightness=12500`, `flash_timeout=10000`, `flash_strobe=1`, 50 ms,
+`flash_strobe=0`, then `flash_fault`). It refuses unless **all** of these hold, checked in this
+order:
+
+1. **`/etc/omarchy-surface-sl7/ir-stage-b-approved` exists** (regular file, root-owned, not
+   writable by group or others, not a symlink). No package ships it, nothing creates it and the
+   tool never removes it. Only Chris creates it by hand, after reading the plan:
+   `sudo mkdir -p /etc/omarchy-surface-sl7 && echo "approved by Chris $(date -I)" | sudo tee /etc/omarchy-surface-sl7/ir-stage-b-approved`
+   and removes it when Stage B is done.
+2. It runs as root on the IR test entry (`sl7.ir_test=1` and `panic=5` on the command line,
+   `leds_qcom_flash` loaded with `ir_test=Y`), with `ir:flash-N` present and every `ir:flash-*`
+   at `flash_strobe=0`, `max_flash_brightness <= 12500`, `max_flash_timeout <= 10000` and no fault
+   other than `flash-timeout-exceeded`.
+3. It is the only run (lock), at most 12 pulses this boot (counter in `/run`), on an interactive
+   terminal, and the typed phrase `FIRE CHANNEL N` is entered after the safety checklist.
+
+Every action (each write, read back and fault read) is logged to
+`/var/log/sl7-ir-emitter-test.log` and the journal (tag `sl7-ir-emitter-test`). On any error,
+signal or exit it writes `flash_strobe=0` to every `ir:flash-*` LED. The limits are constants in
+the script: no option raises them. Without the approval file, as shipped, the tool exits 3 and
+touches nothing.
 
 ### 12b. Camera probe: `sl7-ir-probe` (Phase A of IR face unlock)
 

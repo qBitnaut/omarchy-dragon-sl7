@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=21
+pkgrel=22
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -81,7 +81,9 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-ir-probe'
         '80-omarchy-sl7-test-entry.post-hook'
         '70-omarchy-surface-sl7-camera.rules'
-        'sl7-sleepstats')
+        'sl7-sleepstats'
+        'sl7-ir-emitter-test'
+        'omarchy-surface-sl7-ir.modprobe.conf')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -109,7 +111,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '7020ae92e9f05c6b3c37b2cc768381bae240037044fa9dcedba029b0a806591d'
+            'f715091c5c9a8ad24dde816143d8cdc4dab11e50d526f5dcf4be9758c85be71c'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -126,11 +128,13 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '9b6e16a7fd17caa108ac20e13f22b836b8b248296b97856ea29fe032144be593'
             '44bf2513d18f8105c80622e32038772e3ccaa2d5da462b0de68e50cd907fe538'
             '345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff'
-            '7a8f55c5eda5173139aef60f32cba0fdc6dddeeaa1e1d8a3fad8d0d2320b89de'
+            '5fdf6b5d4f54be60964953585a728d318c434d4958698b6827ae898a23d36df9'
             '3e181253a2aa10511f046ef2cec0fed990d217b310ff06bf511ebb0cbfb641b2'
             '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a'
             '41cf0f5821f9dc5bee37b55e32f220b022e8b8cf008d5269281b293f283c4c92'
-            '22eb8bcfd060aa5544c646b5745556281231eab8f671ea24cb3f7781a8edf0d1')
+            '22eb8bcfd060aa5544c646b5745556281231eab8f671ea24cb3f7781a8edf0d1'
+            '4d980746be7b1733d31ec17d55561337416a01505beba98f1070b263bbd5d6b6'
+            '639f6e9182d9fa7e4206a1ac3a4603c55df828ae733a953b02aa4af8f40552da')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -258,6 +262,13 @@ package() {
 
   # 8e. camera Phase A probe (read-only; --sweep-mclk only changes a module parameter)
   install -Dm755 sl7-ir-probe "$pkgdir/usr/bin/sl7-ir-probe"
+
+  # 8g. IR emitter: load gate (leds_qcom_flash loads only on the IR test boot
+  # entry, sl7.ir_test=1) and the Stage B channel test tool, which refuses
+  # unless Chris creates /etc/omarchy-surface-sl7/ir-stage-b-approved by hand.
+  install -Dm644 omarchy-surface-sl7-ir.modprobe.conf \
+    "$pkgdir/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf"
+  install -Dm755 sl7-ir-emitter-test "$pkgdir/usr/bin/sl7-ir-emitter-test"
 
   # 9. omarchy-sl7 package repository: config, the script that keeps it Included
   # above [core]/[alarm]/[omarchy], its pacman hook and boot service, and the

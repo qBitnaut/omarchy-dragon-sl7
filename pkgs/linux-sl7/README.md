@@ -381,6 +381,24 @@ vermagic always matches the kernel. It adds no module options: `sl7-ir-bridge` s
 options. 0.15.4 compiles clean against 7.2 (arm64, clang). Do not install ALARM's `v4l2loopback-dkms`
 next to it.
 
+### IR emitter bring-up, stage A (7.2.8-11)
+
+**Patches 0080 and 0081.** SL7-local, not for upstream.
+
+- **0080** adds a safety layer to leds-qcom-flash for LED nodes with `color = <LED_COLOR_ID_IR>`:
+  torch refused (the hardware timer does not run in torch mode); hard clamps in code (flash at most
+  700 mA, timeout at most 100 ms, torch 5 mA per channel); the safety timer is never disabled; no
+  v4l2-flash sub-device; all channels off on remove and shutdown; a read-only register snapshot
+  logged at probe and at remove; and a bind gate (module parameter `ir_test=1`, set only by the
+  omarchy-surface-sl7 modprobe rule on the "linux-sl7 (IR test)" boot entry). It also fixes the
+  v4l2-flash release loops in `remove()`, which read one past the end.
+- **0081** adds four IR discovery LEDs under `&pm8550_flash` on romulus13 (`ir:flash-1` to
+  `ir:flash-4`, 12.5 mA, 10 ms, torch 5 mA). They sit in every DTB but bind only on the IR test
+  boot. Nothing refers to them; the camera node has no `leds` link and patch 0041 is unchanged.
+
+Nothing fires the emitter. Requires omarchy-surface-sl7 22 or later for the load gate. Plan:
+`Research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md`.
+
 ## Not in v0
 
 The IR illuminator, libcamera tuning for the RGB camera, USB4 host router, fused-core handling for X1P-64-100,
