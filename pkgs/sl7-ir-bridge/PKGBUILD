@@ -1,0 +1,62 @@
+# shellcheck shell=bash disable=SC2034,SC2154
+# Maintainer: Chris <19711592+qBitnaut@users.noreply.github.com>
+#
+# On-demand bridge from the Surface Laptop 7 IR camera (CAMSS raw node) to a
+# v4l2loopback device, for howdy-next. Pure C, direct V4L2/media ioctls. The
+# v4l2loopback module itself ships in linux-sl7 (>= 7.2.8-10, extra/).
+# Local files carry SKIP checksums: they are covered by the repository's git
+# history, as in the other packages here.
+
+pkgname=sl7-ir-bridge
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='On-demand bridge from the Surface Laptop 7 IR camera to a v4l2loopback device (GREY 644x604) for face unlock'
+arch=('aarch64')
+url='https://github.com/qBitnaut/omarchy-dragon-sl7'
+license=('MIT')
+depends=('glibc' 'kmod' 'systemd' 'linux-sl7>=7.2.8-10')
+makedepends=('gcc' 'make' 'linux-api-headers')
+optdepends=('v4l-utils: v4l2-ctl and media-ctl for debugging')
+backup=('etc/sl7-ir-bridge.conf')
+install=sl7-ir-bridge.install
+source=('Makefile'
+	'sl7-ir-bridge.c'
+	'ir_common.c'
+	'ir_common.h'
+	'ir_camss.c'
+	'ir_camss.h'
+	'ir_emitter.c'
+	'ir_emitter.h'
+	'ir_selftest.c'
+	'ir_selftest.h'
+	'ir_repack.c'
+	'ir_repack.h'
+	'test_repack.c'
+	'sl7-ir-bridge.service'
+	'71-sl7-ir-bridge.rules'
+	'sl7-ir-bridge.modprobe.conf'
+	'sl7-ir-bridge.modules-load.conf'
+	'sl7-ir-bridge.conf'
+	'README.md'
+	'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+build() {
+	make
+}
+
+check() {
+	make check
+}
+
+package() {
+	make DESTDIR="$pkgdir" PREFIX=/usr install
+	install -Dm644 sl7-ir-bridge.service "$pkgdir/usr/lib/systemd/system/sl7-ir-bridge.service"
+	install -Dm644 71-sl7-ir-bridge.rules "$pkgdir/usr/lib/udev/rules.d/71-sl7-ir-bridge.rules"
+	install -Dm644 sl7-ir-bridge.modprobe.conf "$pkgdir/usr/lib/modprobe.d/sl7-ir-bridge.conf"
+	install -Dm644 sl7-ir-bridge.modules-load.conf "$pkgdir/usr/lib/modules-load.d/sl7-ir-bridge.conf"
+	install -Dm644 sl7-ir-bridge.conf "$pkgdir/etc/sl7-ir-bridge.conf"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

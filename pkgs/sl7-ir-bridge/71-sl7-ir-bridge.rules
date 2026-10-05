@@ -1,0 +1,6 @@
+# The v4l2loopback device the bridge feeds ("SL7 IR Camera", see
+# /usr/lib/modprobe.d/sl7-ir-bridge.conf): a stable name for howdy-next, which
+# only accepts /dev/video*, /dev/v4l/by-id/* and /dev/v4l/by-path/*, and access
+# for the logged-in user (the lock screen runs PAM in the user's own process)
+# through uaccess plus group video. Must sort before 73-seat-late.rules.
+SUBSYSTEM=="video4linux", ATTR{name}=="SL7 IR Camera", GROUP="video", MODE="0660", TAG+="uaccess", SYMLINK+="v4l/by-id/sl7-ir-camera"

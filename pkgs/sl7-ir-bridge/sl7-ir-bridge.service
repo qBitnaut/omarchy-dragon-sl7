@@ -1,0 +1,50 @@
+[Unit]
+Description=SL7 IR camera bridge (CAMSS to v4l2loopback, on demand)
+Documentation=file:///usr/share/doc/sl7-ir-bridge/README.md
+After=systemd-modules-load.service systemd-udevd.service
+Wants=systemd-modules-load.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sl7-ir-bridge.conf
+ExecStart=/usr/bin/sl7-ir-bridge
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+SyslogIdentifier=sl7-ir-bridge
+
+# Sandbox: it only needs the media and video4linux character devices and
+# read access to /sys. Root, but with no capabilities at all (the device nodes
+# are root-owned, so ownership is enough).
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=char-media rw
+DeviceAllow=char-video4linux rw
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+# shellcheck shell=bash disable=SC2034
+_sl7irb_is_chroot() {
+	command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --chroot
+}
+
+post_install() {
+	systemctl enable sl7-ir-bridge.service >/dev/null 2>&1 || true
+	_sl7irb_is_chroot && return 0
+	systemctl daemon-reload || true
+	udevadm control --reload || true
+	# the module ships with linux-sl7 >= 7.2.8-10 and only exists for that kernel
+	if modprobe v4l2loopback 2>/dev/null; then
+		udevadm trigger --subsystem-match=video4linux || true
+		systemctl restart sl7-ir-bridge.service || true
+	else
+		echo 'sl7-ir-bridge: v4l2loopback is not available for the running kernel.'
+		echo '  Boot linux-sl7 >= 7.2.8-10; the service starts at boot.'
+	fi
+}
+
+post_upgrade() {
+	_sl7irb_is_chroot && return 0
+	systemctl daemon-reload || true
+	udevadm control --reload || true
+	systemctl try-restart sl7-ir-bridge.service || true
+}
+
+pre_remove() {
+	systemctl disable --now sl7-ir-bridge.service >/dev/null 2>&1 || true
+}
