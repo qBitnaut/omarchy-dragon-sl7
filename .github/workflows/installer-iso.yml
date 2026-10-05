@@ -41,7 +41,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           shellcheck -x -P SCRIPTDIR -s bash -S warning installer/scripts/*.sh \
-            tools/lib/usb.sh tools/installer-kit/make-install-usb.sh tools/recon-kit/make-recon-usb.sh \
+            tools/lib/usb.sh tools/installer-kit/make-install-usb.sh tools/installer-kit/get-sl7-firmware.sh tools/recon-kit/make-recon-usb.sh \
             tools/repo/*.sh tools/bootstrap/*.sh
           if grep -rIn '[[:space:]]$' installer/scripts upstream.lock; then
             echo "trailing whitespace found" >&2

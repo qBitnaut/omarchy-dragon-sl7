@@ -63,6 +63,19 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 
 ## Install
 
+### Before you start (if Windows is still installed)
+
+Nothing needs to be captured from Windows. The firmware comes from Microsoft's public
+driver MSI (step 2 below) and the Wi-Fi and Bluetooth MAC addresses are read from the
+UEFI at every boot. `tools/windows/Prepare-SL7.ps1` is an optional read-only check: it
+confirms the model and CPU, shows the BitLocker status (and can save the recovery key to
+a USB stick), and reports the UEFI version and Secure Boot state. It uploads nothing and
+changes no setting. Read the script first, then in an administrator PowerShell:
+
+```
+Set-ExecutionPolicy -Scope Process Bypass; .\Prepare-SL7.ps1          # add -WhatIf for a dry run
+```
+
 ### Fresh install from the installer ISO
 
 > The ISO is the least-tested path. The kit's own README records a full ISO build
@@ -78,13 +91,16 @@ The installer **wipes the disk you pick** and does not keep Windows.
    holds the ISO and its `.sha256` and expires after 14 days. It consumes the
    `linux-sl7` build named in `upstream.lock`, which also expires: re-run
    `linux-sl7.yml` and update `LINUX_SL7_RUN_ID` if the download step fails.
-2. **Get the firmware.** Download Microsoft's Surface Laptop 7 driver MSI
-   (`SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi`) and extract it with
-   `msitools` into `$SL7_MSI/extracted/` (the kit reads
-   `extracted/ProgramFiles64Folder/SurfaceUpdate`). The kit checks the files against
-   `$SL7_MSI/SHA256SUMS.extracted`. The stick carries firmware for your own device:
-   do not share it. Skip this step with `--no-firmware` only if you accept that the
-   installer then looks for a Windows driver store, which is gone after the wipe.
+2. **Get the firmware.** On any Linux machine (x86 or arm) or macOS, run
+   `tools/installer-kit/get-sl7-firmware.sh`. It downloads Microsoft's Surface Laptop 7
+   driver MSI, checks its pinned sha256, extracts it with `msiextract` (`msitools`) and
+   writes `./sl7-msi` (or `$SL7_MSI`) in the layout the kit reads
+   (`extracted/ProgramFiles64Folder/SurfaceUpdate` and `SHA256SUMS.extracted`). Pass
+   `--msi FILE` to use an MSI you already have. The stick carries firmware for your own
+   device: do not share it. Skip this step with `--no-firmware` only if you accept that the
+   installer then looks for a Windows driver store, which is gone after the wipe. On a
+   system that is already installed, the add-on's own `omarchy-surface-sl7-firmware`
+   does the same job (`--from-msi FILE`).
 3. **Write the stick** (16 GB or larger) from an Arch-based host:
    ```
    sudo pacman -S --needed dosfstools mtools util-linux python github-cli

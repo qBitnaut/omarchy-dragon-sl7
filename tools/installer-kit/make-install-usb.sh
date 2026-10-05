@@ -23,9 +23,11 @@
 set -euo pipefail
 
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESEARCH="${SL7_RESEARCH:-/mnt/Rocket4/Quadrant/Personal/Research/omarchy-dragon-sl7}"
-WORK="${SL7_WORK:-$RESEARCH/installer/work/kit}"
-MSI_ROOT="${SL7_MSI:-$RESEARCH/msi}"
+RESEARCH="${SL7_RESEARCH:-}"
+WORK="${SL7_WORK:-${RESEARCH:+$RESEARCH/installer/work/kit}}"
+WORK="${WORK:-$PWD/sl7-installer-work}"
+MSI_ROOT="${SL7_MSI:-${RESEARCH:+$RESEARCH/msi}}"
+MSI_ROOT="${MSI_ROOT:-$PWD/sl7-msi}"
 FW_BASE="$MSI_ROOT/extracted/ProgramFiles64Folder/SurfaceUpdate"
 GH_REPO="${SL7_REPO:-qBitnaut/omarchy-dragon-sl7}"
 CI_WORKFLOW="installer-iso.yml"
@@ -114,6 +116,11 @@ check_tools() {
 		done
 	fi
 	[ -z "$CI_RUN" ] || command -v gh >/dev/null 2>&1 || missing+=(github-cli)
+	if [ "$WITH_FW" = 1 ] && [ ! -d "$FW_BASE" ]; then
+		echo "No firmware extraction at $FW_BASE" >&2
+		echo "  Create it with: SL7_MSI=\"$MSI_ROOT\" $KIT_DIR/get-sl7-firmware.sh   (or pass --no-firmware)" >&2
+		die "MSI extraction missing"
+	fi
 	if [ "${#missing[@]}" -gt 0 ]; then
 		echo "Missing tools. Install with:" >&2
 		echo "  sudo pacman -S --needed dosfstools mtools util-linux python github-cli" >&2

@@ -32,7 +32,15 @@ holds the ISO and its `.sha256`; it expires after 14 days. The linux-sl7 artifac
 consumes (run id in `upstream.lock`) expires after 14 days too: re-run `linux-sl7.yml`
 and update `LINUX_SL7_RUN_ID` when the workflow's download step fails.
 
-## 2. Write the stick
+## 2. Get the firmware
+
+`tools/installer-kit/get-sl7-firmware.sh [--dir DIR] [--msi FILE]` downloads Microsoft's
+public driver MSI, checks its pinned sha256 (the pin of `omarchy-surface-sl7-firmware`),
+extracts it with `msiextract` (msitools) and writes `DIR/extracted/ProgramFiles64Folder/SurfaceUpdate`
+and `DIR/SHA256SUMS.extracted`. `DIR` defaults to `$SL7_MSI`, else `./sl7-msi`. It runs on
+any Linux machine or macOS, and nothing is read from Windows.
+
+## 3. Write the stick
 
 Packages on the build host (once): `sudo pacman -S --needed dosfstools mtools util-linux python github-cli`.
 
@@ -63,7 +71,7 @@ the same layout into an image file with no root needed (`--loop` uses `losetup -
 The stick holds Microsoft/Qualcomm firmware for your own device: do not share it,
 its `firmware/` directory or an image of it.
 
-## 3. Install on the SL7
+## 4. Install on the SL7
 
 1. Power off. Hold Volume Up while pressing Power to enter the Surface UEFI.
    **Security > Secure Boot: None.** (If Windows is still on the disk and uses
