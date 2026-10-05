@@ -4,16 +4,22 @@
 # and the front RGB camera (OmniVision OV02C10, i2c 0x36 on CCI1).
 #
 # Read-only by default. It never touches the illuminator: no LED class device,
-# no flash strobe, no sensor GPIO. With --sweep-mclk it additionally changes
-# the vd55g module parameters mclk_index/mclk_hz (a linux-sl7 debug hack) and
-# rebinds the sensor, to find which camera master clock feeds the IR module.
+# no flash strobe, no sensor GPIO. With --sweep-mclk (or --mclk-hz without it)
+# it additionally changes the vd55g module parameters mclk_index/mclk_hz (a
+# linux-sl7 debug hack) and rebinds the sensor: the parameters are read at
+# probe, so unbind and bind is enough, no module reload.
 #
-#   sl7-ir-probe [--frames N] [--out DIR] [--no-capture]
-#                [--sweep-mclk [--mclk-hz HZ]]
+#   sl7-ir-probe [--frames N] [--out DIR] [--no-capture] [--y10] [--debug]
+#                [--sweep-mclk] [--mclk-hz HZ]
 #
-# Captures go to ~/sl7-ir-test (30 frames of Y8/GREY 644x604 by default).
+# IR: Y8/GREY 644x604 if the sensor offers Y8_1X8, else Y10_1X10 / Y10P
+# (--y10 forces 10 bit), CSID0 -> VFE0 RDI0. RGB: the sensor's own Bayer code
+# (OV02C10: SGRBG10_1X10 / pgAA), 10 frames, CSID1 -> VFE1 RDI0, INFO only.
+# --debug: dynamic debug for camss/csiphy/vd55g/mc, vb2 debug=2, interrupt
+# counter deltas around each capture; everything is switched off afterwards.
+# Captures go to ~/sl7-ir-test (30 IR frames by default).
 # Needs: v4l-utils (media-ctl, v4l2-ctl) for the topology and the capture;
-# root (it re-runs itself with sudo) for dmesg and for --sweep-mclk.
+# root (it re-runs itself with sudo) for dmesg, --debug and the MCLK options.
 set -u
 
 frames=30
@@ -21,13 +27,16 @@ out=${SL7_IR_OUT:-${SUDO_USER:+$(getent passwd "$SUDO_USER" | cut -d: -f6)/sl7-i
 out=${out:-$HOME/sl7-ir-test}
 capture=1
 sweep=0
+debug=0
+want_y10=0
 mclk_hz=19200000
+mclk_hz_set=0
 sysfs=${SL7_SYSFS:-/sys}
 ir_addr=0010
 rgb_addr=0036
 
 usage() {
-  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -37,7 +46,9 @@ while (($#)); do
     --out) out=${2:?}; shift ;;
     --no-capture) capture=0 ;;
     --sweep-mclk) sweep=1 ;;
-    --mclk-hz) mclk_hz=${2:?}; shift ;;
+    --mclk-hz) mclk_hz=${2:?}; mclk_hz_set=1; shift ;;
+    --y10) want_y10=1 ;;
+    --debug) debug=1 ;;
     -h | --help) usage ;;
     *) usage ;;
   esac
@@ -202,16 +213,18 @@ param=$sysfs/module/vd55g/parameters
 ir_name=""
 [[ -n $ir_dev ]] && ir_name=$(basename "$ir_dev")
 
-try_mclk() { # index -> 0 when the sensor is bound afterwards
-  local idx=$1 bus
-  echo "$idx" >"$param/mclk_index"
-  echo "$mclk_hz" >"$param/mclk_hz"
+rebind_ir() { # unbind and bind the sensor so the module parameters are read again at probe
   [[ -n $ir_name ]] && echo "$ir_name" >"$ir_driver_dir/unbind" 2>/dev/null
   sleep 1
   echo "$ir_name" >"$ir_driver_dir/bind" 2>/dev/null
   sleep 2
-  bus=$ir_name
-  [[ -L $sysfs/bus/i2c/devices/$bus/driver ]]
+  [[ -L $sysfs/bus/i2c/devices/$ir_name/driver ]]
+}
+
+try_mclk() { # index -> 0 when the sensor is bound afterwards
+  echo "$1" >"$param/mclk_index"
+  echo "$mclk_hz" >"$param/mclk_hz"
+  rebind_ir
 }
 
 if ((sweep)); then
@@ -250,6 +263,26 @@ if ((sweep)); then
   fi
 fi
 
+if ((!sweep && mclk_hz_set)); then
+  section "MCLK override (mclk_hz=$mclk_hz; the emitter stays untouched)"
+  if ((EUID != 0)); then
+    bad "--mclk-hz needs root"
+  elif [[ ! -w $param/mclk_hz ]]; then
+    bad "vd55g mclk_hz parameter missing: is the vd55g module from linux-sl7 7.2.8-3 or later loaded?"
+  elif [[ -z $ir_name ]]; then
+    bad "no IR i2c client to rebind"
+  else
+    echo "$mclk_hz" >"$param/mclk_hz"
+    if rebind_ir; then
+      say "sensor rebound with mclk_hz=$mclk_hz (mclk_index=$(cat "$param/mclk_index" 2>/dev/null))"
+      ok "IR sensor bound with mclk_hz=$mclk_hz"
+      ir_dev=$sysfs/bus/i2c/devices/$ir_name
+    else
+      bad "IR sensor did not bind with mclk_hz=$mclk_hz"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------- topology
 section "Media topology"
 media_dev=""
@@ -278,19 +311,33 @@ fi
 
 # ---------------------------------------------------------------- capture
 # Python helper: find a path sensor -> video node in the media-ctl -p text and
-# print VIDEO <node>, LINK "a":p->"b":q and FMT "entity":pad lines.
-plan_path() { # media-ctl-p.txt sensor-prefix
+# print, for the first sensor entity whose name starts with <prefix>:
+#   VIDEO <node>, SENSOR <subdev node>, RDI "entity":pad (last subdev source pad),
+#   LINK "a":p->"b":q (only links that are not IMMUTABLE) and FMT "entity":pad lines.
+# The optional third argument is a comma separated list of msm_csid*/msm_vfe*
+# entity names the path may use (so IR and RGB take different CSID/VFE).
+# No FMT is emitted for a video node: it has no subdev formats (media-ctl -V
+# fails on it with "Inappropriate ioctl").
+plan_path() { # media-ctl-p.txt sensor-prefix [allowed-entities]
   python3 - "$@" <<'PY'
 import re, sys
 from collections import deque
 txt = open(sys.argv[1]).read()
 prefix = sys.argv[2]
+allowed = set(a for a in (sys.argv[3] if len(sys.argv) > 3 else '').split(',') if a)
 ents = {}
+immutable = set()
 cur = pad = None
+
+
+def name_of(c):
+    return c['name']
+
+
 for line in txt.splitlines():
     m = re.match(r'^- entity \d+: (.+?) \(\d+ pads?', line)
     if m:
-        cur = {'dev': None, 'pads': {}}
+        cur = {'dev': None, 'pads': {}, 'name': m.group(1)}
         ents[m.group(1)] = cur
         pad = None
         continue
@@ -305,9 +352,26 @@ for line in txt.splitlines():
         pad = int(m.group(1))
         cur['pads'][pad] = (m.group(2).capitalize(), [])
         continue
-    m = re.match(r'^\s+-> "(.+?)":(\d+) \[', line)
+    m = re.match(r'^\s+-> "(.+?)":(\d+) \[(.*)\]', line)
     if m and pad is not None:
         cur['pads'][pad][1].append((m.group(1), int(m.group(2))))
+        if 'IMMUTABLE' in m.group(3):
+            immutable.add((name_of(cur), pad, m.group(1), int(m.group(2))))
+
+
+def is_video(name):
+    dev = ents[name]['dev']
+    return bool(dev and dev.startswith('/dev/video'))
+
+
+def usable(name):
+    if not allowed or is_video(name):
+        return True
+    if name.startswith('msm_csid') or name.startswith('msm_vfe'):
+        return name in allowed
+    return True
+
+
 src = next((n for n in ents if n.startswith(prefix)), None)
 if not src:
     print('ERR no entity starting with %r' % prefix)
@@ -318,107 +382,322 @@ seen = {src}
 found = None
 while q:
     name, hops = q.popleft()
-    dev = ents[name]['dev']
-    if dev and dev.startswith('/dev/video'):
+    if is_video(name):
         found = (name, hops)
         break
     for p, (direction, links) in sorted(ents[name]['pads'].items()):
         if direction != 'Source':
             continue
         for dn, dp in links:
-            if dn in ents and dn not in seen:
+            if dn in ents and dn not in seen and usable(dn):
                 seen.add(dn)
                 q.append((dn, hops + [(name, p, dn, dp)]))
 if not found:
-    print('ERR no path from %s to a video node' % src)
+    print('ERR no path from %s to a video node%s' % (src, ' (allowed: %s)' % ','.join(sorted(allowed)) if allowed else ''))
     sys.exit(0)
 name, hops = found
 print('VIDEO %s' % ents[name]['dev'])
+print('SENSOR %s' % ents[src]['dev'])
+la, lap = hops[-1][0], hops[-1][1]
+print('RDI "%s":%d' % (la, lap))
 for (a, ap, b, bp) in hops:
-    print('LINK "%s":%d->"%s":%d' % (a, ap, b, bp))
+    if (a, ap, b, bp) not in immutable:  # immutable links are always enabled
+        print('LINK "%s":%d->"%s":%d' % (a, ap, b, bp))
+done = set()
 for (a, ap, b, bp) in hops:
-    print('FMT "%s":%d' % (a, ap))
-    print('FMT "%s":%d' % (b, bp))
+    for ent, pd in ((a, ap), (b, bp)):
+        if is_video(ent) or (ent, pd) in done:
+            continue
+        done.add((ent, pd))
+        print('FMT "%s":%d' % (ent, pd))
 PY
 }
 
-stats_py() { # file width height
+# Frame statistics. Rows are <stride> bytes, only <width> pixels per row are
+# real; 8-bit formats are bytes, 10-bit packed formats are 5 bytes per 4 pixels.
+stats_py() { # file width height stride sizeimage bits
   python3 - "$@" <<'PY'
 import sys, statistics
-f, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+f = sys.argv[1]
+w, h, stride, size, bits = (int(x) for x in sys.argv[2:7])
 data = open(f, 'rb').read()
-fs = w * h
-n = len(data) // fs
-print('frames=%d bytes=%d (frame size %d, remainder %d)' % (n, len(data), fs, len(data) - n * fs))
+n = len(data) // size
+print('frames=%d bytes=%d (sizeimage %d, stride %d, remainder %d)' % (n, len(data), size, stride, len(data) - n * size))
 if not n:
     sys.exit(0)
+top = 255 if bits == 8 else 1023
+
+
+def pixels(fr):
+    if bits == 8:
+        return b''.join(fr[r * stride:r * stride + w] for r in range(h))
+    out = []
+    for r in range(0, h, 4):  # every 4th row is plenty for statistics
+        row = fr[r * stride:r * stride + stride]
+        for i in range(0, (w // 4) * 5, 5):
+            lsb = row[i + 4]
+            out.append((row[i] << 2) | (lsb & 3))
+            out.append((row[i + 1] << 2) | ((lsb >> 2) & 3))
+            out.append((row[i + 2] << 2) | ((lsb >> 4) & 3))
+            out.append((row[i + 3] << 2) | ((lsb >> 6) & 3))
+    return out
+
+
 means = []
 for i in range(n):
-    fr = data[i * fs:(i + 1) * fs]
-    mean = sum(fr) / fs
+    px = pixels(data[i * size:(i + 1) * size])
+    cnt = len(px)
+    mean = sum(px) / cnt
     means.append(mean)
     if i < 5 or i == n - 1:
-        print('frame %2d: min=%3d max=%3d mean=%6.2f saturated=%.3f%% zero=%.3f%%' % (
-            i, min(fr), max(fr), mean, 100 * fr.count(255) / fs, 100 * fr.count(0) / fs))
-print('mean of means=%.2f spread=%.2f' % (statistics.mean(means), max(means) - min(means)))
+        sat = (px.count(top) if bits == 8 else sum(1 for p in px if p == top)) / cnt
+        zero = (px.count(0) if bits == 8 else sum(1 for p in px if p == 0)) / cnt
+        print('frame %2d: min=%4d max=%4d mean=%7.2f saturated=%.3f%% zero=%.3f%%' % (
+            i, min(px), max(px), mean, 100 * sat, 100 * zero))
+print('mean of means=%.2f spread=%.2f (%d-bit)' % (statistics.mean(means), max(means) - min(means), bits))
 if max(means) < 1.0:
     print('NOTE all frames are black: normal without the illuminator in a dark room; cover/uncover the sensor to check it responds')
-elif min(means) > 254:
+elif min(means) > top - 1:
     print('NOTE all frames saturated')
 PY
 }
 
-capture_ir() {
-  local plan videodev line
-  [[ -n $media_dev && -n $ir_dev ]] || { info "IR capture skipped: no sensor or media device"; return; }
-  [[ -L $ir_dev/driver ]] || { info "IR capture skipped: sensor not probed"; return; }
-  command -v v4l2-ctl >/dev/null 2>&1 || { info "IR capture skipped: v4l2-ctl missing"; return; }
-  plan=$(plan_path "$out/media-ctl-p.txt" vd55g)
+# Interrupt counter deltas between two /proc/interrupts snapshots.
+irq_delta_py() { # before after
+  python3 - "$@" <<'PY'
+import sys
+
+
+def load(p):
+    d = {}
+    for line in open(p):
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        irq = parts[0]
+        cnt = 0
+        i = 1
+        while i < len(parts) and parts[i].isdigit():
+            cnt += int(parts[i])
+            i += 1
+        d[irq + ' ' + ' '.join(parts[i:])] = cnt
+    return d
+
+
+a, b = load(sys.argv[1]), load(sys.argv[2])
+if not b:
+    print('  (no matching interrupt lines: csid/vfe/csiphy/ace4000 not registered)')
+for k in sorted(b):
+    print('  %-60s %10d -> %10d  delta %d' % (k[:60], a.get(k, 0), b[k], b[k] - a.get(k, 0)))
+PY
+}
+
+# V4L2 media bus code (media-ctl spelling) -> pixel format fourcc of the RDI node
+mbus_fourcc() {
+  case $1 in
+    Y8_1X8) echo GREY ;;
+    Y10_1X10) echo Y10P ;;
+    SBGGR8_1X8) echo BA81 ;;
+    SGBRG8_1X8) echo GBRG ;;
+    SGRBG8_1X8) echo GRBG ;;
+    SRGGB8_1X8) echo RGGB ;;
+    SBGGR10_1X10) echo pBAA ;;
+    SGBRG10_1X10) echo pGAA ;;
+    SGRBG10_1X10) echo pgAA ;;
+    SRGGB10_1X10) echo pRAA ;;
+    *) return 1 ;;
+  esac
+}
+fourcc_bits() { case $1 in GREY | BA81 | GBRG | GRBG | RGGB) echo 8 ;; *) echo 10 ;; esac; }
+
+sensor_codes() { # sensor subdev node -> mbus codes of pad 0, one per line, no MEDIA_BUS_FMT_ prefix
+  v4l2-ctl -d "$1" --list-subdev-mbus-codes pad=0 2>&1 | grep -oE 'MEDIA_BUS_FMT_[A-Z0-9_]+' | sed 's/^MEDIA_BUS_FMT_//' || true
+}
+
+pick_code() { # kind codes -> chosen code (IR: Y8_1X8, else Y10_1X10, --y10 forces the latter; RGB: first Bayer code the sensor reports)
+  local kind=$1 codes=$2 c
+  if [[ $kind == ir ]]; then
+    if ((want_y10)); then
+      grep -qx Y10_1X10 <<<"$codes" && { echo Y10_1X10; return 0; }
+      return 1
+    fi
+    for c in Y8_1X8 Y10_1X10; do
+      grep -qx "$c" <<<"$codes" && { echo "$c"; return 0; }
+    done
+    return 1
+  fi
+  while IFS= read -r c; do
+    [[ -n $c ]] && mbus_fourcc "$c" >/dev/null && { echo "$c"; return 0; }
+  done <<<"$codes"
+  return 1
+}
+
+cap_kind=ir
+verdict() { # PASS|FAIL text. The RGB result is INFO only: libcamera already drives the RGB camera.
+  if [[ $cap_kind == rgb ]]; then
+    info "RGB raw path on CAMSS $1: $2"
+  elif [[ $1 == PASS ]]; then
+    ok "IR $2"
+  else
+    bad "IR $2"
+  fi
+}
+
+debug_active=0
+debug_on() {
+  local ctl=$sysfs/kernel/debug/dynamic_debug/control l
+  vb2_old=$(cat "$sysfs/module/videobuf2_common/parameters/debug" 2>/dev/null || echo 0)
+  if [[ -w $ctl ]]; then
+    for l in 'module qcom_camss +p' 'module phy_qcom_mipi_csi2 +p' 'module vd55g +p' 'file mc-entity.c +p' 'file v4l2-subdev.c +p'; do
+      echo "$l" >"$ctl" 2>/dev/null || say "dynamic debug: '$l' failed"
+    done
+  else
+    say "dynamic debug control not writable ($ctl): is debugfs mounted and CONFIG_DYNAMIC_DEBUG set?"
+  fi
+  echo 2 >"$sysfs/module/videobuf2_common/parameters/debug" 2>/dev/null || say "videobuf2_common debug parameter not writable"
+  debug_active=1
+}
+debug_off() {
+  local ctl=$sysfs/kernel/debug/dynamic_debug/control l
+  ((debug_active)) || return 0
+  debug_active=0
+  if [[ -w $ctl ]]; then
+    for l in 'module qcom_camss -p' 'module phy_qcom_mipi_csi2 -p' 'module vd55g -p' 'file mc-entity.c -p' 'file v4l2-subdev.c -p'; do
+      echo "$l" >"$ctl" 2>/dev/null || true
+    done
+  fi
+  echo "${vb2_old:-0}" >"$sysfs/module/videobuf2_common/parameters/debug" 2>/dev/null || true
+}
+irq_snap() { grep -E 'csid|vfe|csiphy|ace4000' /proc/interrupts >"$1" 2>/dev/null || : >"$1"; }
+
+# capture_cam kind sensor-prefix sensor-i2c-dev csid-entity rdi-entity frames width height
+capture_cam() {
+  local kind=$1 prefix=$2 sdev=$3 csid=$4 rdi=$5 nframes=$6 w=$7 h=$8
+  local label plan videodev sensordev rdipad codes code fourcc bits line cur curcode cursize
+  local bpl size fmt_out log raw dm_mark sz need ok_stream=1
+  cap_kind=$kind
+  label=${kind^^}
+  [[ -n $media_dev && -n $sdev ]] || { info "$label capture skipped: no sensor or media device"; return; }
+  [[ -L $sdev/driver ]] || { info "$label capture skipped: sensor not probed"; return; }
+  command -v v4l2-ctl >/dev/null 2>&1 || { info "$label capture skipped: v4l2-ctl missing"; return; }
+  plan=$(plan_path "$out/media-ctl-p.txt" "$prefix" "$csid,$rdi")
   say "$plan"
   if grep -q '^ERR' <<<"$plan"; then
-    bad "IR capture: $(grep '^ERR' <<<"$plan")"
+    verdict FAIL "$(grep '^ERR' <<<"$plan")"
     return
   fi
   videodev=$(sed -n 's/^VIDEO //p' <<<"$plan")
-  while IFS= read -r line; do
-    case $line in
-      "LINK "*)
-        media-ctl -d "$media_dev" -l "${line#LINK }[1]" >>"$report" 2>&1 || say "link failed: $line"
-        ;;
-    esac
-  done <<<"$plan"
-  while IFS= read -r line; do
-    case $line in
-      "FMT "*)
-        media-ctl -d "$media_dev" -V "${line#FMT } [fmt:Y8_1X8/644x604]" >>"$report" 2>&1 \
-          || say "set format failed: $line (the sensor may offer Y10_1X10 only: see media-ctl-p.txt)"
-        ;;
-    esac
-  done <<<"$plan"
-  v4l2-ctl -d "$videodev" --set-fmt-video=width=644,height=604,pixelformat=GREY >>"$report" 2>&1 \
-    || say "set video format failed on $videodev"
-  rm -f "$out/ir.raw"
-  say "capturing $frames frames from $videodev (no illuminator)"
-  if timeout 30 v4l2-ctl -d "$videodev" --stream-mmap --stream-count="$frames" --stream-to="$out/ir.raw" >>"$report" 2>&1; then
-    ok "IR stream ran ($videodev)"
-  else
-    bad "IR stream failed or timed out (see CSIPHY/CSID messages below)"
+  sensordev=$(sed -n 's/^SENSOR //p' <<<"$plan")
+  rdipad=$(sed -n 's/^RDI //p' <<<"$plan")
+
+  # codes the sensor itself reports decide the format; nothing is hard-coded
+  codes=$(sensor_codes "$sensordev")
+  say "sensor $sensordev mbus codes on pad 0: $(tr '\n' ' ' <<<"$codes")"
+  if [[ -z $codes ]]; then
+    say "could not enumerate the sensor codes; falling back to the usual default"
+    if [[ $kind == ir ]]; then codes=$( ((want_y10)) && echo Y10_1X10 || echo Y8_1X8); else codes=SGRBG10_1X10; fi
   fi
-  kdmesg | grep -iE 'csid|csiphy|vfe|camss|vd55g' | tail -n 15 | tee -a "$report"
-  if [[ -s $out/ir.raw ]]; then
-    say "-- frame statistics (Y8 644x604)"
-    stats_py "$out/ir.raw" 644 604 | tee -a "$report"
-    local sz
-    sz=$(stat -c %s "$out/ir.raw")
-    if ((sz >= frames * 644 * 604)); then ok "IR captured $frames frames (~/sl7-ir-test/ir.raw)"; else bad "IR capture short: $sz bytes"; fi
+  if ! code=$(pick_code "$kind" "$codes"); then
+    verdict FAIL "no usable media bus code among: $(tr '\n' ' ' <<<"$codes")$( ((want_y10)) && echo ' (--y10 needs Y10_1X10)')"
+    return
+  fi
+  fourcc=$(mbus_fourcc "$code")
+  bits=$(fourcc_bits "$fourcc")
+  say "using $code -> $fourcc ${w}x${h}"
+
+  media-ctl -d "$media_dev" -r >>"$report" 2>&1 || say "media-ctl -r (reset links) failed"
+  while IFS= read -r line; do
+    [[ $line == "LINK "* ]] || continue
+    if ! media-ctl -d "$media_dev" -l "${line#LINK }[1]" >>"$report" 2>&1; then
+      verdict FAIL "link failed: $line"
+      return
+    fi
+  done <<<"$plan"
+  while IFS= read -r line; do
+    [[ $line == "FMT "* ]] || continue
+    if ! media-ctl -d "$media_dev" -V "${line#FMT } [fmt:$code/${w}x${h}]" >>"$report" 2>&1; then
+      verdict FAIL "set format failed on ${line#FMT } (codes offered: $(tr '\n' ' ' <<<"$codes"))"
+      return
+    fi
+  done <<<"$plan"
+
+  cur=$(media-ctl -d "$media_dev" --get-v4l2 "$rdipad" 2>&1)
+  say "RDI source pad $rdipad: $cur"
+  curcode=$(grep -oE 'fmt:[A-Z0-9_]+' <<<"$cur" | head -n1 | sed 's/^fmt://')
+  cursize=$(grep -oE '/[0-9]+x[0-9]+' <<<"$cur" | head -n1 | sed 's|^/||')
+  if [[ $curcode != "$code" || $cursize != "${w}x${h}" ]]; then
+    verdict FAIL "format mismatch on $rdipad: wanted $code/${w}x${h}, got ${curcode:-?}/${cursize:-?}"
+    return
+  fi
+
+  v4l2-ctl -d "$videodev" --set-fmt-video="width=$w,height=$h,pixelformat=$fourcc" >>"$report" 2>&1 \
+    || say "set video format failed on $videodev"
+  fmt_out=$(v4l2-ctl -d "$videodev" --get-fmt-video 2>&1)
+  say "$fmt_out"
+  bpl=$(sed -n 's/^[[:space:]]*Bytes per Line[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' <<<"$fmt_out" | head -n1)
+  size=$(sed -n 's/^[[:space:]]*Size Image[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' <<<"$fmt_out" | head -n1)
+  if [[ -z $bpl || -z $size ]] || ! grep -q "'$fourcc'" <<<"$fmt_out"; then
+    verdict FAIL "$videodev did not accept $fourcc ${w}x${h} (bytesperline='${bpl:-}' sizeimage='${size:-}')"
+    return
+  fi
+
+  log=$out/$kind-capture.log
+  raw=$out/$kind.raw
+  rm -f "$raw"
+  say "capturing $nframes frames from $videodev as $fourcc, stride $bpl, sizeimage $size (no illuminator)"
+  dm_mark=$(kdmesg | wc -l)
+  if ((debug)); then irq_snap "$out/irq-$kind-before.txt"; fi
+  if ! timeout 30 v4l2-ctl -d "$videodev" --stream-mmap --stream-count="$nframes" --stream-to="$raw" >"$log" 2>&1; then
+    ok_stream=0
+  fi
+  cat "$log" >>"$report"
+  # v4l2-ctl can exit 0 although STREAMON failed: judge by its messages too
+  if grep -qiE 'returned -1|timeout|VIDIOC_' "$log"; then ok_stream=0; fi
+  if ((debug)); then
+    irq_snap "$out/irq-$kind-after.txt"
+    say "-- interrupt deltas during the $label capture"
+    irq_delta_py "$out/irq-$kind-before.txt" "$out/irq-$kind-after.txt" | tee -a "$report"
+  fi
+  say "-- kernel messages since the $label capture began"
+  kdmesg | tail -n +$((dm_mark + 1)) | grep -iE 'csi2-phy|ace4000|acec000|phy-ace|vb2|Link|validat|camss|vd55g|csid|csiphy|vfe' | tail -n 60 | tee -a "$report"
+
+  sz=0
+  [[ -f $raw ]] && sz=$(stat -c %s "$raw")
+  need=$((nframes * size))
+  if ((sz > 0)); then
+    say "-- frame statistics ($code/$fourcc ${w}x${h}, stride $bpl)"
+    stats_py "$raw" "$w" "$h" "$bpl" "$size" "$bits" | tee -a "$report"
+  fi
+  if ((!ok_stream)); then
+    verdict FAIL "stream failed ($videodev: STREAMON error or timeout, $sz of $need bytes); if frames time out try --mclk-hz 24000000 (Windows says MCLK 24 MHz)"
+  elif ((sz >= need)); then
+    verdict PASS "captured $nframes frames $code/$fourcc ${w}x${h} stride $bpl ($raw)"
   else
-    bad "IR capture produced no data"
+    verdict FAIL "capture short: $sz of $need bytes ($nframes x $size)"
   fi
 }
 
 if ((capture)); then
   section "IR capture"
-  if [[ -n $media_dev ]]; then capture_ir; else info "IR capture skipped: no CAMSS media device"; fi
+  if ((debug)); then debug_on; trap debug_off EXIT; fi
+  if [[ -n $media_dev ]]; then
+    capture_cam ir vd55g "$ir_dev" msm_csid0 msm_vfe0_rdi0 "$frames" 644 604
+  else
+    info "IR capture skipped: no CAMSS media device"
+  fi
+  section "RGB raw capture (informational: libcamera already drives the RGB camera)"
+  if [[ -n $media_dev ]]; then
+    rgb_w=1928 rgb_h=1092
+    if [[ -n $rgb_dev ]]; then
+      rgb_ent=$(sed -n 's/^- entity [0-9]*: \(ov02c10[^(]*[^( ]\) (.*/\1/p' "$out/media-ctl-p.txt" | head -n1)
+      rgb_cur=$(media-ctl -d "$media_dev" --get-v4l2 "\"$rgb_ent\":0" 2>/dev/null | grep -oE '/[0-9]+x[0-9]+' | head -n1 | tr -d /) || true
+      if [[ $rgb_cur =~ ^([0-9]+)x([0-9]+)$ ]]; then rgb_w=${BASH_REMATCH[1]} rgb_h=${BASH_REMATCH[2]}; fi
+    fi
+    capture_cam rgb ov02c10 "$rgb_dev" msm_csid1 msm_vfe1_rdi0 10 "$rgb_w" "$rgb_h"
+  else
+    info "RGB capture skipped: no CAMSS media device"
+  fi
+  debug_off
 fi
 
 # ---------------------------------------------------------------- leds

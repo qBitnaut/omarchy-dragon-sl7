@@ -148,6 +148,12 @@ strobe output. Do not enable the emitter until its flash channel has been found 
   no `dtb_path` (only the `linux` protocol does, and then initramfs and command line must be
   supplied by hand), and a UKI cannot select between DTBs by command line (`.dtbauto` is chosen
   by SMBIOS HWIDs). It changes no persistent state: a reboot returns to the device tree.
+- 7.2.8-4: the vd55g mono pad format defaulted to code 0 (`fmt:unknown/644x604` in `media-ctl -p`)
+  because the generic driver returned the requested code unchanged for mono sensors. Patch 0040
+  now validates the code against the mono list and falls back to the first entry (Y8_1X8), the
+  Bayer lookup falls back to row 0, and `init_state` picks the first mono or Bayer code (as
+  `vd55g1` did). `set_fmt` and `enum_frame_size` go through the same check. Patch 0031 also logs
+  `csiphy %d init fail` with `dev_err_probe()` so a deferred probe is not printed as an error.
 - First on-device steps: `sudo sl7-ir-probe`, read its `SUMMARY`, then `--sweep-mclk` only if the
   IR sensor did not bind.
 

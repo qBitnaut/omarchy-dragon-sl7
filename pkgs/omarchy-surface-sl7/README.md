@@ -320,7 +320,10 @@ Read-only check of the camera stack on a `linux-sl7` 7.2.8-3 or later kernel on 
 model (`romulus13`): CAMSS, CCI0/1, CSIPHY0/4 and camcc probe state, the IR sensor (ST VD55G0,
 i2c `0x10` on CCI0: the driver reads model id `0x53354730` and applies the firmware patch before
 it binds), the front RGB OV02C10 (i2c `0x36` on CCI1), the kernel messages about both,
-`media-ctl -p`, and then a 30 frame Y8/GREY 644x604 capture with per-frame statistics. Everything
+`media-ctl -p`, and then a 30 frame IR capture (Y8/GREY 644x604 when the sensor offers `Y8_1X8`, else
+Y10/Y10P; the codes come from the sensor subdev) with per-frame statistics, followed by a 10 frame
+raw RGB capture through CSID1 and VFE1 RDI0 (`/dev/video4`, OV02C10 `SGRBG10_1X10` 1928x1092 as
+`pgAA`) that is reported as INFO only, since libcamera already drives the RGB camera. Everything
 goes to `~/sl7-ir-test/` (`probe-*.txt`, `media-ctl-p.txt`, `dmesg.txt`, `ir.raw`) and ends with
 a `SUMMARY` of PASS/FAIL/INFO lines. It never writes to an LED class device, a flash strobe or a
 sensor GPIO: the illuminator is not described in this release and is not touched. It needs
@@ -331,7 +334,21 @@ sl7-ir-probe                       # probe, topology, capture 30 frames
 sl7-ir-probe --no-capture          # probe state and topology only
 sl7-ir-probe --frames 100 --out ~/ir
 sudo sl7-ir-probe --sweep-mclk     # also look for the camera master clock (see below)
+sudo sl7-ir-probe --mclk-hz 24000000   # rebind the sensor with another MCLK rate, then capture
+sl7-ir-probe --y10                 # force the 10 bit IR format (Y10_1X10 / Y10P)
+sudo sl7-ir-probe --debug          # dynamic debug, vb2 debug=2 and interrupt deltas around the captures
 ```
+
+The capture builds on `media-ctl -r` (reset links), sets the format pad by pad and checks it on the
+RDI source pad before streaming. It reads the real `bytesperline` and `sizeimage` from `v4l2-ctl
+--get-fmt-video`, and counts a capture as PASS only when `v4l2-ctl` printed no `returned -1`,
+`timeout` or `VIDIOC_` error and the file holds at least frames x sizeimage bytes. The kernel log
+shown is only what appeared since the capture began. `--debug` enables dynamic debug for
+`qcom_camss`, `phy_qcom_mipi_csi2`, `vd55g`, `mc-entity.c` and `v4l2-subdev.c`, sets
+`videobuf2_common` debug=2, lists the `csid|vfe|csiphy|ace4000` interrupt counter deltas in the
+report and turns everything off again. If frames time out, the next MCLK to try is 24 MHz (Windows
+says 24 MHz): `sudo sl7-ir-probe --mclk-hz 24000000`. `--mclk-hz` only writes the `mclk_hz` module
+parameter and rebinds the sensor (the parameter is read at probe, no module reload).
 
 The IR module's master clock is not named by any Windows resource. The device tree starts with
 MCLK0 (gpio96) at 19.2 MHz. `--sweep-mclk` is the only mode that changes anything: it sets the

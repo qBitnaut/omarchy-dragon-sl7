@@ -500,8 +500,8 @@ index 2123f6388..84097d82d 100644
 -			dev_err(camss->dev,
 -				"Failed to init csiphy%d sub-device: %d\n",
 -				i, ret);
-+			dev_err(camss->dev, "csiphy %d init fail\n",
-+				res->csiphy_res[i].csiphy.id);
++			dev_err_probe(camss->dev, ret, "csiphy %d init fail\n",
++				      res->csiphy_res[i].csiphy.id);
  			return ret;
  		}
  	}
