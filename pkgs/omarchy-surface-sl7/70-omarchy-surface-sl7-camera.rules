@@ -1,0 +1,5 @@
+# libcamera's software ISP needs a dma-buf heap to debayer the SL7 webcam
+# (OV02C10 on CAMSS, no hardware ISP driver). The system heap is root-only by
+# default; give the logged-in seat user access, as other distros do. Must sort
+# before 73-seat-late.rules for uaccess to apply. The CMA heap stays root-only.
+SUBSYSTEM=="dma_heap", KERNEL=="system", TAG+="uaccess"
