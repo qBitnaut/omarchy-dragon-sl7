@@ -329,6 +329,11 @@ strobe output. Do not enable the emitter until its flash channel has been found 
   uses this. Patch 0067 (new) stops the VFE, CSID and CSIPHY that `video_start_streaming()` had
   already started when the sensor fails, which removes the `call_s_stream` WARN libcamera's `cam`
   hit after a failed start.
+- 7.2.8-8: the first IR capture after boot worked (30 frames, Y8 644x604) and every later start
+  failed with `apply_cold_start failed: -65528`. `vd55g_apply_cold_start()` declared `int ret;`
+  without initialising it and passes it to the `cci_write` accumulators, which skip the write and
+  return when `*err` is non-zero, so stack garbage both skipped the cold-start exposure writes and
+  became the return value. Patch 0040 initialises it to 0.
 - First on-device steps: `sudo sl7-ir-probe`, read its `SUMMARY`, then `--sweep-mclk` only if the
   IR sensor did not bind.
 

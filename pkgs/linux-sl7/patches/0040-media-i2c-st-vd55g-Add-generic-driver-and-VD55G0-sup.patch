@@ -1086,7 +1086,7 @@ index 000000000..8c504aeef
 +
 +static int vd55g_apply_cold_start(struct vd55g *sensor, struct v4l2_rect *crop)
 +{
-+	int ret;
++	int ret = 0;
 +
 +	if (sensor->info->ae_coldstart_exposure_in_us) {
 +		/*
