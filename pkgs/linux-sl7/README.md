@@ -65,6 +65,9 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0067 | camss: stop the subdevs already started when a later `s_stream(1)` fails | ours | candidate for linux-media (same code in mainline) |
 | 0043 | romulus: front RGB OV02C10 (CCI1, CSIPHY4, MCLK4, PM8010 rails l1m/l3m/l5m) | ours, from ELLX / bryce / Oliver White v2, on the v7 DTSI style | pending |
 | 0044 | romulus13: IR VD55G0 (CCI0 0x10, CSIPHY0 1 lane, 378 MHz, reset gpio109, pinned rails l2m 1.2 V / l4m 1.8 V / l6m 1.8 V, MCLK0 plus pinctrl states mclk1..3), **no illuminator** | ours; `ir/REPORT.md` | pending |
+| 0068-0069 | serial: qcom-geni force suspend/resume in the system sleep callbacks, and the unbalanced-resume fix | torvalds `d0cd9c8d0fd5` (v7.3-rc1), `3098c989bd38` (v7.3-rc6) | merged for 7.3 (backport) |
+| 0070 | SL7 local: ps883x drops the XO clock while the retimer is in reset | ours | not submitted |
+| 0071 | SL7 local: log why PCI D3cold is vetoed (dynamic debug only) | ours | not submitted |
 
 Notes on the DT patches:
 
@@ -237,13 +240,42 @@ applied).
 
 ### Rebase onto 7.3
 
-When 7.3 is tagged, drop 0045-0052 and 0061, and also 0053-0058, 0059, 0062-0065
+When 7.3 is tagged, drop 0045-0052, 0061 and 0068-0069, and also 0053-0058, 0059, 0062-0065
 only if they are in the tag (check with `git merge-base --is-ancestor`; they are
 7.4-queued). Re-run `scripts/fast-check.sh`.
 
 Diagnostic: `sl7-sleepstats` (pkgs/omarchy-surface-sl7, not in the PKGBUILD yet)
 prints the qcom_stats counters, `power-domain-system` residency (S0 is
 `domain_ss3`) and cpuidle totals; `--suspend-test` runs a measured suspend.
+
+## Power: suspend holders (7.2.8-9)
+
+Added in 7.2.8-9 (patches 0068-0071) from the 7.2.8-7 `sl7-sleepstats --trace` capture of 2026-10-05 (8 min
+`deep` suspend, qcrypto, BT, ath12k unloaded, USB wakeup off). The holder-by-holder mapping, with the trace
+evidence, is `Research/omarchy-dragon-sl7/power/sleeptrace-20261005/HOLDERS.md`. In short, APPS held three DDR
+BCMs (MC0, SH0, SH1, vote 1) through the 1 kBps vote that `1bf8000.pci` and `1c08000.pci` keep while their link
+stays up, `xo.lvl` through the PCIe clkrefs, the SSAM UART clock chain and the two PS8830 retimer clocks, and
+the ADSP woke 104 times a second. CX was not held. Nothing here has been booted on the SL7.
+
+| patch | addresses | upstream status | risk |
+|---|---|---|---|
+| 0068 serial: qcom-geni force suspend/resume (`d0cd9c8d0fd5`) | `b88000.serial` (SSAM) is never runtime-suspended, so its SE clock, `gcc_gpll0`/XO, CX OPP and QUP core vote stay in suspend | in 7.3-rc1 | the UART is powered off for the whole suspend. SSAM wakes through its own GPIO (tlmm 91, armed by `ssam_irq_arm_for_wakeup()`); the serdev child suspends first and resumes last, so EC D0-exit/entry still run with a live UART. If keyboard, touchpad or battery input is dead after resume, drop 0068/0069 first |
+| 0069 serial: qcom-geni fix unbalanced runtime PM resume (`3098c989bd38`) | follow-up to 0068 for `no_console_suspend` (a console that was not force-suspended must not be force-resumed) | in 7.3-rc6 | none beyond 0068. 7.3 has later serial changes (nbcon, `.pm` removal) that are not carried, so only these two apply to 7.2 |
+| 0070 SL7 local: ps883x drops XO while in reset | `rfclka3`/`rfclka4` (RPMh `clka3`/`clka4`, held at 1 in the sleep set) were enabled at probe and never released for retimers that sit in reset with all supplies off | not submitted | the clock is taken after the supplies and before the reset GPIO is released, and dropped after the supplies go off. Not tested on hardware; if a USB-C port stops negotiating after plugging a device, drop 0070 |
+| 0071 SL7 local: log the PCI D3cold veto | none directly. `pci_host_common_d3cold_possible()` is false for `1bf8000`/`1c08000`, so the controllers take the keep-link branch (1 kBps vote, clkrefs, aux clocks). The log lines name the vetoing device | not submitted | none (dynamic debug, silent by default) |
+
+Not done, with reasons:
+
+- dwc3-qcom: not a holder. `dwc3_qcom_suspend()` already calls `icc_disable()` on both paths; the earlier "never
+  dropped" reading used the stored request, not the aggregate.
+- PCIe: no patch drops the 1 kBps vote while the link is up. Upstream and next still keep it, and removing it
+  risks an endpoint (Wi-Fi) with live DMA and no DDR vote. The fix is to get the D3cold path taken (the controller
+  then releases `icc_mem`, `icc_cpu`, the OPP, the PHY and the clkref). 0071 is the first step. Do two
+  suspends in one boot and compare; see HOLDERS.md section 3 for the suspected `state_saved` cause.
+- BT UART `a98000.serial`: a stored qup-core/qup-config vote stays enabled after `hci_uart` is unloaded. It is not
+  covered by 0068 (`pm_runtime_force_suspend()` skips a device already suspended) and it is not a DDR vote.
+  Unresolved.
+- ADSP wakeups (104/s): no kernel patch.
 
 ## Build
 

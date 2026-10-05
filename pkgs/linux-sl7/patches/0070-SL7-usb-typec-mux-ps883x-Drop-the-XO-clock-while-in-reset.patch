@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 17:00:00 -0500
+Subject: [PATCH] SL7 local: usb: typec: mux: ps883x: drop the XO clock while in reset
+
+SL7 local: usb: typec: mux: ps883x: drop the XO clock while in reset
+
+The PS8830 retimers on the Surface Laptop 7 take their XO from the RPMh
+RF clock buffers (clka3 and clka4). The driver enables that clock at
+probe and never releases it, although it also holds the retimer in
+reset, with all of its supplies off, until the first Type-C
+notification arrives. The RPMh request for a clock buffer is the same in
+the active, wake and sleep sets, so the two requests keep the SoC XO
+voted through system suspend: the sleep set held "0x45004 (clka3) = 1"
+and "0x45104 (clka4) = 1" with xo.lvl at its active level, and the SoC
+could not shut XO down. See
+power/sleeptrace-20261005/HOLDERS.md in omarchy-dragon-sl7.
+
+Enable the clock only while the retimer is powered and out of reset: take
+it after the supplies come up and before the reset GPIO is released
+(clk_prepare_enable() of an RPMh clock is synchronous, and the existing
+60 ms firmware initialization delay follows), and drop it in
+ps883x_reset() after the supplies go off. Keep the existing behaviour at
+probe, which needs the clock to read the connection status, and at
+remove.
+
+A retimer that is in use (cable attached) keeps its clock, so a docked
+or charging suspend is unchanged.
+
+Rationale: SL7 local. Not tested on hardware by the author at the time of
+writing; the retimer is unpowered while the clock is stopped, so no
+retimer state is lost.
+
+Origin: ours
+Upstream-Status: Not submitted. Candidate for upstream after hardware
+confirmation (ps883x has no suspend handling today).
+---
+diff --git a/drivers/usb/typec/mux/ps883x.c b/drivers/usb/typec/mux/ps883x.c
+--- a/drivers/usb/typec/mux/ps883x.c
++++ b/drivers/usb/typec/mux/ps883x.c
+@@ -80,6 +80,7 @@
+ 
+ 	enum typec_orientation orientation;
+ 	bool in_reset;
++	bool xo_enabled;
+ 	bool disable_usb4;
+ };
+ 
+@@ -164,6 +165,36 @@
+ 	regulator_disable(retimer->vdd33_supply);
+ }
+ 
++/*
++ * SL7 local: the XO (RPMh RF clock buffer) is only needed while the retimer is
++ * powered and out of reset. Holding it while the retimer sits in reset keeps
++ * the RPMh clock request, and with it the SoC XO, alive through system suspend.
++ */
++static int ps883x_xo_enable(struct ps883x_retimer *retimer)
++{
++	int ret;
++
++	if (retimer->xo_enabled)
++		return 0;
++
++	ret = clk_prepare_enable(retimer->xo_clk);
++	if (ret)
++		return ret;
++
++	retimer->xo_enabled = true;
++
++	return 0;
++}
++
++static void ps883x_xo_disable(struct ps883x_retimer *retimer)
++{
++	if (!retimer->xo_enabled)
++		return;
++
++	clk_disable_unprepare(retimer->xo_clk);
++	retimer->xo_enabled = false;
++}
++
+ static void ps883x_reset(struct ps883x_retimer *retimer)
+ {
+ 	if (retimer->in_reset)
+@@ -171,6 +202,7 @@
+ 
+ 	gpiod_set_value(retimer->reset_gpio, 1);
+ 	ps883x_disable_vregs(retimer);
++	ps883x_xo_disable(retimer);
+ 	retimer->in_reset = true;
+ }
+ 
+@@ -189,6 +221,13 @@
+ 		if (ret)
+ 			return ret;
+ 
++		ret = ps883x_xo_enable(retimer);
++		if (ret) {
++			dev_err(dev, "failed to enable XO: %d\n", ret);
++			ps883x_disable_vregs(retimer);
++			return ret;
++		}
++
+ 		gpiod_set_value(retimer->reset_gpio, 0);
+ 
+ 		/* firmware initialization delay */
+@@ -467,7 +506,7 @@
+ 	if (ret)
+ 		goto err_mux_put;
+ 
+-	ret = clk_prepare_enable(retimer->xo_clk);
++	ret = ps883x_xo_enable(retimer);
+ 	if (ret) {
+ 		dev_err(dev, "failed to enable XO: %d\n", ret);
+ 		goto err_vregs_disable;
+@@ -530,7 +569,7 @@
+ err_switch_unregister:
+ 	typec_switch_unregister(retimer->sw);
+ err_clk_disable:
+-	clk_disable_unprepare(retimer->xo_clk);
++	ps883x_xo_disable(retimer);
+ err_vregs_disable:
+ 	gpiod_set_value(retimer->reset_gpio, 1);
+ 	ps883x_disable_vregs(retimer);
+@@ -551,7 +590,7 @@
+ 
+ 	gpiod_set_value(retimer->reset_gpio, 1);
+ 
+-	clk_disable_unprepare(retimer->xo_clk);
++	ps883x_xo_disable(retimer);
+ 
+ 	ps883x_disable_vregs(retimer);
+ 

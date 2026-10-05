@@ -113,3 +113,9 @@
 
 # 11. camss: stop the subdevs already started when a later s_stream(1) fails
 0067-media-qcom-camss-Stop-started-subdevs-when-the-sensor.patch
+
+# 12. Suspend holders (sleeptrace 2026-10-05): GENI UART force suspend, ps883x XO, PCIe D3cold diagnostics
+0068-serial-qcom-geni-add-force-suspend-resume-to-system-.patch
+0069-serial-qcom-geni-Fix-unbalanced-runtime-PM-resume-fo.patch
+0070-SL7-usb-typec-mux-ps883x-Drop-the-XO-clock-while-in-reset.patch
+0071-SL7-PCI-host-common-dwc-Log-why-D3cold-is-vetoed.patch

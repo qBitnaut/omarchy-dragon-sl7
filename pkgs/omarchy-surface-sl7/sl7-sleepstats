@@ -467,6 +467,15 @@ save_trace_state() {
   trace_saved=1
 }
 
+# PCI host D3cold and noirq suspend decisions (linux-sl7 7.2.8-9 patch 0071 adds
+# the "D3cold vetoed" lines) go to the kernel log during the traced suspend.
+pci_dyndbg() { # +p | -p
+  local f
+  for f in pci-host-common.c pcie-designware-host.c pci-driver.c; do
+    printf 'file %s %s\n' "$f" "$1" > "$(ddyn_control)" 2> /dev/null
+  done
+}
+
 restore_trace_state() {
   ((trace_saved)) || return 0
   trace_saved=0
@@ -475,6 +484,7 @@ restore_trace_state() {
   if [[ $(< "$tmp/tstate/ddyn") == 0 ]]; then
     printf 'file rpmh.c -p\n' > "$(ddyn_control)" 2> /dev/null
   fi
+  pci_dyndbg -p
   for e in "${trace_events[@]}"; do
     v=$(< "$tmp/tstate/ev.${e//\//_}")
     [[ -n $v ]] && printf '%s\n' "$v" > "$tracefs/events/$e/enable" 2> /dev/null
@@ -862,6 +872,7 @@ do_trace() {
   done
   printf 'file rpmh.c +p\n' > "$(ddyn_control)" 2> /dev/null ||
     warn "dynamic debug unavailable: no \"skipping RPMH req\" lines (section b will be empty)"
+  pci_dyndbg +p
 
   snapshot "$tmp/before"
   start_epoch=$(date +%s)
@@ -886,6 +897,7 @@ do_trace() {
   # resume: stop first, so the analysis window is the suspend
   printf '0\n' > "$tracefs/tracing_on"
   printf 'file rpmh.c -p\n' > "$(ddyn_control)" 2> /dev/null
+  pci_dyndbg -p
   boot1=$(boottime_s)
   mono1=$(mono_s)
   susp1=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')

@@ -15,7 +15,7 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.8
-pkgrel=8
+pkgrel=9
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -101,6 +101,10 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0065-soc-qcom-pmic_glink-Avoid-losing-early-rpmsg-probe.patch'
         'patches/0066-arm64-dts-qcom-hamoa-Drop-unused-reset-cells-from-TC.patch'
         'patches/0067-media-qcom-camss-Stop-started-subdevs-when-the-sensor.patch'
+        'patches/0068-serial-qcom-geni-add-force-suspend-resume-to-system-.patch'
+        'patches/0069-serial-qcom-geni-Fix-unbalanced-runtime-PM-resume-fo.patch'
+        'patches/0070-SL7-usb-typec-mux-ps883x-Drop-the-XO-clock-while-in-reset.patch'
+        'patches/0071-SL7-PCI-host-common-dwc-Log-why-D3cold-is-vetoed.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware')
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
@@ -109,6 +113,10 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'SKIP'
             'SKIP'
             'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
          'SKIP'
          'SKIP'
          'SKIP'

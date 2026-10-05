@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Abel Vesa <abel.vesa@oss.qualcomm.com>
+Date: Fri, 28 Aug 2026 17:32:17 +0300
+Subject: [PATCH] serial: qcom-geni: Fix unbalanced runtime PM resume for
+ no_console_suspend
+
+commit 3098c989bd38edff871d798acd7f1d1b269f7edd in torvalds/linux (v7.3-rc6); fixes the previous patch.
+
+When no_console_suspend is set for the serial console, the system
+suspend callback skips pm_runtime_force_suspend() to keep the console
+active. The resume callback still unconditionally calls
+pm_runtime_force_resume(), which triggers an "Unbalanced
+pm_runtime_enable!" warning.
+
+Only force resume when the suspend callback force suspended the device.
+
+Fixes: d0cd9c8d0fd5 ("serial: qcom-geni: add force suspend/resume to system sleep callbacks")
+Signed-off-by: Abel Vesa <abel.vesa@oss.qualcomm.com>
+Reviewed-by: Praveen Talari <praveen.talari@oss.qualcomm.com>
+Tested-by: David Heidelberg <david@ixit.cz> # OnePlus 6T (sdm845)
+Link: https://patch.msgid.link/20260828-serial-qcom-geni-fix-unbalanced-rpm-resume-v1-1-af3e5aef17a6@oss.qualcomm.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/tty/serial/qcom_geni_serial.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/tty/serial/qcom_geni_serial.c b/drivers/tty/serial/qcom_geni_serial.c
+index 60c13cfac28c..82cca5867cbe 100644
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -2100,9 +2100,11 @@ static int qcom_geni_serial_resume(struct device *dev)
+ 	struct uart_port *uport = &port->uport;
+ 	struct qcom_geni_private_data *private_data = uport->private_data;
+ 
+-	ret = pm_runtime_force_resume(dev);
+-	if (ret)
+-		return ret;
++	if (console_suspend_enabled || !uart_console(uport)) {
++		ret = pm_runtime_force_resume(dev);
++		if (ret)
++			return ret;
++	}
+ 
+ 	ret = uart_resume_port(private_data->drv, uport);
+ 	if (uart_console(uport)) {

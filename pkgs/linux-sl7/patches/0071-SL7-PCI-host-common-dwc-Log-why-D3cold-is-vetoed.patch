@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 17:00:00 -0500
+Subject: [PATCH] SL7 local: PCI: host-common, dwc: Log why D3cold is vetoed
+
+SL7 local: PCI: host-common, dwc: Log why D3cold is vetoed
+
+During system suspend the DWC host driver keeps the link up and, in
+qcom_pcie_suspend_noirq(), keeps a 1 kBps ALWAYS-tagged interconnect vote
+and the PHY reference clock whenever pci_host_common_d3cold_possible()
+returns false. On the Surface Laptop 7 this happens for the Wi-Fi and
+NVMe controllers (1c08000.pci, 1bf8000.pci) and keeps the MC0, SH0 and
+SH1 BCMs voted through suspend. Nothing reports which device vetoed the
+power-off, so add pci_dbg() lines to the walk (device in a state other
+than D3hot, or wakeup-enabled without PME from D3cold) and a dev_dbg()
+in dw_pcie_suspend_noirq(). All of them are dynamic debug and silent by
+default; enable them before suspend with
+
+  echo 'file pci-host-common.c +p' > /sys/kernel/debug/dynamic_debug/control
+  echo 'file pcie-designware-host.c +p' > /sys/kernel/debug/dynamic_debug/control
+  echo 'file pci-driver.c +p' > /sys/kernel/debug/dynamic_debug/control
+
+No functional change.
+
+Rationale: SL7 local diagnostic, needed to choose a safe fix for the
+1 kBps suspend vote. Upstream-friendly as it stands.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+diff --git a/drivers/pci/controller/pci-host-common.c b/drivers/pci/controller/pci-host-common.c
+--- a/drivers/pci/controller/pci-host-common.c
++++ b/drivers/pci/controller/pci-host-common.c
+@@ -291,14 +291,18 @@
+ 	if (!pdev->dev.driver && !pci_is_enabled(pdev))
+ 		return 0;
+ 
+-	if (pdev->current_state != PCI_D3hot)
++	if (pdev->current_state != PCI_D3hot) {
++		pci_dbg(pdev, "D3cold vetoed: device is in %s, not D3hot\n",
++			pci_power_name(pdev->current_state));
+ 		goto exit;
++	}
+ 
+ 	if (device_may_wakeup(&pdev->dev)) {
+-		if (!pci_pme_capable(pdev, PCI_D3cold))
++		if (!pci_pme_capable(pdev, PCI_D3cold)) {
++			pci_dbg(pdev, "D3cold vetoed: wakeup enabled but no PME from D3cold\n");
+ 			goto exit;
+-		else
+-			*flags |= PCI_HOST_PME_D3COLD_CAPABLE;
++		}
++		*flags |= PCI_HOST_PME_D3COLD_CAPABLE;
+ 	}
+ 
+ 	return 0;
+diff --git a/drivers/pci/controller/dwc/pcie-designware-host.c b/drivers/pci/controller/dwc/pcie-designware-host.c
+--- a/drivers/pci/controller/dwc/pcie-designware-host.c
++++ b/drivers/pci/controller/dwc/pcie-designware-host.c
+@@ -1229,8 +1229,10 @@
+ 	if (!dw_pcie_link_up(pci))
+ 		goto stop_link;
+ 
+-	if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable))
++	if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable)) {
++		dev_dbg(pci->dev, "D3cold not possible, keeping the link up\n");
+ 		return 0;
++	}
+ 
+ 	if (pci->pp.ops->pme_turn_off) {
+ 		pci->pp.ops->pme_turn_off(&pci->pp);
