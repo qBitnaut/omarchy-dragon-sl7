@@ -1,0 +1,504 @@
+daemon: Bridge short contact dropouts (LiftGraceMs)
+
+[Touchpad] LiftGraceMs: a valid contact that vanishes for less than this
+many milliseconds and reappears within 5 mm of its last position is treated
+as continuous. No lift and no touch down are emitted, the tracking id stays
+the same, and the button motion gating does not see a contact appear or
+disappear. Bridges sensor detection dropouts, which cause ghost taps while
+sliding and ghost right clicks while two-finger scrolling.
+
+Held contacts are released by time, not by frames: the runner waits for data
+with poll() (hid::Device::wait) while a contact is held and calls
+Application::on_timeout() when the grace time runs out, so a sensor that stops
+streaming after the last finger lifts cannot leave a stuck touch.
+
+The idea comes from the comment on LiftGraceMs in ProgrammerIn-wonderland's
+ELLX iptsd build (https://public.hgci.org/software/ELLX/iptsd/); that code
+is not published, this is an independent implementation.
+
+diff --git i/etc/iptsd.conf w/etc/iptsd.conf
+index ee4ad79..72cf95b 100644
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -71,6 +71,17 @@
+ ##
+ # ButtonMaxMoveMm = 1.5
+ 
++##
++## Lift grace period (in milliseconds). A contact that vanishes for less than this long and
++## reappears within 5 mm of where it was is treated as continuous: no lift, no new touch down,
++## same tracking id. Bridges short dropouts of the sensor, which show up as ghost taps while
++## sliding and ghost right clicks while scrolling. Also hides them from the button gating.
++## 0 disables. (Default 30)
++##
++## Idea from ProgrammerIn-wonderland's ELLX iptsd build (LiftGraceMs).
++##
++# LiftGraceMs = 30
++
+ [Contacts]
+ ##
+ ## How the neutral value of the heatmap will be determined.
+diff --git i/src/apps/daemon/daemon.hpp w/src/apps/daemon/daemon.hpp
+index 6b8208e..7c2c5fd 100644
+--- i/src/apps/daemon/daemon.hpp
++++ w/src/apps/daemon/daemon.hpp
+@@ -54,6 +54,20 @@ public:
+ 			spdlog::warn("Stylus is disabled!");
+ 	}
+ 
++	i32 timeout_ms() override
++	{
++		if (!m_touch.has_value())
++			return -1;
++
++		return m_touch->timeout_ms();
++	}
++
++	void on_timeout() override
++	{
++		if (m_touch.has_value())
++			m_touch->expire();
++	}
++
+ 	void on_touch(const std::vector<contacts::Contact<f64>> &contacts) override
+ 	{
+ 		if (!m_touch.has_value())
+diff --git i/src/apps/daemon/touch.hpp w/src/apps/daemon/touch.hpp
+index a6772aa..50737a8 100644
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -40,6 +40,9 @@ private:
+ 	 */
+ 	constexpr static usize DIAGONAL = 12000;
+ 
++	// A reappearing contact is only merged with a vanished one if it is this close (mm).
++	constexpr static f64 LIFT_GRACE_RADIUS_MM = 5.0;
++
+ private:
+ 	std::shared_ptr<UinputDevice> m_uinput = std::make_shared<UinputDevice>();
+ 
+@@ -96,6 +99,33 @@ private:
+ 	// Whether the current press of the bit is ignored until the bit clears.
+ 	bool m_button_suppressed = false;
+ 
++	// Maximum time (ms) a contact may be missing and still be treated as continuous. 0 disables.
++	f64 m_lift_grace_ms = 0;
++
++	// A contact that vanished and is held in place until it reappears or the grace time ends.
++	struct Ghost {
++		contacts::Contact<f64> contact;
++		std::chrono::steady_clock::time_point last_seen;
++	};
++
++	// Vanished contacts that are still held, by effective index.
++	std::map<usize, Ghost> m_ghosts {};
++
++	// Maps the index the tracker assigned to the effective index that is emitted.
++	std::map<usize, usize> m_alias {};
++
++	// The real (not held) contacts of the last frame, by effective index.
++	std::map<usize, contacts::Contact<f64>> m_bridge_last {};
++
++	// The tracker indices of the last frame.
++	std::set<usize> m_bridge_raw_last {};
++
++	// The contacts of the last frame, as passed to update().
++	std::vector<contacts::Contact<f64>> m_bridge_input {};
++
++	// When the last frame was seen.
++	std::chrono::steady_clock::time_point m_bridge_time {};
++
+ 	// The last debounced (emitted) state of the touchpad button.
+ 	bool m_button_state = false;
+ 
+@@ -142,6 +172,7 @@ public:
+ 
+ 			m_overshoot = config.touchpad_overshoot;
+ 			m_disable_on_palm = config.touchpad_disable_on_palm;
++			m_lift_grace_ms = config.touchpad_lift_grace_ms;
+ 		} else {
+ 			m_uinput->set_propbit(INPUT_PROP_DIRECT);
+ 
+@@ -176,23 +207,30 @@ public:
+ 	/*!
+ 	 * Passes a frame of detected contacts to the linux kernel.
+ 	 *
+-	 * @param[in] contacts All currently active contacts.
++	 * @param[in] raw_contacts All currently active contacts.
+ 	 */
+-	void update(const std::vector<contacts::Contact<f64>> &contacts)
++	void update(const std::vector<contacts::Contact<f64>> &raw_contacts)
+ 	{
+ 		// If the touch device is disabled ignore all inputs.
+ 		if (!m_enabled)
+ 			return;
+ 
++		m_bridge_input = raw_contacts;
++
++		// Bridge short detection dropouts, so they do not show up as a lift and touch down.
++		const std::vector<contacts::Contact<f64>> contacts = this->bridge_dropouts(raw_contacts);
++
+ 		// Find the inputs that need to be lifted
+ 		this->search_lifted(contacts);
+ 
+ 		m_blocked = this->is_blocked(contacts);
+ 
+-		if (m_blocked)
++		if (m_blocked) {
++			this->reset_bridge();
+ 			this->lift_all();
+-		else
++		} else {
+ 			this->process(contacts);
++		}
+ 
+ 		this->sync();
+ 
+@@ -203,6 +241,43 @@ public:
+ 		this->confirm_button();
+ 	}
+ 
++	/*!
++	 * How long until a held contact has to be released, if no frame arrives.
++	 *
++	 * @return Milliseconds, or -1 if no contact is held.
++	 */
++	[[nodiscard]] i32 timeout_ms() const
++	{
++		if (m_ghosts.empty())
++			return -1;
++
++		const auto now = std::chrono::steady_clock::now();
++		f64 remaining = m_lift_grace_ms;
++
++		for (const auto &[index, ghost] : m_ghosts) {
++			const f64 gone =
++				std::chrono::duration<f64, std::milli>(now - ghost.last_seen).count();
++
++			remaining = std::min(remaining, m_lift_grace_ms - gone);
++		}
++
++		// +1: a contact is released once it was gone for more than the grace time.
++		return casts::to<i32>(std::max(0.0, std::ceil(remaining)) + 1);
++	}
++
++	/*!
++	 * Releases held contacts whose grace time is over. Called when no frame arrived in
++	 * time, as the sensor may stop sending frames once all fingers are lifted.
++	 */
++	void expire()
++	{
++		if (m_ghosts.empty())
++			return;
++
++		// Re-run the last frame: the real contacts stay as they are, expired ghosts lift.
++		this->update(m_bridge_input);
++	}
++
+ 	/*!
+ 	 * Passes a sample of the touchpad button to the linux kernel.
+ 	 *
+@@ -300,6 +375,7 @@ public:
+ 		m_current.clear();
+ 		m_last.clear();
+ 		m_lift.clear();
++		this->reset_bridge();
+ 		m_positions.clear();
+ 		m_button_anchor.clear();
+ 		m_button_pending = false;
+@@ -351,6 +427,173 @@ private:
+ 		this->sync();
+ 	}
+ 
++	/*!
++	 * Forgets all held contacts and index mappings.
++	 */
++	void reset_bridge()
++	{
++		m_ghosts.clear();
++		m_alias.clear();
++		m_bridge_last.clear();
++		m_bridge_raw_last.clear();
++	}
++
++	/*!
++	 * Distance (mm) between two contacts.
++	 */
++	[[nodiscard]] f64 distance_mm(const contacts::Contact<f64> &a,
++	                              const contacts::Contact<f64> &b) const
++	{
++		const Vector2<f64> d = a.mean - b.mean;
++
++		return std::hypot(d.x() * m_config.width * 10, d.y() * m_config.height * 10);
++	}
++
++	/*!
++	 * Smallest index that is neither used in this frame nor held by a vanished contact.
++	 */
++	[[nodiscard]] usize free_index(const std::set<usize> &used) const
++	{
++		usize index = 0;
++
++		while (used.count(index) != 0 || m_ghosts.count(index) != 0)
++			index++;
++
++		return index;
++	}
++
++	/*!
++	 * Bridges short detection dropouts of the sensor.
++	 *
++	 * A valid contact that vanishes is held at its last position for up to LiftGraceMs.
++	 * If a new contact shows up within LIFT_GRACE_RADIUS_MM of it in that time, the new
++	 * contact takes over the index of the vanished one. Neither a lift nor a touch down is
++	 * emitted, and the button gating sees an unchanged set of contacts.
++	 *
++	 * Idea (LiftGraceMs) credited to ProgrammerIn-wonderland's ELLX iptsd build.
++	 *
++	 * @param[in] raw All contacts of the current frame, as tracked.
++	 * @return The contacts to emit: the real ones with effective indices, plus held ones.
++	 */
++	[[nodiscard]] std::vector<contacts::Contact<f64>>
++	bridge_dropouts(const std::vector<contacts::Contact<f64>> &raw)
++	{
++		if (m_lift_grace_ms <= 0)
++			return raw;
++
++		const auto now = std::chrono::steady_clock::now();
++
++		// Drop held contacts that were gone for too long. They are no longer in the output,
++		// which makes search_lifted() lift them.
++		for (auto it = m_ghosts.begin(); it != m_ghosts.end();) {
++			const f64 gone =
++				std::chrono::duration<f64, std::milli>(now - it->second.last_seen).count();
++
++			if (gone > m_lift_grace_ms)
++				it = m_ghosts.erase(it);
++			else
++				++it;
++		}
++
++		std::vector<contacts::Contact<f64>> out {};
++		out.reserve(raw.size() + m_ghosts.size());
++
++		std::set<usize> raw_now {};
++		std::set<usize> used {};
++		std::map<usize, contacts::Contact<f64>> real_now {};
++
++		const auto add = [&](const contacts::Contact<f64> &contact, const usize index) {
++			contacts::Contact<f64> copy = contact;
++			copy.index = index;
++
++			used.insert(index);
++			real_now[index] = copy;
++			out.push_back(copy);
++		};
++
++		// Contacts that were already there keep their effective index.
++		for (const contacts::Contact<f64> &contact : raw) {
++			if (!contact.index.has_value()) {
++				out.push_back(contact);
++				continue;
++			}
++
++			const usize index = contact.index.value();
++			raw_now.insert(index);
++
++			if (m_bridge_raw_last.count(index) == 0)
++				continue;
++
++			const auto alias = m_alias.find(index);
++			add(contact, alias != m_alias.cend() ? alias->second : index);
++		}
++
++		// New contacts either continue a held one, or get a free effective index.
++		for (const contacts::Contact<f64> &contact : raw) {
++			if (!contact.index.has_value())
++				continue;
++
++			const usize index = contact.index.value();
++
++			if (m_bridge_raw_last.count(index) != 0)
++				continue;
++
++			auto best = m_ghosts.end();
++			f64 best_distance = LIFT_GRACE_RADIUS_MM;
++
++			if (contact.valid.value_or(true)) {
++				for (auto it = m_ghosts.begin(); it != m_ghosts.end(); ++it) {
++					const f64 d = this->distance_mm(contact, it->second.contact);
++
++					if (d <= best_distance) {
++						best = it;
++						best_distance = d;
++					}
++				}
++			}
++
++			usize effective = index;
++
++			if (best != m_ghosts.end()) {
++				effective = best->first;
++				m_ghosts.erase(best);
++			} else if (used.count(index) != 0 || m_ghosts.count(index) != 0) {
++				effective = this->free_index(used);
++			}
++
++			m_alias[index] = effective;
++			add(contact, effective);
++		}
++
++		// Mappings of contacts that are gone are no longer needed.
++		for (auto it = m_alias.begin(); it != m_alias.end();) {
++			if (raw_now.count(it->first) == 0)
++				it = m_alias.erase(it);
++			else
++				++it;
++		}
++
++		// Contacts that vanished this frame are held for a while.
++		for (const auto &[index, contact] : m_bridge_last) {
++			if (real_now.count(index) != 0 || m_ghosts.count(index) != 0)
++				continue;
++
++			if (!contact.valid.value_or(true))
++				continue;
++
++			m_ghosts[index] = Ghost {contact, m_bridge_time};
++		}
++
++		for (const auto &[index, ghost] : m_ghosts)
++			out.push_back(ghost.contact);
++
++		m_bridge_last = std::move(real_now);
++		m_bridge_raw_last = std::move(raw_now);
++		m_bridge_time = now;
++
++		return out;
++	}
++
+ 	/*!
+ 	 * Stores the positions of all valid contacts in millimeters.
+ 	 *
+diff --git i/src/core/generic/application.hpp w/src/core/generic/application.hpp
+index 9f90c52..8ef22dc 100644
+--- i/src/core/generic/application.hpp
++++ w/src/core/generic/application.hpp
+@@ -127,6 +127,21 @@ public:
+ 	 */
+ 	virtual void on_start() {};
+ 
++	/*!
++	 * How long the runner may wait for data before calling on_timeout().
++	 *
++	 * @return A timeout in milliseconds, or -1 to wait indefinitely.
++	 */
++	virtual i32 timeout_ms()
++	{
++		return -1;
++	}
++
++	/*!
++	 * Called when no data arrived within timeout_ms().
++	 */
++	virtual void on_timeout() {};
++
+ 	/*!
+ 	 * For running application specific code after the runner has stopped.
+ 	 */
+diff --git i/src/core/generic/config.hpp w/src/core/generic/config.hpp
+index 12fc765..526a767 100644
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -37,6 +37,7 @@ public:
+ 	f64 touchpad_button_debounce_ms = 25;
+ 	f64 touchpad_button_hold_ms = 70;
+ 	f64 touchpad_button_max_move_mm = 1.5;
++	f64 touchpad_lift_grace_ms = 30;
+ 
+ 	// [Contacts]
+ 	std::string contacts_neutral = "mode";
+diff --git i/src/core/linux/config-loader.hpp w/src/core/linux/config-loader.hpp
+index 9e752a3..4966ed8 100644
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -163,6 +163,7 @@ private:
+ 		this->get(ini, "Touchpad", "ButtonDebounceMs", m_config.touchpad_button_debounce_ms);
+ 		this->get(ini, "Touchpad", "ButtonHoldMs", m_config.touchpad_button_hold_ms);
+ 		this->get(ini, "Touchpad", "ButtonMaxMoveMm", m_config.touchpad_button_max_move_mm);
++		this->get(ini, "Touchpad", "LiftGraceMs", m_config.touchpad_lift_grace_ms);
+ 
+ 		this->get(ini, "Contacts", "Neutral", m_config.contacts_neutral);
+ 		this->get(ini, "Contacts", "NeutralValue", m_config.contacts_neutral_value);
+diff --git i/src/core/linux/device/hidraw.hpp w/src/core/linux/device/hidraw.hpp
+index a1e1cee..a7199c7 100644
+--- i/src/core/linux/device/hidraw.hpp
++++ w/src/core/linux/device/hidraw.hpp
+@@ -16,6 +16,8 @@
+ 
+ #include <linux/hidraw.h>
+ 
++#include <poll.h>
++
+ #include <filesystem>
+ 
+ namespace iptsd::core::linux::device {
+@@ -97,6 +99,16 @@ public:
+ 	 * @param[in] buffer The target storage for the report.
+ 	 * @return The size of the report that was read in bytes.
+ 	 */
++	bool wait(const i32 timeout_ms) override
++	{
++		pollfd pfd {};
++		pfd.fd = m_fd;
++		pfd.events = POLLIN;
++
++		// On errors (EINTR, ...) let read() deal with it.
++		return ::poll(&pfd, 1, timeout_ms) != 0;
++	}
++
+ 	usize read(gsl::span<u8> buffer) override
+ 	{
+ 		return syscalls::read(m_fd, buffer);
+diff --git i/src/core/linux/runner.hpp w/src/core/linux/runner.hpp
+index f90a911..02cd2d3 100644
+--- i/src/core/linux/runner.hpp
++++ w/src/core/linux/runner.hpp
+@@ -140,6 +140,15 @@ public:
+ 			}
+ 
+ 			try {
++				// Applications that hold state over time (touch lift grace) must be
++				// able to act even if the device stops sending frames.
++				const i32 timeout = m_application->timeout_ms();
++
++				if (timeout >= 0 && !m_device->wait(timeout)) {
++					m_application->on_timeout();
++					continue;
++				}
++
+ 				const usize size = m_device->read(m_buffer);
+ 				const gsl::span<u8> data {m_buffer.data(), size};
+ 
+diff --git i/src/hid/device.hpp w/src/hid/device.hpp
+index 56c5e45..a3b8bc3 100644
+--- i/src/hid/device.hpp
++++ w/src/hid/device.hpp
+@@ -26,6 +26,17 @@ public:
+ 	virtual gsl::span<u8> raw_descriptor() = 0;
+ 
+ 	virtual usize read(gsl::span<u8> buffer) = 0;
++
++	/*!
++	 * Waits until a report can be read.
++	 *
++	 * @param[in] timeout_ms How long to wait, in milliseconds.
++	 * @return false if the timeout passed without data. Sources that cannot wait return true.
++	 */
++	virtual bool wait(const i32 /* timeout_ms */)
++	{
++		return true;
++	}
+ 	virtual void get_feature(gsl::span<u8> report) = 0;
+ 	virtual void set_feature(gsl::span<u8> report) = 0;
+ 

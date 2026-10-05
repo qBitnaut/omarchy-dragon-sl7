@@ -65,7 +65,7 @@ iptsd version.
 ## Tap-to-click
 
 Not an iptsd option (`[Touchpad]` has only `Disable`, `DisableOnPalm`, `Overshoot`,
-`ButtonDebounceMs`). It is a libinput setting; disable it in the compositor, for
+`ButtonDebounceMs`, plus the patched-in keys below). It is a libinput setting; disable it in the compositor, for
 Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package.
 
 ## Licensing
@@ -98,6 +98,22 @@ Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package
   button and suppress it until the bit clears; one moving contact keeps it held
   (click and drag), and a change in the contact set re-measures from there.
   Fixes repeated right clicks while two-finger scrolling with clickfinger.
+- `0003-daemon-lift-grace.patch` (applied in `prepare()`, after 0002):
+  adds `[Touchpad] LiftGraceMs` (default 30; 0 disables). A valid contact that
+  vanishes for less than that and reappears within 5 mm of its last position
+  (as any new tracker index) keeps its old index: no lift, no touch down, and
+  the button gating sees an unchanged contact set. While gone it is held at its
+  last position; a real lift is therefore delayed by up to `LiftGraceMs`. Held
+  contacts are released by time: while one is held the daemon polls the hidraw fd with a timeout and releases it when `LiftGraceMs` is up, even if the sensor sends no more frames. The idea is credited to the
+  `LiftGraceMs` comment in ProgrammerIn-wonderland's ELLX iptsd build (that
+  code is unpublished; this is an independent implementation). 30 ms is a few
+  sensor frames, well under a deliberate tap-lift-tap; ELLX's own comment
+  suggests 70 ms was too long.
+- Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
+  `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
+  v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset
+  values. Contact limits (`SizeMin` 0.7, `SizeMax` 3.3, `AspectMin` 1.0,
+  `AspectMax` 3.7) and `ButtonDebounceMs` 30 follow ELLX's calibration.
 - `/etc/iptsd.d/92-iptsd-sl7-tuning.conf` overrides the 91 calibration;
   `/etc/iptsd.d/93-local-calibration.conf` (from `iptsd-sl7-calibrate`) overrides
   both. `iptsd-sl7-calibrate --revert` removes it.
@@ -105,6 +121,6 @@ Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package
   the defaults (91 + 92) are the supported configuration. It prints a notice and
   asks to continue. It may only lower `SizeMin`/`AspectMin` (never above the
   run's measured minimum or the current 91/92 value) and caps `SizeMax`/
-  `AspectMax` at the 92 values. A run whose maxima exceed 2.5x the mean is
+  `AspectMax` at the 92 values (3.3 / 3.7). A run whose maxima exceed 2.5x the mean is
   polluted (two close fingers can read as one large blob) and cannot be
   installed; re-run or quit.

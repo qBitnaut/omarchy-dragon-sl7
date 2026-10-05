@@ -18,8 +18,8 @@ CONF_DIR=/etc/iptsd.d
 HID_ID='001C:0000045E:00000C77'
 
 # Keep in sync with [Contacts] in 92-iptsd-sl7-tuning.conf.
-CAP_SIZE_MAX=4.0
-CAP_ASPECT_MAX=4.0
+CAP_SIZE_MAX=3.3
+CAP_ASPECT_MAX=3.7
 SIZE_MIN_FLOOR=0.5
 POLLUTION_RATIO=2.5
 

@@ -10,7 +10,7 @@ pkgname=iptsd-sl7
 _calcommit=e60938dcf707d37d24e782e0029b9c9a567d67b8  # 2026-06-03
 _commit=3663e96e758145801c3cb1ce7c72f362d0d4a5f5  # 2026-07-17 00:26 UTC (2026-07-16 20:26 -0400)
 pkgver=3.1.0.r20260717
-pkgrel=9
+pkgrel=10
 pkgdesc='Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)'
 arch=('aarch64')
 url='https://github.com/alex-lentz/iptsd'
@@ -35,17 +35,19 @@ source=("iptsd-$_commit.tar.gz::https://github.com/alex-lentz/iptsd/archive/$_co
         'iptsd-sl7-calibrate'
         'iptsd-sl7-restart'
         '0001-daemon-require-button-hold-time.patch'
-        '0002-daemon-button-motion-gating.patch')
+        '0002-daemon-button-motion-gating.patch'
+        '0003-daemon-lift-grace.patch')
 sha256sums=('ce9935fb7c38365f4fa65070e819bf901e10082c5fb2ea67e49b3a60b225ed92'
             '2c1ffc2088dd9e65f18e79f1e1b6d3fbcb815e75843ebed8142da6f96f89bbb0'
             'c58408721cd808a51c4970d6e2a8397a136b899bcf6904069646c8f4ea6b86ef'
             '310675731eab637ede77f62c7bf6d2f65324504ddd218742341df483df81a513'
             '6b2bab2ad225a86ef1fd31e2a2736b641a3d5a91f5723d2069c18ecf63ae2889'
-            '118cb8254c14d7b2e024566138ff52c656df756c2ea03e67e8401efa629a732b'
-            '9961090ef66c6dd4f25198337e56cb64261d0d6a99ab2d35cb604e443b1606b4'
+            'bcfbdbf531fd332249d334510a114ca033f444aa3cac62be67e0ab5852570e0c'
+            'fea9cfdcbeb3362ac3ddab91263ba2075501e75955888659c1925939b5072cd7'
             '67754ccca79e232a0c068294f7190d949bbee8623fed333edbb7b7f52dca3a3e'
             'c79e82423445434063ce5fc84db251580109b5ba5ba7c727357b395dd21faf76'
-            '3562a392621760912fb3f1cda9cef9a64ceb75551edec784eba4044f47d851f8')
+            '3562a392621760912fb3f1cda9cef9a64ceb75551edec784eba4044f47d851f8'
+            'ba7b12f31613d1ce83b451c3b4218d57083e20495602e110208e43f4efda5bbc')
 
 _bp='-mbranch-protection=standard'
 
@@ -60,6 +62,10 @@ prepare() {
   # [Touchpad] ButtonMaxMoveMm: reject presses while contacts move, and release
   # the button when 2+ contacts scroll.
   patch -d "iptsd-$_commit" -Np1 -i "$srcdir/0002-daemon-button-motion-gating.patch"
+
+  # [Touchpad] LiftGraceMs: bridge short contact dropouts (same tracking id, no
+  # lift / touch down). Idea from ProgrammerIn-wonderland's ELLX build.
+  patch -d "iptsd-$_commit" -Np1 -i "$srcdir/0003-daemon-lift-grace.patch"
 }
 
 build() {
