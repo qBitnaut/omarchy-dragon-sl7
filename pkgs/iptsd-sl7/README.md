@@ -81,12 +81,23 @@ Hyprland `input { touchpad { tap-to-click = false } }`. Not done by this package
 
 ## Patches and tuning
 
-- `patches/0001-daemon-require-button-hold-time.patch` (applied in `prepare()`):
+- `0001-daemon-require-button-hold-time.patch` (applied in `prepare()`):
   adds `[Touchpad] ButtonHoldMs` (default 70). The firmware's click bit must be
   held that long, with at least one contact on the pad, before `BTN_LEFT` is
   emitted; release is immediate. 0 disables it. Two-finger (clickfinger) clicks
   are unaffected. A spike longer than the value still passes (a 160 ms one needs
   more than 160, at that much latency).
+- `0002-daemon-button-motion-gating.patch` (applied in `prepare()`, after 0001):
+  adds `[Touchpad] ButtonMaxMoveMm` (default 1.5; 0 disables). When the click
+  bit rises, the positions of the valid contacts are snapshotted (normalized
+  0..1 positions times `Width`/`Height` in cm times 10 = mm). The press is
+  confirmed only if, for the whole `ButtonHoldMs`, no contact moves that far
+  from its snapshot; a contact appearing or disappearing counts as motion. A
+  rejected press stays ignored until the bit clears and rises again. After a
+  confirmed press, 2 or more contacts moving that far (scrolling) release the
+  button and suppress it until the bit clears; one moving contact keeps it held
+  (click and drag), and a change in the contact set re-measures from there.
+  Fixes repeated right clicks while two-finger scrolling with clickfinger.
 - `/etc/iptsd.d/92-iptsd-sl7-tuning.conf` overrides the 91 calibration;
   `/etc/iptsd.d/93-local-calibration.conf` (from `iptsd-sl7-calibrate`) overrides
   both. `iptsd-sl7-calibrate --revert` removes it.

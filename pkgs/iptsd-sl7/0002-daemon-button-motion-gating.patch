@@ -1,0 +1,237 @@
+diff --git i/etc/iptsd.conf w/etc/iptsd.conf
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -61,6 +61,16 @@
+ ##
+ # ButtonHoldMs = 70
+ 
++##
++## Motion gating for the button bit (in millimeters). A press is only confirmed if, during
++## the whole hold time, no contact moved this far from where it was when the bit was set
++## (a contact appearing or disappearing counts as motion). Once pressed, the button is
++## released and suppressed until the bit clears if 2 or more contacts move this far
++## (scrolling). One moving contact keeps the button held (click and drag).
++## 0 disables the gating. (Default 1.5)
++##
++# ButtonMaxMoveMm = 1.5
++
+ [Contacts]
+ ##
+ ## How the neutral value of the heatmap will be determined.
+diff --git i/src/apps/daemon/touch.hpp w/src/apps/daemon/touch.hpp
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -20,6 +20,7 @@
+ #include <chrono>
+ #include <cmath>
+ #include <iterator>
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <set>
+@@ -82,6 +83,19 @@
+ 	// When the button bit was first seen set.
+ 	std::chrono::steady_clock::time_point m_button_pending_since {};
+ 
++	// Maximum distance (mm) a contact may move while the button bit is held. 0 disables.
++	f64 m_button_max_move_mm = 0;
++
++	// Positions (mm) of the valid contacts in the current frame, by contact index.
++	std::map<usize, Vector2<f64>> m_positions {};
++
++	// Positions (mm) of the valid contacts when the button bit rose, or when the set of
++	// contacts last changed while the button was pressed.
++	std::map<usize, Vector2<f64>> m_button_anchor {};
++
++	// Whether the current press of the bit is ignored until the bit clears.
++	bool m_button_suppressed = false;
++
+ 	// The last debounced (emitted) state of the touchpad button.
+ 	bool m_button_state = false;
+ 
+@@ -137,6 +151,7 @@
+ 
+ 		m_button_debounce_ms = config.touchpad_button_debounce_ms;
+ 		m_button_hold_ms = config.touchpad_button_hold_ms;
++		m_button_max_move_mm = config.touchpad_button_max_move_mm;
+ 
+ 		const f64 diag = std::hypot(config.width, config.height);
+ 
+@@ -181,6 +196,9 @@
+ 
+ 		this->sync();
+ 
++		this->track_positions(contacts);
++		this->track_button_motion();
++
+ 		// The button bit may have been set before the hold time was over.
+ 		this->confirm_button();
+ 	}
+@@ -199,12 +217,18 @@
+ 		// contact-derived BTN_LEFT emitted/lifted in process()/lift_all().
+ 		if (!m_enabled || m_blocked) {
+ 			m_button_pending = false;
++
++			if (!button.active)
++				m_button_suppressed = false;
++
+ 			return;
+ 		}
+ 
+ 		// Release: immediate, and cancels a press that has not been confirmed yet.
+ 		if (!button.active) {
+ 			m_button_pending = false;
++			m_button_suppressed = false;
++			m_button_anchor.clear();
+ 
+ 			if (m_button_state)
+ 				this->emit_button(false);
+@@ -212,13 +236,14 @@
+ 			return;
+ 		}
+ 
+-		// Already pressed.
+-		if (m_button_state)
++		// Already pressed, or this press was rejected because of motion.
++		if (m_button_state || m_button_suppressed)
+ 			return;
+ 
+ 		if (!m_button_pending) {
+ 			m_button_pending = true;
+ 			m_button_pending_since = std::chrono::steady_clock::now();
++			m_button_anchor = m_positions;
+ 		}
+ 
+ 		this->confirm_button();
+@@ -232,8 +257,8 @@
+ 		if (!m_button_pending || m_button_state)
+ 			return;
+ 
+-		// A press without any contact on the pad is not a click.
+-		if (m_current.empty()) {
++		// A press without any (valid) contact on the pad is not a click.
++		if (m_current.empty() || (m_button_max_move_mm > 0 && m_positions.empty())) {
+ 			m_button_pending = false;
+ 			return;
+ 		}
+@@ -275,6 +300,10 @@
+ 		m_current.clear();
+ 		m_last.clear();
+ 		m_lift.clear();
++		m_positions.clear();
++		m_button_anchor.clear();
++		m_button_pending = false;
++		m_button_suppressed = false;
+ 		m_blocked = false;
+ 	}
+ 
+@@ -323,6 +352,87 @@
+ 	}
+ 
+ 	/*!
++	 * Stores the positions of all valid contacts in millimeters.
++	 *
++	 * Contact positions are normalized to 0..1, config.width / config.height are in cm.
++	 *
++	 * @param[in] contacts All currently active contacts.
++	 */
++	void track_positions(const std::vector<contacts::Contact<f64>> &contacts)
++	{
++		m_positions.clear();
++
++		if (m_blocked)
++			return;
++
++		for (const contacts::Contact<f64> &contact : contacts) {
++			if (!contact.index.has_value() || !contact.valid.value_or(true))
++				continue;
++
++			m_positions[contact.index.value()] = Vector2<f64> {
++				contact.mean.x() * m_config.width * 10,
++				contact.mean.y() * m_config.height * 10,
++			};
++		}
++	}
++
++	/*!
++	 * Largest distance (mm) any contact moved away from the button anchor.
++	 *
++	 * @return nothing if the set of contacts differs from the one in the anchor.
++	 */
++	[[nodiscard]] std::optional<f64> button_displacement() const
++	{
++		if (m_positions.size() != m_button_anchor.size())
++			return std::nullopt;
++
++		f64 max = 0;
++
++		for (const auto &[index, position] : m_positions) {
++			const auto anchor = m_button_anchor.find(index);
++
++			if (anchor == m_button_anchor.cend())
++				return std::nullopt;
++
++			max = std::max(max, (position - anchor->second).norm());
++		}
++
++		return max;
++	}
++
++	/*!
++	 * Rejects button presses that happen while contacts move.
++	 *
++	 * Before the press is confirmed, any motion (or a contact appearing / disappearing)
++	 * discards the attempt until the bit clears. After it, 2 or more moving contacts
++	 * (scrolling) release the button and suppress it until the bit clears.
++	 */
++	void track_button_motion()
++	{
++		if (m_button_max_move_mm <= 0)
++			return;
++
++		if (m_button_pending) {
++			const std::optional<f64> d = this->button_displacement();
++
++			if (!d.has_value() || d.value() >= m_button_max_move_mm) {
++				m_button_pending = false;
++				m_button_suppressed = true;
++			}
++		} else if (m_button_state) {
++			const std::optional<f64> d = this->button_displacement();
++
++			if (!d.has_value()) {
++				// A contact came or went, measure from here on.
++				m_button_anchor = m_positions;
++			} else if (m_positions.size() >= 2 && d.value() >= m_button_max_move_mm) {
++				m_button_suppressed = true;
++				this->emit_button(false);
++			}
++		}
++	}
++
++	/*!
+ 	 * Builds the difference between the current and the last frame.
+ 	 * Contacts that were present in the last frame but not in this one have to be lifted.
+ 	 *
+diff --git i/src/core/generic/config.hpp w/src/core/generic/config.hpp
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -36,6 +36,7 @@
+ 	f64 touchpad_overshoot = 0.5;
+ 	f64 touchpad_button_debounce_ms = 25;
+ 	f64 touchpad_button_hold_ms = 70;
++	f64 touchpad_button_max_move_mm = 1.5;
+ 
+ 	// [Contacts]
+ 	std::string contacts_neutral = "mode";
+diff --git i/src/core/linux/config-loader.hpp w/src/core/linux/config-loader.hpp
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -162,6 +162,7 @@
+ 		this->get(ini, "Touchpad", "Overshoot", m_config.touchpad_overshoot);
+ 		this->get(ini, "Touchpad", "ButtonDebounceMs", m_config.touchpad_button_debounce_ms);
+ 		this->get(ini, "Touchpad", "ButtonHoldMs", m_config.touchpad_button_hold_ms);
++		this->get(ini, "Touchpad", "ButtonMaxMoveMm", m_config.touchpad_button_max_move_mm);
+ 
+ 		this->get(ini, "Contacts", "Neutral", m_config.contacts_neutral);
+ 		this->get(ini, "Contacts", "NeutralValue", m_config.contacts_neutral_value);
