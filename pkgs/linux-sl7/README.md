@@ -518,6 +518,16 @@ next to it.
   `ir:flash-4`, 12.5 mA, 10 ms, torch 5 mA). They sit in every DTB but bind only on the IR test
   boot. Nothing refers to them; the camera node has no `leds` link and patch 0041 is unchanged.
 
+**IR stage A safety fix (7.2.8-14, patch 0080).** The CHAN_TIMER field very likely counts
+(n + 1) x 10 ms (the driver's own 1280 ms ceiling does not fit n x 10 ms in 7 bits, and the reset
+value 0x13 is a round 200 ms only as 19 + 1), while the stock driver writes n = timeout / 10. For IR
+LEDs 0080 now writes n = timeout / 10 - 1 (at least 0 = 10 ms), so a requested 10 ms is 10 ms and
+the 100 ms clamp is a real 100 ms, not about 110 ms. If the field is really n x 10 ms the pulse is
+shorter, never longer. Other LEDs keep the stock encoding (the off-by-one is an upstream question
+once measured). The probe and remove register snapshots now name every register (4ch: CHAN_TIMER
+0x3e-0x41, ITARGET 0x42-0x45, CHAN_STROBE 0x4a-0x4d). Checked as an aarch64 object compile only
+(clang, never run).
+
 Nothing fires the emitter. Requires omarchy-surface-sl7 22 or later for the load gate. Plan:
 `Research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md`.
 

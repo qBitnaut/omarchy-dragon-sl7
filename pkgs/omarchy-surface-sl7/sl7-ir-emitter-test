@@ -26,7 +26,8 @@
 #           "FIRE CHANNEL N" at the confirmation prompt
 #       Per pulse it writes, in this order: flash_strobe=0, flash_brightness=
 #       12500, flash_timeout=10000 (each read back), then flash_strobe=1, waits
-#       50 ms (the PMIC safety timer ended the pulse after 10 ms) and writes
+#       50 ms (the PMIC safety timer ends the pulse after 10 ms of hardware
+#       time with the 0080 encoding, 0.125 mC) and writes
 #       flash_strobe=0. Then it reads flash_fault: anything but
 #       flash-timeout-exceeded stops the run. On any error, signal or exit every
 #       ir:flash-* LED gets flash_strobe=0.
@@ -56,6 +57,15 @@
 # per run, at most 12 per boot); there is no option to raise them. The driver
 # clamps independently (patch 0080: 700 mA, 100 ms) and the DT limits are the
 # same 12.5 mA / 10 ms. Raising any of them is a later, reviewed step.
+#
+# Effective pulse and charge. The PMIC safety timer field very likely counts
+# (n + 1) x 10 ms, and the stock driver writes n = timeout / 10, so a stock
+# "10 ms" would run about 20 ms. Patch 0080 programs n = timeout / 10 - 1 for
+# IR LEDs, so the hardware pulse equals the requested 10 ms (if the field is
+# really n x 10 ms the pulse is only shorter). One pulse is therefore at most
+# 12.5 mA x 10 ms = 0.125 mC, about 11 % of Windows' 700 mA x 1.59 ms = 1.11 mC
+# per lit frame (the 1.8 % figure is the current only, not the charge). On a
+# kernel without the 0080 encoding fix the pulse would be about 20 ms, 0.25 mC.
 #
 # Every action is logged to /var/log/sl7-ir-emitter-test.log and the journal
 # (tag sl7-ir-emitter-test), and echoed.
@@ -573,7 +583,9 @@ cat <<EOF
   IR EMITTER TEST: CHANNEL $channel  ($repeat pulse(s) of $((FIRE_UA / 1000)).5 mA x $((FIRE_TIMEOUT_US / 1000)) ms)
 
   Read the checklist. This lights an infrared emitter that nobody has
-  characterised. The values are 1.8 % of Windows' current for 10 ms.
+  characterised. Each pulse is 1.8 % of Windows' current for 10 ms of
+  hardware time: 0.125 mC, about 11 % of Windows' charge per lit frame
+  (700 mA x 1.59 ms = 1.11 mC).
 
     [ ] Nobody looks at the bezel. The laptop faces a matte white card or a
         wall at 30 cm or more.

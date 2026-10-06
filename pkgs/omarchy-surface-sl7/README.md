@@ -575,6 +575,15 @@ captures with no pulses to check that the baseline is stable (`STABLE`/`UNSTABLE
 LED and needs no approval file, but still the root, IR test entry and bridge. Exit code 8 is a
 `--watch` problem (bridge, capture or analysis).
 
+**IR stage A safety fix (omarchy-surface-sl7 26, with linux-sl7 7.2.8-14).** The PMIC safety timer
+very likely counts (n + 1) x 10 ms while the stock driver writes n = timeout / 10, so a requested
+10 ms would have run about 20 ms. Patch 0080 now programs n - 1 for IR LEDs, so the hardware pulse
+equals the requested 10 ms. The tool's comments and confirmation text now state the effective
+charge: one pulse is 12.5 mA x 10 ms = 0.125 mC, about 11 % of Windows' 700 mA x 1.59 ms = 1.11 mC
+per lit frame (the old "1.8 %" is the current only). Limits (12.5 mA, 10 ms, 3 pulses per run, 12
+per boot) are unchanged. Needs linux-sl7 7.2.8-14 or later for the encoding fix; on 7.2.8-13 the
+same run is about 20 ms, 0.25 mC.
+
 ### 12b. Camera probe: `sl7-ir-probe` (Phase A of IR face unlock)
 
 Read-only check of the camera stack on a `linux-sl7` 7.2.8-3 or later kernel on the 13.8 inch
