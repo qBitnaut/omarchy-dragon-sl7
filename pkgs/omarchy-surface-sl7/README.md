@@ -556,6 +556,25 @@ signal or exit it writes `flash_strobe=0` to every `ir:flash-*` LED. The limits 
 the script: no option raises them. Without the approval file, as shipped, the tool exits 3 and
 touches nothing.
 
+**`--watch` (IR camera detector).** `sudo sl7-ir-emitter-test --i-have-read-the-plan --channel N
+--repeat 3 --watch` adds the VD55G0 as a detector to the same run (every gate, the 3 pulses per run,
+the 12 per boot and the typed phrase are unchanged). It needs `sl7-ir-bridge` active (checked, clear
+error otherwise), `v4l-utils` and `python3`. After the confirmation it captures from
+`/dev/v4l/by-id/sl7-ir-camera` with `v4l2-ctl` into a private directory under `/run`, waits for the
+black frame and 35 real frames (about 1 s, auto-exposure settling), fires, keeps capturing 1 s, then
+computes the mean and 99th percentile of every frame (frame 0 is the bridge's black frame and is
+skipped). The baseline is the median of the lead frames; a frame is flagged when its mean or p99 is
+more than 5 robust SDs (MAD) above it, and flags are matched to the logged FIRE times (window from
+35 ms before to 150 ms after, since the loopback frame arrives after the exposure). Verdict per
+channel: `DETECTED` (every pulse spiked, 3 of 3), `WEAK` (some) or `NONE`. Setup: white paper about
+5 cm in front of the camera, angled so light from beside the lens bounces back, dim room, do not
+move. A 10 ms pulse can fall between exposures, so `NONE` is not proof that a channel is dark.
+No image is ever saved: only the per-frame statistics (a CSV next to the log, plus the summary lines
+in the log and journal) are kept, and the raw capture is deleted on exit. `--watch-only-test`
+captures with no pulses to check that the baseline is stable (`STABLE`/`UNSTABLE`); it touches no
+LED and needs no approval file, but still the root, IR test entry and bridge. Exit code 8 is a
+`--watch` problem (bridge, capture or analysis).
+
 ### 12b. Camera probe: `sl7-ir-probe` (Phase A of IR face unlock)
 
 Read-only check of the camera stack on a `linux-sl7` 7.2.8-3 or later kernel on the 13.8 inch

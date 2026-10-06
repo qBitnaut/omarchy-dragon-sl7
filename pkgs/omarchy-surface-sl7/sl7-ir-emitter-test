@@ -31,6 +31,27 @@
 #       flash-timeout-exceeded stops the run. On any error, signal or exit every
 #       ir:flash-* LED gets flash_strobe=0.
 #
+#   sudo sl7-ir-emitter-test --i-have-read-the-plan --channel N [--repeat R] --watch
+#       Same as above (every gate, limit and the typed phrase unchanged), plus
+#       an IR camera detector. Before the pulses it starts a capture from the
+#       bridge loopback /dev/v4l/by-id/sl7-ir-camera (sl7-ir-bridge must be
+#       active; v4l-utils and python3 are needed) into a private directory under
+#       /run, waits for about 1 s of frames (auto-exposure settle), fires the
+#       pulses, keeps capturing 1 s more, then analyses GREY 644x604 frames: per
+#       frame mean and 99th percentile, baseline = median of the lead frames,
+#       a frame is flagged when its mean or p99 exceeds the baseline by more
+#       than 5 robust SDs (MAD based). Flags are aligned to the FIRE times.
+#       Verdict per channel: DETECTED (every pulse spikes, 3 of 3 at R = 3),
+#       WEAK (some), NONE. Only the per-frame statistics are kept (CSV next to
+#       the log); no image is ever saved and the raw capture is deleted on exit.
+#       Setup: white paper about 5 cm in front of the camera, angled so light
+#       from beside the lens bounces back, dim room, do not move.
+#
+#   sudo sl7-ir-emitter-test --watch-only-test
+#       A capture with no pulses (is the baseline stable?). Touches no LED, needs
+#       no approval file and no typed phrase, but still needs root and the IR
+#       test boot entry, and the same bridge.
+#
 # The limits are constants in this file (12500 uA, 10000 us, at most 3 pulses
 # per run, at most 12 per boot); there is no option to raise them. The driver
 # clamps independently (patch 0080: 700 mA, 100 ms) and the DT limits are the
@@ -41,7 +62,7 @@
 #
 # Exit codes: 0 done, 2 usage, 3 Stage B not approved, 4 not the IR test boot
 # or hardware not as expected, 5 fault or limit, 6 sysfs write/readback failed,
-# 7 not confirmed.
+# 7 not confirmed, 8 --watch problem (bridge, capture or analysis).
 #
 # SL7_IR_TEST_ROOT=DIR runs the whole tool against a fake tree under DIR (proc,
 # sys, etc, run, var) for testing: every path below is prefixed with it and
@@ -55,6 +76,19 @@ readonly MAX_PULSES_PER_BOOT=12
 readonly PRE_PULSE_GAP_S=1
 readonly POST_STROBE_WAIT_S=0.05
 readonly ONLY_FAULT=flash-timeout-exceeded
+
+# --watch: GREY 644x604 tight from the bridge loopback. The bridge streams at
+# about 35 fps and ends a session after 10 s, so the frame counts stay far below
+# that. LEAD = real frames (after the bridge's black frame) before the first pulse.
+readonly CAM_W=644
+readonly CAM_H=604
+readonly FRAME_BYTES=$((CAM_W * CAM_H))
+readonly WATCH_LEAD_FRAMES=35
+readonly WATCH_TAIL_S=1
+readonly WATCH_ONLY_AFTER_FRAMES=100
+readonly WATCH_MAX_FRAMES=300
+readonly WATCH_READY_TIMEOUT_S=6
+readonly WATCH_TIMEOUT_S=12
 
 fake=0
 R=${SL7_IR_TEST_ROOT:-}
@@ -73,6 +107,7 @@ modparam=$R/sys/module/leds_qcom_flash/parameters/ir_test
 approval=$R/etc/omarchy-surface-sl7/ir-stage-b-approved
 logf=$R/var/log/sl7-ir-emitter-test.log
 rundir=$R/run/sl7-ir-emitter-test
+camdev=$R/dev/v4l/by-id/sl7-ir-camera
 
 me=sl7-ir-emitter-test
 channel=
@@ -80,6 +115,11 @@ repeat=1
 read_plan=0
 status_only=0
 armed_touch=0
+watch=0
+watch_only=0
+channel_given=0
+cap_pid=
+watchdir=
 
 usage() {
   sed -n '2,/^set -uo/{/^set -uo/!p}' "$0" | sed 's/^# \{0,1\}//' >&2
@@ -110,7 +150,23 @@ disarm_all() {
   done
   return 0
 }
-trap disarm_all EXIT
+
+# Capture helpers (only used by --watch / --watch-only-test).
+stop_capture() {
+  if [[ -n $cap_pid ]] && kill -0 "$cap_pid" 2>/dev/null; then
+    kill "$cap_pid" 2>/dev/null || true
+    wait "$cap_pid" 2>/dev/null || true
+  fi
+  cap_pid=
+}
+
+# Emitter first, then the capture, then the raw frames (never kept).
+on_exit() {
+  disarm_all
+  stop_capture
+  if [[ -n $watchdir && $watchdir == "$rundir"/watch.* ]]; then rm -rf -- "$watchdir"; fi
+}
+trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
@@ -153,6 +209,8 @@ print_status() {
   if cmdline_has 'panic=5'; then echo "cmdline panic=5: yes"; else echo "cmdline panic=5: no"; fi
   if [[ -r $modparam ]]; then
     echo "leds_qcom_flash: loaded, ir_test=$(rd "$modparam")"
+  elif [[ -e $modparam ]]; then
+    echo "leds_qcom_flash: loaded (ir_test is root-only; run with sudo to read it)"
   else
     echo "leds_qcom_flash: not loaded"
   fi
@@ -171,9 +229,11 @@ print_status() {
 while (($#)); do
   case $1 in
     --i-have-read-the-plan) read_plan=1 ;;
-    --channel) channel=${2:-}; shift ;;
+    --channel) channel=${2:-}; channel_given=1; shift ;;
     --repeat) repeat=${2:-}; shift ;;
     --status) status_only=1 ;;
+    --watch) watch=1 ;;
+    --watch-only-test) watch_only=1 ;;
     -h | --help) usage ;;
     *) echo "sl7-ir-emitter-test: unknown argument: $1" >&2; usage ;;
   esac
@@ -185,18 +245,28 @@ if ((status_only)); then
   exit 0
 fi
 
-[[ $read_plan -eq 1 ]] || { echo "sl7-ir-emitter-test: --i-have-read-the-plan is required" >&2; usage; }
-[[ $channel =~ ^[1-4]$ ]] || { echo "sl7-ir-emitter-test: --channel N (1..4) is required" >&2; usage; }
-[[ $repeat =~ ^[1-9][0-9]*$ ]] && ((repeat <= MAX_REPEAT)) || { echo "sl7-ir-emitter-test: --repeat must be 1..$MAX_REPEAT" >&2; usage; }
+if ((watch_only)); then
+  if ((watch || channel_given)) || [[ $repeat != 1 ]]; then
+    echo "sl7-ir-emitter-test: --watch-only-test takes no --channel, --repeat or --watch (it fires nothing)" >&2
+    usage
+  fi
+else
+  [[ $read_plan -eq 1 ]] || { echo "sl7-ir-emitter-test: --i-have-read-the-plan is required" >&2; usage; }
+  [[ $channel =~ ^[1-4]$ ]] || { echo "sl7-ir-emitter-test: --channel N (1..4) is required" >&2; usage; }
+  [[ $repeat =~ ^[1-9][0-9]*$ ]] && ((repeat <= MAX_REPEAT)) || { echo "sl7-ir-emitter-test: --repeat must be 1..$MAX_REPEAT" >&2; usage; }
+fi
 
 # ---- gate 1: Stage B approval (the Stage A refusal) -------------------------
-if [[ ! -e $approval && ! -L $approval ]]; then
-  die 3 "Stage B is not approved: $approval does not exist. Only Chris creates it, by hand, after reading the plan. Nothing was touched."
-fi
-[[ -f $approval && ! -L $approval ]] || die 3 "$approval is not a regular file (or is a symlink)"
-if ((!fake)); then
-  [[ $(stat -c %u -- "$approval") -eq 0 ]] || die 3 "$approval is not owned by root"
-  (( 8#$(stat -c %a -- "$approval") & 8#022 )) && die 3 "$approval is writable by group or others"
+# --watch-only-test fires nothing, so it does not need the approval.
+if ((!watch_only)); then
+  if [[ ! -e $approval && ! -L $approval ]]; then
+    die 3 "Stage B is not approved: $approval does not exist. Only Chris creates it, by hand, after reading the plan. Nothing was touched."
+  fi
+  [[ -f $approval && ! -L $approval ]] || die 3 "$approval is not a regular file (or is a symlink)"
+  if ((!fake)); then
+    [[ $(stat -c %u -- "$approval") -eq 0 ]] || die 3 "$approval is not owned by root"
+    (( 8#$(stat -c %a -- "$approval") & 8#022 )) && die 3 "$approval is writable by group or others"
+  fi
 fi
 
 # ---- gate 2: root and the IR test boot --------------------------------------
@@ -207,18 +277,6 @@ cmdline_has 'sl7[.]ir_test=1' || die 4 "not the IR test boot entry: sl7.ir_test=
 cmdline_has 'panic=5' || die 4 "panic=5 is not on the kernel command line (the IR test entry sets it)"
 [[ -r $modparam && $(rd "$modparam") == Y ]] || die 4 "leds_qcom_flash is not loaded with ir_test=Y"
 
-led=$leds/ir:flash-$channel
-[[ -d $led ]] || die 4 "no LED ir:flash-$channel in $leds"
-
-# ---- gate 3: hardware as expected, before any write -------------------------
-for d in "$leds"/ir:flash-*; do
-  [[ -d $d ]] || continue
-  [[ $(rd "$d/flash_strobe") == 0 ]] || die 4 "${d##*/} reports flash_strobe=$(rd "$d/flash_strobe") before the test"
-done
-max_ua=$(rd "$led/max_flash_brightness")
-max_us=$(rd "$led/max_flash_timeout")
-[[ $max_ua =~ ^[0-9]+$ ]] && ((max_ua <= FIRE_UA)) || die 4 "max_flash_brightness is '$max_ua', expected <= $FIRE_UA"
-[[ $max_us =~ ^[0-9]+$ ]] && ((max_us <= FIRE_TIMEOUT_US)) || die 4 "max_flash_timeout is '$max_us', expected <= $FIRE_TIMEOUT_US"
 
 check_fault() { # WHEN
   local f t bad=""
@@ -227,7 +285,22 @@ check_fault() { # WHEN
   for t in $f; do [[ $t == "$ONLY_FAULT" ]] || bad="$bad $t"; done
   [[ -z $bad ]] || die 5 "fault on ir:flash-$channel ($1):$bad"
 }
-check_fault "before"
+
+if ((!watch_only)); then
+  led=$leds/ir:flash-$channel
+  [[ -d $led ]] || die 4 "no LED ir:flash-$channel in $leds"
+
+  # ---- gate 3: hardware as expected, before any write -----------------------
+  for d in "$leds"/ir:flash-*; do
+    [[ -d $d ]] || continue
+    [[ $(rd "$d/flash_strobe") == 0 ]] || die 4 "${d##*/} reports flash_strobe=$(rd "$d/flash_strobe") before the test"
+  done
+  max_ua=$(rd "$led/max_flash_brightness")
+  max_us=$(rd "$led/max_flash_timeout")
+  [[ $max_ua =~ ^[0-9]+$ ]] && ((max_ua <= FIRE_UA)) || die 4 "max_flash_brightness is '$max_ua', expected <= $FIRE_UA"
+  [[ $max_us =~ ^[0-9]+$ ]] && ((max_us <= FIRE_TIMEOUT_US)) || die 4 "max_flash_timeout is '$max_us', expected <= $FIRE_TIMEOUT_US"
+  check_fault "before"
+fi
 
 # ---- limits: one run at a time, pulses per boot -----------------------------
 mkdir -p "$rundir" && chmod 0700 "$rundir" 2>/dev/null || true
@@ -235,7 +308,261 @@ exec 9>"$rundir/lock"
 flock -n 9 || die 5 "another sl7-ir-emitter-test is running"
 pulses=$(rd "$rundir/pulses")
 [[ $pulses =~ ^[0-9]+$ ]] || pulses=0
-((pulses + repeat <= MAX_PULSES_PER_BOOT)) || die 5 "pulse limit for this boot: $pulses fired, $repeat requested, limit $MAX_PULSES_PER_BOOT. Reboot to reset."
+if ((!watch_only)); then
+  ((pulses + repeat <= MAX_PULSES_PER_BOOT)) || die 5 "pulse limit for this boot: $pulses fired, $repeat requested, limit $MAX_PULSES_PER_BOOT. Reboot to reset."
+fi
+
+# ---- --watch: detector prerequisites, checked before the prompt -------------
+if ((watch || watch_only)); then
+  command -v python3 >/dev/null 2>&1 || die 8 "python3 is required for the frame statistics"
+  command -v v4l2-ctl >/dev/null 2>&1 || die 8 "v4l2-ctl is required (pacman -S v4l-utils)"
+  if ((!fake)) && ! systemctl is-active --quiet sl7-ir-bridge.service; then
+    die 8 "sl7-ir-bridge.service is not active (the detector reads the IR camera through it). Check: systemctl status sl7-ir-bridge; journalctl -u sl7-ir-bridge. Nothing was fired."
+  fi
+  if ((fake)); then [[ -e $camdev ]] || die 8 "${camdev#"$R"} does not exist"; else [[ -c $camdev ]] || die 8 "${camdev#"$R"} does not exist (is v4l2loopback loaded and the bridge running?)"; fi
+  camfmt=$(v4l2-ctl -d "$camdev" --get-fmt-video 2>&1) || die 8 "cannot query the format of ${camdev#"$R"}: $camfmt"
+  if ! grep -qE "Width/Height *: *$CAM_W/$CAM_H" <<<"$camfmt" || ! grep -q "'GREY'" <<<"$camfmt" || ! grep -qE "Bytes per Line *: *$CAM_W\$" <<<"$camfmt"; then
+    die 8 "${camdev#"$R"} is not GREY ${CAM_W}x${CAM_H} with stride $CAM_W (the bridge's tight format): $(tr -s '[:space:]' ' ' <<<"$camfmt")"
+  fi
+fi
+
+# ---- --watch helpers ---------------------------------------------------------
+# Frame statistics: mean and p99 per frame, robust baseline, flags, verdict. The
+# raw frames are only read, never written anywhere else.
+read -r -d '' WATCH_PY <<'PYEOF'
+import collections
+import re
+import sys
+import time
+
+W, H = int(sys.argv[1]), int(sys.argv[2])
+cap, caplog = sys.argv[3], sys.argv[4]
+ready_idx = int(sys.argv[5])
+t_ready = float(sys.argv[6])
+csvp, mode, chan = sys.argv[7], sys.argv[8], sys.argv[9]
+fires = [float(x) for x in sys.argv[10:]]
+
+K = 5.0
+LEAD_SKIP = 8
+NOMINAL_FPS = 35.0
+WIN_BEFORE, WIN_AFTER = 0.035, 0.15
+FLOOR_MEAN, FLOOR_P99 = 0.02, 0.5
+fsz = W * H
+
+
+def med(v):
+    s = sorted(v)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def robust(v, floor):
+    m = med(v)
+    return m, max(1.4826 * med([abs(x - m) for x in v]), floor)
+
+
+def fail(msg):
+    print("ERROR " + msg)
+    sys.exit(3)
+
+
+means, p99s = [], []
+partial = 0
+thr = 0.99 * fsz
+with open(cap, "rb") as f:
+    while True:
+        b = f.read(fsz)
+        if len(b) < fsz:
+            partial = len(b)
+            break
+        c = collections.Counter(b)
+        means.append(sum(k * v for k, v in c.items()) / fsz)
+        cum = 0
+        for k in sorted(c):
+            cum += c[k]
+            if cum >= thr:
+                p99s.append(k)
+                break
+n = len(means)
+if n < 2 + LEAD_SKIP + 10:
+    fail("only %d whole frames in the capture (%d trailing bytes)" % (n, partial))
+if mode == "pulses" and not fires:
+    fail("no FIRE times given")
+
+# Frame times in the CLOCK_BOOTTIME domain of /proc/uptime. Preferred: the
+# monotonic timestamps v4l2-ctl --verbose prints per frame (shifted by the
+# boottime-monotonic offset, which is 0 unless the machine suspended). Fallback:
+# nominal fps anchored at the moment the lead frames were complete.
+tsv = []
+try:
+    with open(caplog, errors="replace") as fh:
+        tsv = [float(x) for x in re.findall(r"\bts: *(\d+\.\d+)", fh.read())]
+except OSError:
+    pass
+off = time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+t = None
+tmode = "nominal-%dfps-anchored-at-lead-ready (timestamps unusable)" % NOMINAL_FPS
+fps = NOMINAL_FPS
+if len(tsv) == n:
+    tb = [x + off for x in tsv]
+    if (all(tb[i + 1] >= tb[i] for i in range(1, n - 1)) and tb[-1] > tb[1]
+            and abs(tb[ready_idx] - t_ready) < 0.5):
+        t = tb
+        fps = (n - 2) / (tb[-1] - tb[1])
+        tmode = "v4l2-timestamps"
+if t is None:
+    t = [t_ready + (k - ready_idx) / fps for k in range(n)]
+
+if mode == "pulses":
+    lead_end = min(fires) - WIN_BEFORE - 0.05
+    lead = [k for k in range(1 + LEAD_SKIP, n) if t[k] < lead_end]
+else:
+    lead = list(range(1 + LEAD_SKIP, min(n, ready_idx + 1)))
+if len(lead) < 10:
+    fail("only %d usable lead frames before the first pulse" % len(lead))
+
+bm, sm = robust([means[k] for k in lead], FLOOR_MEAN)
+bp, sp = robust([p99s[k] for k in lead], FLOOR_P99)
+half = len(lead) // 2
+drift = (med([means[k] for k in lead[half:]])
+         - med([means[k] for k in lead[:half]]))
+dm = [x - bm for x in means]
+dp = [x - bp for x in p99s]
+fm = [k >= 1 + LEAD_SKIP and dm[k] > K * sm for k in range(n)]
+fp = [k >= 1 + LEAD_SKIP and dp[k] > K * sp for k in range(n)]
+flag = [fm[k] or fp[k] for k in range(n)]
+
+wins = []
+for f in fires:
+    wins.append([k for k in range(1 + LEAD_SKIP, n)
+                 if f - WIN_BEFORE <= t[k] <= f + WIN_AFTER])
+inwin = {}
+for i, ks in enumerate(wins, 1):
+    for k in ks:
+        inwin.setdefault(k, []).append(i)
+
+t0 = min(fires) if fires else t_ready
+show = sorted(set(inwin) | set(k for k in range(n) if flag[k]))
+print("frame  t-rel     mean   d(mean)  [sd]     p99  d(p99)  [sd]   marks")
+for k in show:
+    marks = "".join("P%d " % i for i in inwin.get(k, []))
+    marks += ("M" if fm[k] else "") + ("Q" if fp[k] else "")
+    print("%5d %+8.3fs %8.3f %+8.3f %+7.1f %6d %+7.1f %+7.1f   %s" % (
+        k, t[k] - t0, means[k], dm[k], dm[k] / sm, p99s[k], dp[k], dp[k] / sp,
+        marks))
+
+if csvp:
+    with open(csvp, "w") as fh:
+        fh.write("frame,t_boottime,mean,p99,d_mean,d_p99,flag\n")
+        for k in range(n):
+            fh.write("%d,%.4f,%.4f,%d,%.4f,%.1f,%d\n" % (
+                k, t[k], means[k], p99s[k], dm[k], dp[k], int(flag[k])))
+    print("SUMMARY per-frame statistics (no images): %s" % csvp)
+
+print("SUMMARY capture: %d frames (frame 0 = bridge black frame, skipped), "
+      "%d trailing bytes, fps %.2f, timing %s" % (n, partial, fps, tmode))
+print("SUMMARY baseline: %d lead frames, mean %.3f (robust sd %.3f), p99 %.1f "
+      "(robust sd %.2f), lead drift %+.3f, threshold %.0f sd" % (
+          len(lead), bm, sm, bp, sp, drift, K))
+
+if mode == "pulses":
+    hits = 0
+    for i, (f, ks) in enumerate(zip(fires, wins), 1):
+        hit = any(flag[k] for k in ks)
+        hits += int(hit)
+        if ks:
+            xm = max(dm[k] for k in ks)
+            xp = max(dp[k] for k in ks)
+            cov = "" if t[-1] >= f + WIN_AFTER - 1.0 / fps else " (capture ended inside the window)"
+            info = "frames %d-%d, max d(mean) %+.3f (%.1f sd), max d(p99) %+.1f (%.1f sd)%s" % (
+                ks[0], ks[-1], xm, xm / sm, xp, xp / sp, cov)
+        else:
+            info = "no frame in the window (not covered by the capture)"
+        print("SUMMARY pulse %d/%d at t=%.3f: %s: %s" % (
+            i, len(fires), f, "SPIKE" if hit else "no spike", info))
+    outside = sum(1 for k in range(n) if flag[k] and k not in inwin)
+    print("SUMMARY flagged frames outside the pulse windows: %d%s" % (
+        outside, " (baseline is noisy, treat the verdict with care)" if outside >= 3 else ""))
+    verdict = "DETECTED" if hits == len(fires) else ("WEAK" if hits else "NONE")
+    print("VERDICT channel %s: %s (%d of %d pulses spiked)" % (
+        chan, verdict, hits, len(fires)))
+else:
+    nf = sum(1 for k in range(1 + LEAD_SKIP, n) if flag[k])
+    rng = max(means[k] for k in range(1 + LEAD_SKIP, n)) - min(
+        means[k] for k in range(1 + LEAD_SKIP, n))
+    print("SUMMARY watch-only: %d of %d frames flagged, mean range %.3f, "
+          "p99 range %d" % (
+              nf, n - 1 - LEAD_SKIP, rng,
+              max(p99s[1 + LEAD_SKIP:]) - min(p99s[1 + LEAD_SKIP:])))
+    print("VERDICT watch-only baseline: %s" % ("STABLE" if nf == 0 else "UNSTABLE"))
+PYEOF
+
+now() { local u _; read -r u _ </proc/uptime; printf '%s' "$u"; } # CLOCK_BOOTTIME s
+
+start_capture() { # FRAMES
+  local frames=$1
+  ((frames > WATCH_MAX_FRAMES)) && frames=$WATCH_MAX_FRAMES
+  watchdir=$(mktemp -d "$rundir/watch.XXXXXX") || die 8 "cannot create a private directory under ${rundir#"$R"}"
+  chmod 0700 "$watchdir" 2>/dev/null || true
+  cap=$watchdir/cap.raw
+  caplog=$watchdir/cap.log
+  t_launch=$(now)
+  log "WATCH capture start t_boottime=$t_launch frames=$frames dev=${camdev#"$R"} (raw frames in ${watchdir#"$R"}, deleted on exit, never saved as images)"
+  timeout -k 1 "$WATCH_TIMEOUT_S" v4l2-ctl -d "$camdev" --stream-mmap --stream-count="$frames" \
+    --stream-to="$cap" --verbose >"$caplog" 2>&1 &
+  cap_pid=$!
+}
+
+# Block until the black frame plus WATCH_LEAD_FRAMES real frames are in the file.
+wait_lead() {
+  local need=$(((1 + WATCH_LEAD_FRAMES) * FRAME_BYTES)) size i=0 max=$((WATCH_READY_TIMEOUT_S * 50))
+  while :; do
+    size=$(stat -c %s -- "$cap" 2>/dev/null || echo 0)
+    ((size >= need)) && break
+    kill -0 "$cap_pid" 2>/dev/null ||
+      die 8 "the capture ended before the lead frames arrived ($size bytes; v4l2-ctl said: $(tail -n 2 "$caplog" 2>/dev/null | tr '\n' ' ')). Nothing was fired."
+    ((++i > max)) && die 8 "no camera frames within ${WATCH_READY_TIMEOUT_S} s ($size bytes; check journalctl -u sl7-ir-bridge). Nothing was fired."
+    sleep 0.02
+  done
+  t_ready=$(now)
+  log "WATCH lead frames ready: $((1 + WATCH_LEAD_FRAMES)) frames (1 black + $WATCH_LEAD_FRAMES), t_boottime=$t_ready, $((size / FRAME_BYTES)) frames on disk"
+}
+
+finish_capture() {
+  local rc=0
+  [[ -n $cap_pid ]] || return 0
+  wait "$cap_pid" || rc=$?
+  cap_pid=
+  log "WATCH capture ended rc=$rc ($(($(stat -c %s -- "$cap" 2>/dev/null || echo 0) / FRAME_BYTES)) whole frames; rc 124 = $WATCH_TIMEOUT_S s timeout)"
+}
+
+run_analysis() { # MODE CHANNEL [FIRE_TS...]
+  local mode=$1 ch=$2 csv="" out line rc=0
+  shift 2
+  if [[ -d ${logf%/*} ]]; then
+    csv=${logf%.log}-frames-$(date -u +%Y%m%dT%H%M%SZ)-$mode${ch:+-ch$ch}.csv
+  fi
+  out=$(python3 -c "$WATCH_PY" "$CAM_W" "$CAM_H" "$cap" "$caplog" "$WATCH_LEAD_FRAMES" "$t_ready" "$csv" "$mode" "$ch" "$@" 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case $line in
+      SUMMARY\ * | VERDICT\ *) log "$line" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <<<"$out"
+  ((rc == 0)) || die 8 "the frame analysis failed (rc $rc); any pulses were already fired and are counted. The raw capture is deleted."
+}
+
+# ---- --watch-only-test: no photons, no confirmation --------------------------
+if ((watch_only)); then
+  log "START watch-only-test (no pulses) user=${SUDO_USER:-$(id -un)} kernel=$(uname -r) cmdline='$(rd "$cmdline")'"
+  echo "Capturing now, no pulses. Keep the view as for the pulse test: white paper about 5 cm in front of the camera, dim room, do not move."
+  start_capture $((1 + WATCH_LEAD_FRAMES + WATCH_ONLY_AFTER_FRAMES))
+  wait_lead
+  finish_capture
+  run_analysis only ""
+  log "DONE watch-only-test. Raw capture deleted."
+  exit 0
+fi
 
 # ---- confirmation -----------------------------------------------------------
 if ((!fake)) && [[ ! -t 0 || ! -t 1 ]]; then
@@ -253,12 +580,26 @@ cat <<EOF
     [ ] The phone records off-axis, 20 cm or more away (a TV remote showed
         up on its camera: the phone sees IR).
     [ ] The glass over the emitter is not cracked or scratched.
-    [ ] The sensor detector is running (AE off, per-frame mean logged).
+    [ ] The sensor detector is running (--watch, or AE off and per-frame mean
+        logged by hand).
     [ ] Chris approved Stage B (the approval file exists).
 
   Log: ${logf#"$R"}
 
 EOF
+if ((watch)); then
+  cat <<EOF
+  --watch (IR camera detector, nothing is saved but per-frame statistics):
+
+    [ ] White paper about 5 cm in front of the camera, angled so light from
+        beside the lens bounces back into it.
+    [ ] Dim room. Do not move the laptop or the paper until the run ends.
+    [ ] sl7-ir-bridge is active (checked) and nothing else uses the camera.
+
+  Capture starts after you confirm; the pulses fire about 1 s later.
+
+EOF
+fi
 log "START channel=$channel repeat=$repeat user=${SUDO_USER:-$(id -un)} kernel=$(uname -r) cmdline='$(rd "$cmdline")'"
 want="FIRE CHANNEL $channel"
 printf 'Type "%s" to fire, anything else aborts: ' "$want"
@@ -269,6 +610,12 @@ echo
 log "CONFIRMED by typed phrase"
 
 # ---- fire -------------------------------------------------------------------
+fire_ts=()
+if ((watch)); then
+  # lead + (gaps of ~1.2 s + one pulse of ~0.3 s + the tail) at 40 fps (above the bridge's 35)
+  start_capture $((1 + WATCH_LEAD_FRAMES + ((repeat - 1) * 12 + 3 + WATCH_TAIL_S * 10) * 4))
+  wait_lead
+fi
 i=0
 while ((i < repeat)); do
   i=$((i + 1))
@@ -283,12 +630,19 @@ while ((i < repeat)); do
   pulses=$((pulses + 1))
   printf '%s\n' "$pulses" >"$rundir/pulses" || die 6 "cannot record the pulse count in $rundir/pulses"
   log "FIRE ir:flash-$channel (count this boot: $pulses)"
+  if ((watch)); then read -r fire_now _ </proc/uptime; fire_ts+=("$fire_now"); fi
   wr "$led/flash_strobe" 1
   sleep "$POST_STROBE_WAIT_S"
   wr "$led/flash_strobe" 0
+  if ((watch)); then log "FIRE_T pulse $i/$repeat t_boottime=${fire_now} (capture start t_boottime=$t_launch, lead ready t_boottime=$t_ready)"; fi
   check_fault "after"
 done
-log "DONE channel $channel, $repeat pulse(s). Compare the detector frame means and the phone clip for this channel."
+if ((watch)); then
+  sleep "$WATCH_TAIL_S"
+  finish_capture
+  run_analysis pulses "$channel" "${fire_ts[@]}"
+fi
+log "DONE channel $channel, $repeat pulse(s). Compare the detector verdict (--watch) and the phone clip for this channel."
 echo
 echo "Next: note whether the sensor or the phone saw it (3/3 pulses well above the baseline noise)."
 echo "One channel at a time: reboot or wait, then repeat with the next --channel N. Decision rules: EMITTER-PLAN.md, stage B."
