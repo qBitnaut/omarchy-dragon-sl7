@@ -137,3 +137,6 @@
 # 16. Runtime power, round 2: Hovold's deferred disabling of unused clocks and power domains, active only with clk_unused_defer on the command line
 0087-clk-Defer-disabling-of-unused-clocks-behind-clk_unused_defer.patch
 0088-pmdomain-core-Defer-disabling-of-unused-domains-behind-clk_unused_defer.patch
+
+# 17. Runtime power, round 3: MDP core clock per layer mixer when 3D merge splits the display (SL7 local, upstream candidate)
+0089-SL7-drm-msm-dpu-Compute-the-core-clock-per-layer-mixer.patch

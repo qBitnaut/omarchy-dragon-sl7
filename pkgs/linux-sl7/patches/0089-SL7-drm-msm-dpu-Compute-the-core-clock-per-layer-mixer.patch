@@ -1,0 +1,290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 14:00:00 -0500
+Subject: [PATCH] SL7 local: drm/msm/dpu: Compute the core clock per layer mixer
+
+SL7 local: drm/msm/dpu: Compute the core clock per layer mixer
+
+_dpu_core_perf_calc_clk() takes the pixel rate of the whole mode,
+vtotal x hdisplay x vrefresh, as the floor of the core clock. When the
+CRTC uses more than one layer mixer (3D merge, or one mixer per
+interface) each mixer only handles its share of every line and the
+mixers run in parallel, so the clock only has to sustain one mixer.
+The mode filter already knows this: commit f5d079564c44 ("drm/msm/dpu:
+Fix adjusted mode clock check for 3d merge") halves the adjusted mode
+clock in dpu_crtc_mode_valid() when the SoC has 3D merge. The
+performance calculation did not, so a mode accepted because of the
+halving still voted the clock for the full width.
+
+The plane side does not help either. dpu_plane_split() only splits a
+plane in two pipes when it is wider than the SSPP line or when its clock
+exceeds max_core_clk_rate, so a full-width plane is fetched by one pipe
+that feeds both mixers, and that single pipe really needs the full-width
+clock.
+
+Make both sides per mixer:
+
+ - Divide the mode clock by the number of mixers of the CRTC state.
+
+ - Split a plane that is wider than one mixer of its stage into two
+   pipes, as is done above max_core_clk_rate, so that each pipe needs no
+   more than a mixer. The split is skipped when the pair cannot be
+   fetched as two parallel rectangles (scaling, rotation, YUV, UBWC too
+   wide, SSPP without smart DMA); such a plane keeps its single pipe and
+   its full clock.
+
+ - Take the plane clocks from the plane states being checked
+   (drm_atomic_crtc_state_for_each_plane_state()) instead of the value
+   cached in the committed plane state at atomic update. That value
+   describes the previous commit, and was hidden by the full-width mode
+   floor. With a per-mixer floor it would let one commit run on a clock
+   computed without the new planes. The cached plane_clk member has no
+   user left and is removed.
+
+max_core_clk_rate, its debugfs file and the per-pipe limit check in
+dpu_plane_atomic_check_pipe() are unchanged. With one mixer the mode
+clock is divided by one and the extra split condition does not apply,
+so the result is the same as before.
+
+Numbers, Surface Laptop 7 13.8 inch (x1e80100, eDP 2304x1536 at 120 Hz,
+vtotal 1579, two mixers with 3D merge, no DSC), clk_inefficiency_factor
+105:
+
+  before: 1579 x 2304 x 120 x 1.05 = 458.4 MHz -> 514 MHz OPP (MMCX NOM)
+  after:  1579 x 1152 x 120 x 1.05 = 229.2 MHz -> 325 MHz OPP (MMCX SVS)
+
+With max_core_clk_rate written to 325000000 through debugfs and a
+modeset, the driver already splits the primary plane in two 1152 pixel
+pipes and runs disp_cc_mdss_mdp_clk at 325 MHz, with no underrun in
+dmesg; this patch reaches the same state without the cap, so external
+modes up to the max_core_clk_rate limit stay available. External
+displays: 4K at 120 Hz (about 537 MHz per mixer) and 5K at 60 Hz (about
+476 MHz, from CVT-RB2 timings) stay valid and keep a sufficient clock
+with two mixers; modes on one mixer are unchanged.
+
+Risk: the per-mixer clock is only enough when no pipe is wider than a
+mixer. A plane that cannot be split keeps its own full-width clock
+through the plane term of the calculation, which now reads the checked
+state, but a configuration that bypasses that term (a plane state whose
+pipe_cfg is not final at check time) would run a full-width pipe on a
+half clock and underrun. Platforms with several mixers per CRTC other
+than the SL7 (dual DSI, DSC) take the same path and are untested.
+
+Rationale: RUNTIME-PLAN.md power round 3, AWAKE-CX-MDP.md section 3.5
+(MD-d). Expected on the SL7: mdp clock 325 MHz and MMCX SVS with the
+screen on. Not built or measured yet.
+
+Origin: ours
+Upstream-Status: Not submitted (candidate: discuss with Dmitry Baryshkov and Jessica Zhang first)
+---
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_core_perf.c
+@@ -88,26 +88,32 @@
+  * @crtc: pointer to a crtc
+  * @state: pointer to a crtc state
+  * Return: returns max clk for all planes in crtc.
++ *
++ * The layer mixers of a CRTC work in parallel, each one on its own slice of
++ * every line, so the core clock has to sustain the pixel rate of one mixer,
++ * not of the whole mode. The plane clocks are taken from the plane states
++ * that are being checked, as the pipe configuration of those is final here,
++ * while the one stored in the committed state may describe other planes.
+  */
+ static u64 _dpu_core_perf_calc_clk(const struct dpu_perf_cfg *perf_cfg,
+ 		struct drm_crtc *crtc, struct drm_crtc_state *state)
+ {
+ 	struct drm_plane *plane;
+-	struct dpu_plane_state *pstate;
++	const struct drm_plane_state *plane_state;
+ 	struct drm_display_mode *mode;
+ 	u64 mode_clk;
++	u32 num_lm;
+ 
+ 	mode = &state->adjusted_mode;
+ 
+ 	mode_clk = (u64)mode->vtotal * mode->hdisplay * drm_mode_vrefresh(mode);
+ 
+-	drm_atomic_crtc_for_each_plane(plane, crtc) {
+-		pstate = to_dpu_plane_state(plane->state);
+-		if (!pstate)
+-			continue;
++	num_lm = max(dpu_crtc_get_num_lm(state), 1u);
++	mode_clk = div_u64(mode_clk, num_lm);
+ 
+-		mode_clk = max(pstate->plane_clk, mode_clk);
+-	}
++	drm_atomic_crtc_state_for_each_plane_state(plane, plane_state, state)
++		mode_clk = max(dpu_plane_state_calc_clk(plane_state, mode),
++			       mode_clk);
+ 
+ 	return dpu_core_perf_adjusted_mode_clk(mode_clk, perf_cfg);
+ }
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
+@@ -185,6 +185,34 @@
+ }
+ 
+ /**
++ * dpu_plane_state_calc_clk - calculate clock required by a plane state
++ * @state: Pointer to drm plane state
++ * @mode: Pointer to drm display mode
++ * Result: the highest clock needed by any pipe of the plane, 0 if the plane
++ * is not visible. It describes one pipe, as each pipe is fetched separately.
++ */
++u64 dpu_plane_state_calc_clk(const struct drm_plane_state *state,
++			     const struct drm_display_mode *mode)
++{
++	struct dpu_plane_state *pstate = to_dpu_plane_state(state);
++	u64 plane_clk = 0;
++	int i;
++
++	if (!state->visible)
++		return 0;
++
++	for (i = 0; i < PIPES_PER_PLANE; i++) {
++		if (!drm_rect_width(&pstate->pipe_cfg[i].src_rect))
++			continue;
++
++		plane_clk = max(plane_clk,
++				_dpu_plane_calc_clk(mode, &pstate->pipe_cfg[i]));
++	}
++
++	return plane_clk;
++}
++
++/**
+  * _dpu_plane_calc_fill_level - calculate fill level of the given source format
+  * @plane:		Pointer to drm plane
+  * @pipe:		Pointer to software pipe
+@@ -868,6 +896,39 @@
+ 	return 0;
+ }
+ 
++static int dpu_plane_is_multirect_parallel_capable(struct dpu_hw_sspp *sspp,
++						   struct dpu_sw_pipe_cfg *pipe_cfg,
++						   const struct msm_format *fmt,
++						   uint32_t max_linewidth);
++
++/**
++ * dpu_plane_needs_mixer_split - check if a plane should be fetched per mixer
++ * @pipe_cfg: pipe configuration, clipped to the mixers of one stage
++ * @mode: display mode
++ * @sspp: SSPP used by the plane, NULL if not assigned yet
++ * @fmt: format of the plane
++ * @max_linewidth: maximum line width of an SSPP
++ * @mixer_width: width of one layer mixer
++ *
++ * The core clock is calculated for the pixel rate of one layer mixer. A plane
++ * fetched by a single pipe that is wider than a mixer needs more than that,
++ * so split it in two pipes, each of them feeding one mixer of the pair, when
++ * the hardware can do it.
++ */
++static bool dpu_plane_needs_mixer_split(struct dpu_sw_pipe_cfg *pipe_cfg,
++					const struct drm_display_mode *mode,
++					struct dpu_hw_sspp *sspp,
++					const struct msm_format *fmt,
++					uint32_t max_linewidth,
++					u32 mixer_width)
++{
++	u64 mixer_clk = (u64)mode->vtotal * mixer_width * drm_mode_vrefresh(mode);
++
++	return _dpu_plane_calc_clk(mode, pipe_cfg) > mixer_clk &&
++	       dpu_plane_is_multirect_parallel_capable(sspp, pipe_cfg, fmt,
++						       max_linewidth);
++}
++
+ static int dpu_plane_split(struct drm_plane *plane,
+ 			   struct drm_plane_state *new_plane_state,
+ 			   const struct drm_crtc_state *crtc_state)
+@@ -879,18 +940,22 @@
+ 	struct dpu_sw_pipe_cfg *pipe_cfg;
+ 	struct dpu_sw_pipe_cfg *r_pipe_cfg;
+ 	const struct drm_display_mode *mode = &crtc_state->adjusted_mode;
++	const struct msm_format *fmt = msm_framebuffer_format(new_plane_state->fb);
++	struct dpu_hw_sspp *sspp = NULL;
+ 	uint32_t max_linewidth;
+-	u32 num_lm;
++	u32 num_lm, lms_in_stage, mixer_width;
+ 	int stage_id, num_stages;
+ 
+ 	max_linewidth = pdpu->catalog->caps->max_linewidth;
+ 
+ 	/* In non-virtual plane case, one mixer pair is always needed. */
+ 	num_lm = dpu_crtc_get_num_lm(crtc_state);
+-	if (dpu_use_virtual_planes)
++	if (dpu_use_virtual_planes) {
+ 		num_stages = (num_lm + 1) / 2;
+-	else
++	} else {
+ 		num_stages = 1;
++		sspp = dpu_rm_get_sspp(&kms->rm, pdpu->pipe);
++	}
+ 
+ 	/*
+ 	 * For wide plane that exceeds SSPP rectangle constrain, it needed to
+@@ -948,9 +1013,18 @@
+ 		DPU_DEBUG_PLANE(pdpu, "Got clip src:" DRM_RECT_FMT " dst: " DRM_RECT_FMT "\n",
+ 				DRM_RECT_ARG(&pipe_cfg->src_rect), DRM_RECT_ARG(&pipe_cfg->dst_rect));
+ 
+-		/* Split wide rect into 2 rect */
++		/*
++		 * Split wide rect into 2 rect, also when it is wider than one
++		 * of the mixers of this stage.
++		 */
++		lms_in_stage = min_t(u32, num_lm - stage_id * PIPES_PER_STAGE,
++				     PIPES_PER_STAGE);
++		mixer_width = drm_rect_width(&mixer_rect) / max(lms_in_stage, 1u);
+ 		if ((drm_rect_width(&pipe_cfg->src_rect) > max_linewidth) ||
+-		     _dpu_plane_calc_clk(mode, pipe_cfg) > max_mdp_clk_rate) {
++		     _dpu_plane_calc_clk(mode, pipe_cfg) > max_mdp_clk_rate ||
++		     (lms_in_stage > 1 &&
++		      dpu_plane_needs_mixer_split(pipe_cfg, mode, sspp, fmt,
++						  max_linewidth, mixer_width))) {
+ 
+ 			if (drm_rect_width(&pipe_cfg->src_rect) > 2 * max_linewidth) {
+ 				DPU_DEBUG_PLANE(pdpu, "invalid src " DRM_RECT_FMT " line:%u\n",
+@@ -1572,16 +1646,11 @@
+ 		pstate->needs_qos_remap = false;
+ 
+ 	pstate->plane_fetch_bw = 0;
+-	pstate->plane_clk = 0;
+ 	for (i = 0; i < PIPES_PER_PLANE; i++) {
+ 		if (!drm_rect_width(&pstate->pipe_cfg[i].src_rect))
+ 			continue;
+ 		pstate->plane_fetch_bw += _dpu_plane_calc_bw(pdpu->catalog, fmt,
+ 							     &crtc->mode, &pstate->pipe_cfg[i]);
+-
+-		pstate->plane_clk = max(pstate->plane_clk,
+-					_dpu_plane_calc_clk(&crtc->mode,
+-							    &pstate->pipe_cfg[i]));
+ 	}
+ }
+ 
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_plane.h
+@@ -25,7 +25,6 @@
+  * @multirect_mode: parallel or time multiplex multirect mode
+  * @pending:	whether the current update is still pending
+  * @plane_fetch_bw: calculated BW per plane
+- * @plane_clk: calculated clk per plane
+  * @needs_dirtyfb: whether attached CRTC needs pixel data explicitly flushed
+  * @layout:     framebuffer memory layout
+  */
+@@ -38,7 +37,6 @@
+ 	bool pending;
+ 
+ 	u64 plane_fetch_bw;
+-	u64 plane_clk;
+ 
+ 	bool needs_dirtyfb;
+ 
+@@ -50,6 +48,9 @@
+ 
+ void dpu_plane_flush(struct drm_plane *plane);
+ 
++u64 dpu_plane_state_calc_clk(const struct drm_plane_state *state,
++			     const struct drm_display_mode *mode);
++
+ void dpu_plane_set_error(struct drm_plane *plane, bool error);
+ 
+ struct drm_plane *dpu_plane_init(struct drm_device *dev,

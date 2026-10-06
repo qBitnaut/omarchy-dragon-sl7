@@ -75,6 +75,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0085 | ath12k: DTIM stick mode for station vdevs (the STA follows the AP DTIM instead of listen interval 5) | torvalds `af50baccaa5f` (Daizhuang Bai, v7.3-rc1) | merged for 7.3 (backport) |
 | 0086 | SL7 local: romulus (13.8 and 15 inch) enables `&iris` with the Microsoft signed `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn` (V4L2 stateful decoder and encoder) | ours; firmware from the SL7 MSI via `omarchy-surface-sl7-firmware` | not submitted (needs signed firmware in linux-firmware) |
 | 0087-0088 | clk and genpd: defer disabling of unused clocks and power domains by 30 s, **only with `clk_unused_defer` on the command line** (used by `omarchy-sl7-test-entry enable clk-unused`) | jhovold/linux `1e3e4a97ba7e`, `b3f09e07cfbb` (Johan Hovold, Sep 2024) plus our opt-in gate | not mainline; Hovold's WIP, drop when mainline has an equivalent |
+| 0089 | SL7 local: drm/msm/dpu computes the core clock per layer mixer when the CRTC uses several mixers (3D merge): mode clock divided by the mixer count, planes wider than a mixer split in two pipes, plane clocks read from the checked state | ours; companion of `f5d079564c44` (Jessica Zhang, mode filter only) | not submitted (discuss with Dmitry Baryshkov and Jessica Zhang first) |
 
 Notes on the DT patches:
 
@@ -454,6 +455,53 @@ Test (battery, backlight pinned, same Wi-Fi), alternating normal and CLK-UNUSED 
   141-clock set drops to 0 after the 30 s;
 - compare SYS and the CPU rails; also `sl7-sleepstats --suspend-test` for the suspend side.
 - If the screen freezes or garbles: hold power, choose the normal entry.
+
+## Runtime power, round 3 (7.2.8-16): MDP core clock per layer mixer
+
+Patch 0089. `_dpu_core_perf_calc_clk()` in `dpu_core_perf.c` votes the pixel rate of the whole mode,
+`vtotal x hdisplay x vrefresh x 1.05`, as the floor of `disp_cc_mdss_mdp_clk`. On the SL7 eDP
+(2304x1536 at 120 Hz, vtotal 1579) that is 458.4 MHz, which rounds to the 514 MHz OPP and holds MMCX
+at NOM for as long as the screen is on (bench v2: `mdp_clk_mhz` 514, `mmcx_perf_state` 256 for 100%
+of samples). The CRTC runs two layer mixers joined by 3D merge, each handling 1152 pixels per
+line, and `dpu_crtc_mode_valid()` already halves the mode clock for 3D merge (`f5d079564c44`); the
+performance calculation did not. Per mixer the need is 1579 x 1152 x 120 x 1.05 = 229.2 MHz, which fits
+the 325 MHz OPP (MMCX SVS). Research: `Research/omarchy-dragon-sl7/power/AWAKE-CX-MDP.md`, section 3
+and fix MD-d.
+
+What the patch changes:
+
+- the mode clock is divided by the number of mixers of the CRTC state (one mixer: unchanged);
+- `dpu_plane_split()` also splits a plane that is wider than one mixer of its stage into two pipes,
+  like it already did above `max_core_clk_rate`. A full-width plane was fetched by one SSPP feeding
+  both mixers and needed the full clock by itself. The split is skipped when two parallel rectangles
+  are not possible (scaling, rotation, YUV, wide UBWC, SSPP without smart DMA); that plane keeps one
+  pipe and its full clock;
+- the plane clocks come from the plane states being checked (`drm_atomic_crtc_state_for_each_plane_state()`),
+  not from the value cached at the previous atomic update, and the unused `plane_clk` member is gone.
+  Without that, the first commit after a modeset could run on a clock computed without its planes,
+  which the old full-width floor used to hide.
+
+`max_core_clk_rate` and its debugfs files are unchanged, so the manual cap still works. External
+modes: 4K at 120 Hz needs about 537 MHz per mixer and 5K at 60 Hz about 476 MHz (estimates from
+CVT-RB2 timings), both below the 575 MHz limit.
+
+Risk (medium): a full-width pipe on a per-mixer clock underruns. The plane term of the calculation
+is meant to prevent it, but this is read from the code, not seen on hardware. Not built, not booted;
+the series applies with `apply-series.sh` on 7.2.8 and CI is the compile check. A failure shows as
+flicker or torn lines, and `dmesg` reports DPU underruns. Fallback: the previous linux-sl7 entry.
+
+Test on the SL7 (battery, backlight pinned, VRR on, same Wi-Fi):
+
+- after boot and a first Hyprland modeset: `sudo cat /sys/kernel/debug/clk/disp_cc_mdss_mdp_clk/clk_rate`
+  is 325000000 (before: 514000000), `sudo cat /sys/kernel/debug/pm_genpd/mmcx/perf_state` is 128;
+- `sudo grep -E 'src\[|dst\[' /sys/kernel/debug/dri/0/state` shows the primary plane as two pipes of
+  1152 pixels;
+- 10 minutes of mouse circling, fast scrolling, window drags and a fullscreen 60 fps video, then
+  `sudo dmesg | grep -iE 'underrun|dpu'` and `ls /sys/class/devcoredump/` (both must stay empty);
+- an external monitor on each USB-C port, at its largest mode (4K120 or 5K60 if it has them): it must
+  light up and stay clean, `dmesg` without underruns;
+- bench v2, 30 min: `mdp_clk_mhz` 325 and `mmcx_perf_state` 128 for 100% of samples, battery W lower
+  than the 2.95 W run by more than the run-to-run spread.
 
 ## Build
 
