@@ -20,9 +20,13 @@
 #                                             USB wakeup for the run, then restore
 #
 # Needs root (debugfs) and CONFIG_QCOM_STATS (modprobe qcom_stats is tried).
-# Run --suspend-test on battery with the charger unplugged. Like sl7-powertest it
-# takes watts from the energy_now delta between two gauge updates (the gauge steps
-# in 10 mWh), so use 45 minutes or more asleep.
+# Run --suspend-test on battery with the charger unplugged. power_now cannot be
+# sampled while suspended, so watts come from the energy_now delta. Current SL7
+# firmware quantizes energy_now to whole percent of energy_full (about 496 mWh),
+# so the clock starts and stops immediately, the step size is detected, and the
+# result carries a bound of +/-step/window: about +/-0.05 W over 9 h, +/-0.25 W
+# over 2 h. Use an overnight window. --gauge-sync restores the old start/stop on
+# a gauge step, for firmware with small (about 10 mWh) steps.
 #
 # Test hooks (all optional): SL7_SYS, SL7_DEBUGFS, SL7_PROC, SL7_SUSPEND_CMD,
 # SL7_ALLOW_NONROOT=1, SL7_POLL_S, SL7_TRACEFS (tracing directory, default
@@ -38,12 +42,13 @@ poll_s=${SL7_POLL_S:-0.5}
 tracefs=${SL7_TRACEFS:-}
 trace_min=8
 unload=0
-no_sync=0
+gauge_sync=0
 
-gauge_step_mwh=10   # energy_now resolution of qcom-battmgr
+gauge_step_fallback_mwh=10  # assumed when energy_now is not on a whole-percent grid (older firmware)
+bound_warn_w=0.25           # warn when the gauge bound exceeds this
 cycle_mwh=24        # fixed cost per suspend cycle (Dell 7441; re-measure on the SL7)
 sync_timeout_s=300
-sync_stale_s=60     # ~15 s per step at 2.3 W; longer means the gauge is frozen
+sync_stale_s=60     # --gauge-sync, 10 mWh steps: ~15 s per step at 2.3 W; longer means frozen
 xo_hz=19200000      # qcom_stats durations are 19.2 MHz XO ticks
 
 usage() {
@@ -56,10 +61,14 @@ usage: sl7-sleepstats [--suspend-test | --trace] [--minutes N] [--unload-suspect
                    and after the resume print the deltas, the hours asleep and the
                    watts (wake the laptop with the power button; the SL7 RTC has no
                    alarm)
-  --no-sync        with --suspend-test: start the clock on the current reading
-                   instead of waiting for a fresh gauge step (for when the gauge
-                   only updates in large steps); the result carries up to one
-                   gauge step of error at each end, small over a night
+                   The clock starts and stops on the current readings. The SL7
+                   gauge reports energy_now in whole percent (about 496 mWh), so
+                   the result carries +/-step/window (about +/-0.05 W over 9 h);
+                   windows under 2 h trigger a warning
+  --gauge-sync     with --suspend-test: start and stop the clock on a fresh gauge
+                   step, as before (only useful when the steps are small, about
+                   10 mWh; waits up to 300 s at each end and fails if none comes).
+                   --no-sync is accepted and is now the default
   --cycle-mwh N    fixed per-cycle cost to subtract (default 24 mWh)
   --trace          guided capture: awake snapshot (clocks, interconnect, regulators,
                    power domains, runtime PM, wakeup, remoteprocs), RPMh/interconnect/
@@ -102,7 +111,8 @@ while (($# > 0)); do
       minutes_given=1
       ;;
     --unload-suspects) unload=1 ;;
-    --no-sync) no_sync=1 ;;
+    --gauge-sync) gauge_sync=1 ;;
+    --no-sync) gauge_sync=0 ;;
     --cycle-mwh)
       shift
       [[ ${1:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--cycle-mwh needs a number"
@@ -121,6 +131,7 @@ while (($# > 0)); do
 done
 
 [[ $minutes_given == 0 || $mode == trace ]] || die "--minutes needs --trace"
+[[ $gauge_sync == 0 || $mode == suspend ]] || die "--gauge-sync needs --suspend-test"
 [[ $unload == 0 || $mode != show ]] || die "--unload-suspects needs --suspend-test or --trace"
 
 if [[ ${SL7_ALLOW_NONROOT:-0} != 1 && $EUID -ne 0 ]]; then
@@ -975,13 +986,13 @@ do_suspend() {
   [[ -n $e_first ]] || die "cannot read $battery/energy_now"
 
   local start e0 t0
-  if ((no_sync)); then
-    start="$e_first $(boottime_s)"
-    printf 'start: not synced to a gauge step (--no-sync)\n'
-  else
+  if ((gauge_sync)); then
     printf 'waiting for a fresh gauge update before starting the clock (energy_now %s uWh)...\n' "$e_first"
     start=$(wait_gauge_step start "$e_first") ||
-      die "the gauge did not update within ${sync_timeout_s} s (try --no-sync for an overnight run)"
+      die "the gauge did not update within ${sync_timeout_s} s (drop --gauge-sync: the gauge steps in large increments)"
+  else
+    start="$e_first $(boottime_s)"
+    printf 'start: clock started on the current reading (use --gauge-sync only for fine gauge steps)\n'
   fi
   e0=${start% *}
   t0=${start#* }
@@ -1011,22 +1022,25 @@ do_suspend() {
   ac_online && ac_at_resume=1
   susp1=$(cat "$sys/power/suspend_stats/success" 2> /dev/null || printf '?')
   snapshot "$tmp/after"
-  printf 'resumed at boottime %s s; waiting for a fresh gauge update...\n' "$t_resume"
 
   local e_resume end e1 t1
   e_resume=$(energy_uwh)
   local valid=1 notes=""
-  if ! end=$(wait_gauge_step end "$e_resume"); then
-    if ((no_sync)); then
-      end="$e_resume $t_resume"
-      notes+=" end not synced to a gauge step;"
-    else
+  if ((gauge_sync)); then
+    printf 'resumed at boottime %s s; waiting for a fresh gauge update...\n' "$t_resume"
+    if ! end=$(wait_gauge_step end "$e_resume"); then
       die "the gauge did not update within ${sync_timeout_s} s after the resume"
     fi
+  else
+    printf 'resumed at boottime %s s\n' "$t_resume"
+    end="$e_resume $t_resume"
   fi
+  [[ -n $e_resume ]] || die "cannot read $battery/energy_now after the resume"
   e1=${end% *}
   t1=${end#* }
-  ((no_sync)) && notes+=" start not synced to a gauge step (--no-sync);"
+  ((gauge_sync)) && notes+=" clock synced to gauge steps (--gauge-sync);"
+  local e_full
+  e_full=$(cat "$battery/energy_full" 2> /dev/null || printf '0')
   if ((ac_at_resume)); then
     valid=0
     notes+=" charger connected at resume;"
@@ -1049,20 +1063,33 @@ do_suspend() {
   print_deltas "$tmp/before" "$tmp/after" "$asleep"
 
   printf '\n== energy ==\n'
-  awk -v e0="$e0" -v e1="$e1" -v w="$window" -v asl="$asleep" -v c="$cycle_mwh" -v g="$gauge_step_mwh" \
-    -v valid="$valid" -v notes="$notes" '
+  awk -v e0="$e0" -v e1="$e1" -v w="$window" -v asl="$asleep" -v c="$cycle_mwh" -v gfb="$gauge_step_fallback_mwh" \
+    -v ef="$e_full" -v bw="$bound_warn_w" -v valid="$valid" -v notes="$notes" '
     BEGIN {
       used = (e0 - e1) / 1000.0
       hours = w / 3600.0
-      printf "  window (gauge step to gauge step): %.1f min (%.2f h), of which asleep %.1f min (%.2f h)\n",
+      printf "  window: %.1f min (%.2f h), of which asleep %.1f min (%.2f h)\n",
              w / 60, hours, asl / 60, asl / 3600
       printf "  energy_now: %.0f -> %.0f mWh, used %.0f mWh\n", e0 / 1000.0, e1 / 1000.0, used
       if (used < 0) { valid = 0; notes = notes " energy_now rose (charging?);" }
       if (hours <= 0) { print "  no usable window"; exit }
       printf "  raw:       %.3f W\n", used / 1000.0 / hours
-      printf "  corrected: %.3f W  (minus the fixed %g mWh per cycle, +/-%.3f W from the %g mWh gauge step)\n",
-             (used - c) / 1000.0 / hours, c, g / 1000.0 / hours, g
-      if (hours < 0.5) print "  warning: under 30 minutes: dominated by the gauge step and the cycle cost; use 45 min or more"
+      # Gauge step: whole percent of energy_full when both readings sit on that grid
+      pct = ef / 1000.0 / 100.0
+      g = gfb; how = "assumed, energy_now is not on a whole-percent grid"
+      if (pct > 0) {
+        r0 = e0 / 1000.0 / pct; r1 = e1 / 1000.0 / pct
+        d0 = r0 - int(r0 + 0.5); d1 = r1 - int(r1 + 0.5)
+        if (d0 < 0) d0 = -d0
+        if (d1 < 0) d1 = -d1
+        if (d0 * pct <= 1.5 && d1 * pct <= 1.5) { g = pct; how = "whole percent of energy_full" }
+      }
+      bound = g / 1000.0 / hours
+      printf "  corrected: %.3f W  (minus the fixed %g mWh per cycle)\n", (used - c) / 1000.0 / hours, c
+      printf "  gauge step: %.1f mWh (%s); bound +/-%.3f W (one step over the window, each end is quantized)\n",
+             g, how, bound
+      if (bound > bw) printf "  warning: window too short for the gauge step: bound +/-%.3f W exceeds +/-%.2f W; use at least %.1f h asleep\n", bound, bw, g / 1000.0 / bw
+      if (hours < 0.5) print "  warning: under 30 minutes: dominated by the gauge step and the cycle cost"
       if (!valid) printf "  INVALID:%s\n", notes
     }'
   if ((valid == 0)); then

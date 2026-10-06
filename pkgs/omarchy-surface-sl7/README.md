@@ -357,7 +357,7 @@ off" in section 11b).
    The 60 Hz leg is a modeset: use `REFRESH_ON_BATTERY=60` in `power.conf` with the machine on
    battery (the powermode service does the switch), and set it back to empty afterwards. Then one
    leg of (a) on the normal entry to check that patch 0024 costs nothing when off, then a
-   30 minute `sl7-powertest idle` gauge run of the winner against (a). Expect (c) to beat (a) by
+   30 minute `sl7-powertest idle` run of the winner against (a). Expect (c) to beat (a) by
    roughly 0.35 to 0.5 W if AVR works (an estimate from the 60 Hz difference, not a measurement).
 
 ### 8j. Cluster parking (opt-in): `sl7-park`
@@ -738,15 +738,47 @@ sl7-powertest suspend            # prints the procedure, changes nothing
 sl7-powertest compare A.jsonl B.jsonl
 ```
 
-Watts come from the `energy_now` delta between two gauge updates: the tool waits for a fresh
-update before starting and before stopping the clock (the gauge goes stale), so the error is
-one 10 mWh step over the window (about +/-0.03 W at 20 minutes, +/-0.02 W at 30). `power_now`
-(absolute value) is logged as a cross-check. Every 5 s it records `energy_now`, `power_now`,
-capacity, per-policy `scaling_cur_freq`, cpuidle time and entry deltas, GPU devfreq `cur_freq`
-and the eDP mode; once a minute the top 5 CPU processes and Wi-Fi power save. The first record
-is the configuration (refresh rate, governor and caps, Wi-Fi power save, brightness, kernel
-command line, monitors, Bluetooth, power mode) with a hash; `compare` lists what differs.
-Output goes to `~/.local/state/sl7-powertest/` (JSONL plus a `.summary.json`).
+**What the gauge does, measured on the SL7.** `qcom_battmgr` has no cache: every sysfs read is a
+live `BATTMGR_BAT_STATUS` request. The firmware now reports `energy_now` quantized to whole
+percent of `energy_full` (49590000 uWh full, so one step is about 496 mWh; at 2.4 W idle a step
+comes every 12 minutes). `power_now` is not quantized: it varies continuously and is fresh on
+every read. Two 25-minute idle runs both reported exactly 2.380 W, which is one step over 25
+minutes, an artifact of the quantization and not a measurement. Earlier firmware (7.2.8-5) stepped
+in about 10 mWh and the old method (start and stop the clock on a gauge step) relied on that.
+
+**The method.** The headline watts are the time integral of `power_now` (absolute value,
+trapezoid over the samples, one every 2 s), reported as the mean with its standard error. The
+error is the sample spread over the square root of the effective sample count (reduced by the
+lag-1 autocorrelation, so slow drift is not counted as many independent samples). It covers
+sampling noise only; it cannot see a bias in the gauge's `power_now`. The clock starts
+immediately and stops at the end of the window, with a closing sample; nothing waits for a gauge
+step and nothing aborts on a stale gauge.
+
+The `energy_now` delta is the cross-check, the only reading that does not depend on
+`power_now`. The step size is detected from the run (the smallest nonzero change; snapped to
+`energy_full`/100 when it matches whole percent). The gauge figure is printed with its true bound,
++/- one step over the window: about +/-1.5 W for 20 minutes at 496 mWh. With fewer than 3 steps
+seen (a 20-minute idle run sees one or two) it is labelled "too coarse for this window" and is
+left out of the verdict. Use a run of 40 minutes or more (3 steps at 2.4 W) when you want the
+cross-check to mean something; the bound is then still about +/-0.75 W, so it only catches gross
+disagreement. `--gauge-sync` restores the old start-and-stop-on-a-step mode for
+firmware with small steps; with whole-percent steps it can wait up to 300 s and abort.
+
+**Accuracy.** For A/B work, the standard error of the `power_now` integral (typically a few mW over
+20 minutes, depending on how much the load moves) sets the resolution; `compare` calls a
+difference real when it exceeds twice the combined standard error. Run-to-run variation
+(temperature, background activity) is larger than that, so keep repeating each setting three times.
+
+`power_now` is the gauge's own instantaneous reading, so a gain error in it is not caught by this
+method; the long-window gauge cross-check, and the overnight `sl7-sleepstats --suspend-test`,
+are the independent checks. Each sample records `energy_now`, `power_now`, capacity, per-policy
+`scaling_cur_freq`, cpuidle time and entry deltas, GPU devfreq `cur_freq` and the eDP mode; once a
+minute the top 5 CPU processes and Wi-Fi power save. The first record is the configuration (refresh
+rate, governor and caps, Wi-Fi power save, brightness, kernel command line, monitors, Bluetooth,
+power mode) with a hash; `compare` lists what differs, shows the gauge cross-check per run and
+reads the summary's `gauge_step_mwh`, `gauge_steps`, `gauge_watts` and `gauge_error_w` fields.
+Output goes to `~/.local/state/sl7-powertest/` (JSONL plus a `.summary.json`). Summaries from the
+older gauge-only method still load in `compare` and are marked as legacy.
 
 Before/after a change (for example the power mode):
 
@@ -817,12 +849,12 @@ What the readings mean and how far to trust them:
   the ring is populated on a cold Linux-only boot is unknown.
 
 Next to the battery gauge (`sl7-powertest`): the two are independent readers and can run together.
-The gauge gives watts from the `energy_now` delta over 20 to 30 minutes; the meter gives firmware
-power each second. The loaded driver already refreshes its cache once a second whether or not
+The gauge gives watts from the integral of `power_now` over 20 to 30 minutes (its `energy_now`
+is only whole-percent, see section 12); the meter gives firmware power each second. The loaded driver already refreshes its cache once a second whether or not
 anything reads it, so reading adds nothing there, but a live `sl7-powermeter` wakes a CPU every
 second and can raise an idle reading. For gauge runs use `sl7-powertest idle --rails` instead: it
-adds `rails_w` to each 5 s record and `rails_mean_w` to the summary (shown by `compare`), with no
-extra process. The watts in the summary stay the gauge's.
+adds `rails_w` to each 2 s record and `rails_mean_w` to the summary (shown by `compare`), with no
+extra process. The watts in the summary stay the gauge's `power_now` integral.
 
 ### 12e. Who uses CPU and wakes up at idle: `sl7-proftop`
 
@@ -880,6 +912,17 @@ printed: (a) the final RPMh sleep set with BCM votes decoded (nonzero `MC0`/`SH0
 is held), (b) `skipping RPMH req` addresses (`xo.lvl`/`cx.lvl` flagged), (c) `qcom_stats` and
 `ddr_stats` deltas with the ADSP and CDSP wake rates, (d) ALWAYS interconnect votes that never
 dropped to 0, (e) whether the two UARTs runtime-suspended, (f) whether PCIe re-initialised.
+
+`sudo sl7-sleepstats --suspend-test` runs one measured suspend: snapshot, `systemctl suspend`, wake
+it with the power button, then counter deltas, hours asleep and watts. `power_now` cannot be sampled
+while suspended, so watts come from the `energy_now` delta, and the SL7 firmware quantizes that to
+whole percent of `energy_full` (about 496 mWh per step; see section 12). The clock therefore starts
+on the current reading and stops on the first reading after the resume, with no waiting for a gauge
+step. The tool checks that both readings sit on the whole-percent grid, takes the step from
+`energy_full`/100 (assuming 10 mWh when they do not), and prints the bound: one step over the
+window, about +/-0.05 W over 9 h and +/-0.25 W over 2 h. Under 2 h it warns that the window is too
+short for the step. Use an overnight run. `--gauge-sync` restores the old start and stop on a gauge step (small-step firmware
+only, waits up to 300 s per end); `--no-sync` is still accepted and is now the default.
 
 `--unload-suspects` (also valid with `--suspend-test`) stops `bluetooth.service`, removes
 `qcrypto`, `hci_uart`, `btqca`, `ath12k_wifi7` and `ath12k`, and disables USB wakeup for the run, then
@@ -953,7 +996,9 @@ Untested on hardware:
   the kernel headers and `dpu_hw_intf.c`, not exercised on the panel.
 - `omarchy-sl7-powermode`, `sl7-powertest`: logic exercised against fake sysfs trees with
   stubbed `iw`, `hyprctl`, `brightnessctl`, `gdbus` and `mpv` (caps, idempotency, restore,
-  display switch and restore, watcher events, gauge sync, Ctrl-C restore, compare). Not run on
+  display switch and restore, watcher events, gauge sync, Ctrl-C restore, compare; that was the
+  earlier gauge-delta `sl7-powertest`: the `power_now` integral, step detection and immediate-start
+  rewrite of pkgrel 31 is syntax-checked only, as is the `sl7-sleepstats` step bound). Not run on
   the SL7: that the udev change events arrive on plug/unplug and after resume, that the SCMI
   firmware honours `scaling_max_freq` below the sustained frequency on all three clusters,
   the GPU devfreq node name and OPP list, the real UPower signal and the `hl.monitor`

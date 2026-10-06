@@ -180,7 +180,9 @@ All ship in `omarchy-surface-sl7` unless noted.
 ## Power and performance results so far
 
 Measured on the 13.8" X1P-64-100 (16 GB). Numbers are from `sl7-powertest` and the
-battery gauge, which steps in 10 mWh, so short runs are coarse.
+battery gauge. The gauge reports `energy_now` in whole percent (about 496 mWh), so idle
+watts are now the integral of `power_now`; the older numbers below were taken with the
+earlier, finer-stepped gauge.
 
 ### Idle
 

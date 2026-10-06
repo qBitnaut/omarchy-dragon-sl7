@@ -13,15 +13,24 @@ Run as your own user, on battery, with the charger unplugged. The tool only
 reads sysfs; the settings it changes for the run (screen brightness, and the
 idle/sleep inhibitor) are restored when it exits, also on Ctrl-C.
 
-Watts come from the energy_now delta between two gauge updates, not from
-power_now: the gauge steps in 10 mWh, so the tool waits for a fresh update
-before it starts the clock and again before it stops it (recon run 5: the
-gauge goes stale). power_now is recorded as a cross-check only.
+Watts are the time integral of power_now (trapezoid over the samples, one
+every 2 s), reported as the mean with its standard error. power_now is fresh
+on every read (qcom_battmgr has no cache). The energy_now delta is kept as a
+cross-check: current firmware reports energy_now quantized to whole percent of
+energy_full (about 496 mWh per step on the SL7), so the tool detects the step
+size from the run and prints the gauge figure with its true bound,
++/-step/window. With fewer than 3 steps the gauge figure is labelled "too
+coarse for this window" and is not used for the verdict.
+
+The clock starts immediately. --gauge-sync restores the old behaviour of
+starting and stopping the clock on a gauge step; it only makes sense when the
+steps are small (older firmware, about 10 mWh) and can wait up to 300 s.
 """
 
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -31,11 +40,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-GAUGE_STEP_MWH = 10.0  # energy_now resolution of qcom-battmgr
+MIN_GAUGE_STEPS = 3  # fewer energy_now steps than this: gauge figure too coarse to use
 SUSPEND_CYCLE_MWH = 24.0  # fixed cost per suspend cycle (Dell 7441; re-measure)
 SYNC_TIMEOUT_S = 300.0
 SYNC_PROGRESS_S = 30.0  # progress line interval while waiting for a gauge update
-SYNC_STALE_S = 60.0  # at ~2.3 W the gauge steps every ~15 s; longer means frozen
+SYNC_STALE_S = 60.0  # --gauge-sync only: with fine (10 mWh) steps at ~2.3 W longer means frozen
 POLL_S = 0.5
 RAILS_HWMON = "qcom_pld_power"  # optional firmware power rails, read-only hwmon
 
@@ -101,8 +110,8 @@ def energy_mwh(bat):
 class Rails:
     """Optional: the firmware's one-second power rails, logged beside the gauge.
 
-    Read only, and independent of the gauge: the watts in the summary still come
-    from the energy_now delta. A missing hwmon device just means no rails.
+    Read only, and independent of the gauge and of power_now: logged for
+    comparison only. A missing hwmon device just means no rails.
     """
 
     def __init__(self, hw):
@@ -411,6 +420,53 @@ def mean(vals):
     return sum(vals) / len(vals) if vals else None
 
 
+def integrate(win):
+    """Trapezoid integral of power_now: (mean W, standard error W, n, span s) or None.
+
+    The standard error is the sample spread over sqrt(n_eff), where n_eff is
+    reduced by the lag-1 autocorrelation so that smooth drift is not counted as
+    many independent samples. It covers sampling noise only, not a bias in the
+    gauge's power_now.
+    """
+    pts = [(x["t"], x["power_w"]) for x in win if x.get("power_w") is not None]
+    if len(pts) < 2:
+        return None
+    span = pts[-1][0] - pts[0][0]
+    if span <= 0:
+        return None
+    area = sum((pts[i][1] + pts[i + 1][1]) / 2.0 * (pts[i + 1][0] - pts[i][0]) for i in range(len(pts) - 1))
+    vals = [v for _, v in pts]
+    n = len(vals)
+    m = sum(vals) / n
+    ss = sum((v - m) ** 2 for v in vals)
+    var = ss / (n - 1)
+    r = sum((vals[i] - m) * (vals[i + 1] - m) for i in range(n - 1)) / ss if ss > 0 else 0.0
+    r = min(max(r, 0.0), 0.95)
+    n_eff = n * (1.0 - r) / (1.0 + r)
+    return area / span, math.sqrt(var / n_eff), n, span
+
+
+def detect_step(energies, e_full_mwh):
+    """Gauge step size and step count from the energy_now values seen in a run.
+
+    Returns (step_mwh or None, steps). The step is the smallest nonzero change;
+    when that matches energy_full/100 (whole-percent firmware) it is snapped to
+    exactly that. With no change at all it is energy_full/100 only if the
+    readings sit on a whole-percent grid, else unknown.
+    """
+    pct = e_full_mwh / 100.0 if e_full_mwh else None
+    vals = [e for e in energies if e is not None]
+    deltas = [abs(b - a) for a, b in zip(vals, vals[1:]) if abs(b - a) > 0.5]
+    if deltas:
+        step = min(deltas)
+        if pct and abs(step - pct) <= 0.05 * pct:
+            step = pct
+        return step, sum(max(1, round(d / step)) for d in deltas)
+    if pct and vals and all(abs(v / pct - round(v / pct)) * pct <= 1.5 for v in vals):
+        return pct, 0
+    return None, 0
+
+
 def summarize(samples, t0, t1, e0, e1, cfg, hsh, meta):
     win = [s for s in samples if t0 <= s["t"] <= t1]
     hours = (t1 - t0) / 3600.0
@@ -424,10 +480,21 @@ def summarize(samples, t0, t1, e0, e1, cfg, hsh, meta):
         "window_s": round(t1 - t0, 1),
         "energy_start_mwh": e0,
         "energy_end_mwh": e1,
+        "gauge_sync": meta.get("gauge_sync", False),
     }
+    integ = integrate(win)
+    if integ is not None:
+        s["watts"] = round(integ[0], 3)
+        s["error_w"] = round(integ[1], 3)
+        s["method"] = "power_now integral"
+        s["power_samples"] = integ[2]
     if hours > 0 and e0 is not None and e1 is not None:
-        s["watts"] = round((e0 - e1) / 1000.0 / hours, 3)
-        s["error_w"] = round(GAUGE_STEP_MWH / 1000.0 / hours, 3)
+        step, steps = detect_step([e0] + [x["energy_mwh"] for x in win] + [e1], meta.get("energy_full_mwh"))
+        s["gauge_watts"] = round((e0 - e1) / 1000.0 / hours, 3)
+        s["gauge_step_mwh"] = None if step is None else round(step, 2)
+        s["gauge_steps"] = steps
+        s["gauge_error_w"] = None if step is None else round(step / 1000.0 / hours, 3)
+        s["gauge_usable"] = step is not None and steps >= MIN_GAUGE_STEPS
     s["power_now_mean_w"] = None if not win else round(mean([x["power_w"] for x in win]) or 0, 3)
     s["samples"] = len(win)
     s["capacity_start"] = win[0]["capacity"] if win else None
@@ -457,19 +524,28 @@ def summarize(samples, t0, t1, e0, e1, cfg, hsh, meta):
     return s
 
 
+def fmt_gauge(s):
+    step, err = s.get("gauge_step_mwh"), s.get("gauge_error_w")
+    bound = "step unknown" if step is None else "+/- %.3f W bound (one %.1f mWh step per window)" % (err, step)
+    txt = "%.3f W, %s, %d step%s seen" % (s["gauge_watts"], bound, s["gauge_steps"],
+                                          "" if s["gauge_steps"] == 1 else "s")
+    if not s.get("gauge_usable"):
+        txt += "; too coarse for this window (needs %d+ steps), not used for the verdict" % MIN_GAUGE_STEPS
+    return txt
+
+
 def fmt_summary(s):
     lines = []
     tag = "" if s["valid"] else "  [INVALID: %s]" % "; ".join(s["notes"])
     lines.append("%s%s  config %s" % (s["workload"], tag, s["config_hash"]))
     if "watts" in s:
         lines.append(
-            "  %.3f W (gauge, %.1f min window), error +/-%.3f W (one %g mWh gauge step)"
-            % (s["watts"], s["window_s"] / 60.0, s["error_w"], GAUGE_STEP_MWH)
+            "  %.3f W +/- %.3f W (power_now integral, %.1f min, %d samples; +/- is the standard error)"
+            % (s["watts"], s["error_w"], s["window_s"] / 60.0, s.get("power_samples", 0))
         )
-        lines.append(
-            "  energy %.0f -> %.0f mWh; power_now mean %.3f W (cross-check)"
-            % (s["energy_start_mwh"], s["energy_end_mwh"], s["power_now_mean_w"] or 0)
-        )
+    if "gauge_watts" in s:
+        lines.append("  gauge cross-check: " + fmt_gauge(s))
+        lines.append("  energy %.0f -> %.0f mWh" % (s["energy_start_mwh"], s["energy_end_mwh"]))
     if s["valid"] and s["notes"]:
         lines.append("  notes: " + "; ".join(s["notes"]))
     if s.get("cpu_mean_khz"):
@@ -510,8 +586,9 @@ def workload_run(args, workload, launcher=None):
         if rails is None:
             notes.append("--rails given but no %s hwmon device (needs linux-sl7 7.2.8-12 or newer); no rails logged"
                          % RAILS_HWMON)
-    if args.minutes < 20:
-        notes.append("%.1f min run: error is large; use 20+ minutes (30 for +/-0.02 W)" % args.minutes)
+    if args.minutes < 10:
+        notes.append("%.1f min run: short; the power_now error is larger and the gauge cross-check "
+                     "will be too coarse (it needs 3+ energy_now steps)" % args.minutes)
 
     outdir = Path(os.environ.get("SL7_POWERTEST_DIR", Path.home() / ".local/state/sl7-powertest"))
     outdir.mkdir(parents=True, exist_ok=True)
@@ -523,7 +600,10 @@ def workload_run(args, workload, launcher=None):
     mpv = None
     out = open(path, "w", buffering=1)
     samples = []
-    meta = {"workload": workload, "label": args.label, "valid": False, "notes": notes}
+    meta = {"workload": workload, "label": args.label, "valid": False, "notes": notes,
+            "gauge_sync": args.gauge_sync}
+    full = read_int(bat / "energy_full")
+    meta["energy_full_mwh"] = None if full is None else full / 1000.0
     t0 = t1 = e0 = e1 = None
     cfg = {}
     hsh = ""
@@ -551,16 +631,34 @@ def workload_run(args, workload, launcher=None):
         idle, top = CpuIdle(), TopProcs()
         top.top()
         idle.delta()
+        gauge_sync = args.gauge_sync
         e_seen = energy_mwh(bat)
-        phase, started = "sync-start", time.monotonic()
+        started = time.monotonic()
         next_sample = next_minute = started
         e_ref = e_last = e_seen
         run_until = None
         sync_end_from = started
         woke = False
-        t_step = e_step = None  # wall time and value of the last gauge step in the run
-        print("%s: waiting for a fresh gauge update (up to %d s)..." % (workload, SYNC_TIMEOUT_S))
-        wait = SyncWait("start", started, e_seen)
+        t_step = e_step = None  # --gauge-sync: wall time and value of the last gauge step
+
+        def take_sample(ph):
+            rec = sample(bat, idle, hypr_monitors(), rails)
+            rec["phase"] = ph
+            samples.append(rec)
+            out.write(json.dumps(rec) + "\n")
+            return rec
+
+        if gauge_sync:
+            phase = "sync-start"
+            print("%s: waiting for a fresh gauge update (up to %d s)..." % (workload, SYNC_TIMEOUT_S))
+            wait = SyncWait("start", started, e_seen)
+        else:
+            phase = "run"
+            t0, e0 = time.time(), e_seen
+            run_until = started + args.minutes * 60.0
+            next_minute = started + 60.0
+            print("clock started: %.0f mWh at %s, running %.1f min, power_now every %g s"
+                  % (e0, time.strftime("%H:%M:%S"), args.minutes, args.sample))
         while True:
             now = time.monotonic()
             if ac_online() or read(bat / "status") == "Charging":
@@ -590,7 +688,7 @@ def workload_run(args, workload, launcher=None):
                       % ("?" if e_ref is None else "%.0f" % e_ref))
             if mpv is not None and mpv.poll() is not None:
                 raise Abort("mpv exited early (code %s)" % mpv.returncode)
-            e = energy_mwh(bat)
+            e = energy_mwh(bat) if gauge_sync else None  # every read is a live battmgr request
             if e is not None and e_last is not None and e > e_last + 0.5:
                 raise Abort("energy_now rose (charging?)")
             if e is not None:
@@ -611,11 +709,17 @@ def workload_run(args, workload, launcher=None):
                     wait.tick(now, e)
             elif phase == "run":
                 if now >= run_until:
-                    e_ref = e
-                    phase = "sync-end"
-                    sync_end_from = now
-                    wait = SyncWait("end", now, e)
-                    print("run done; waiting for a fresh gauge update to stop the clock...")
+                    if gauge_sync:
+                        e_ref = e
+                        phase = "sync-end"
+                        sync_end_from = now
+                        wait = SyncWait("end", now, e)
+                        print("run done; waiting for a fresh gauge update to stop the clock...")
+                    else:
+                        rec = take_sample("run")  # closes the integral and reads the end energy
+                        t1 = rec["t"]
+                        e1 = rec["energy_mwh"] if rec["energy_mwh"] is not None else e_last
+                        break
             elif phase == "sync-end":
                 if e is not None and e != e_ref:
                     t1, e1 = time.time(), e
@@ -626,11 +730,11 @@ def workload_run(args, workload, launcher=None):
                     break
                 wait.tick(now, e)
             if now >= next_sample:
-                mons = hypr_monitors()
-                rec = sample(bat, idle, mons, rails)
-                rec["phase"] = phase
-                samples.append(rec)
-                out.write(json.dumps(rec) + "\n")
+                rec = take_sample(phase)
+                if not gauge_sync and rec["energy_mwh"] is not None:
+                    if e_last is not None and rec["energy_mwh"] > e_last + 0.5:
+                        raise Abort("energy_now rose (charging?)")
+                    e_last = rec["energy_mwh"]
                 next_sample += args.sample
                 if next_sample < now:
                     next_sample = now + args.sample
@@ -698,21 +802,23 @@ def cmd_suspend(_args):
     bat, _ = find_battery()
     print("""sl7-powertest suspend: guidance (nothing is changed or suspended by this command)
 
-Gauge: the fixed per-cycle cost is about %g mWh (Dell 7441, not yet measured on
-this SL7). Re-measure it once with one 3-minute and one 40-minute suspend.
+Use `sudo sl7-sleepstats --suspend-test`; it does the steps below for you and
+reports the gauge bound. power_now cannot be sampled while suspended, so only
+the energy_now delta is available, and the SL7 firmware quantizes it to whole
+percent of energy_full (about 496 mWh per step).
 
-Procedure, with the charger unplugged and the battery between 30%% and 90%%:
+By hand, with the charger unplugged and the battery between 30%% and 90%%:
   1. Pin the brightness you will use afterwards and close anything busy.
-  2. Wait for energy_now to change, then note it and the time:
+  2. Note energy_now and the time:
        watch -n1 'date +%%T; cat %s/energy_now'
-     (the gauge steps in %g mWh; start the clock on a change)
   3. systemctl suspend. Wake it by hand (power button); the SL7 RTC has no alarm.
-  4. Wait for the next energy_now change, note it and the time.
-  5. W = (start - end - %g mWh per cycle) / hours asleep. Use 45+ minutes
-     asleep; shorter runs are dominated by the gauge step and the cycle cost.
+  4. Note energy_now and the time again.
+  5. W = (start - end) / hours asleep, with a bound of +/- one gauge step per
+     hour asleep (about +/-0.5 W per hour of sleep at 496 mWh). Sleep 4+ hours
+     for +/-0.12 W, overnight for better; short suspends tell you nothing.
 Change one variable per run and repeat each setting three times, alternating.
 Use `sl7-powertest idle` for the awake baseline."""
-          % (SUSPEND_CYCLE_MWH, bat if bat else "/sys/class/power_supply/qcom-battmgr-bat", GAUGE_STEP_MWH, SUSPEND_CYCLE_MWH))
+          % (bat if bat else "/sys/class/power_supply/qcom-battmgr-bat"))
     if bat is None:
         print("\nwarning: no battery found", file=sys.stderr)
     elif ac_online():
@@ -755,16 +861,19 @@ def cmd_compare(args):
         print("%s: %s  %s  config %s%s" % (name, s["workload"], s.get("label") or "", s["config_hash"],
                                           "" if s["valid"] else "  [INVALID]"))
         if "watts" in s:
-            print("   %.3f W +/- %.3f   (%d min, %.0f%% -> %.0f%%, power_now mean %.3f W)" % (
+            legacy = "" if s.get("method") else "  (legacy gauge run; +/- is the old step bound)"
+            print("   %.3f W +/- %.3f   (%d min, %.0f%% -> %.0f%%, %s)%s" % (
                 s["watts"], s["error_w"], round(s["window_s"] / 60), s["capacity_start"] or 0,
-                s["capacity_end"] or 0, s["power_now_mean_w"] or 0))
+                s["capacity_end"] or 0, s.get("method", "gauge"), legacy))
+        if "gauge_watts" in s:
+            print("   gauge cross-check: " + fmt_gauge(s))
     if "watts" in a and "watts" in b:
         d = b["watts"] - a["watts"]
-        err = a["error_w"] + b["error_w"]
+        err = math.hypot(a["error_w"], b["error_w"])
         pct = 100.0 * d / a["watts"] if a["watts"] else 0.0
-        print("\nB - A = %+.3f W (%+.1f%%), combined error +/-%.3f W" % (d, pct, err))
-        print("verdict: " + ("difference exceeds the measurement error" if abs(d) > err
-                             else "within the measurement error; not a distinguishable change"))
+        print("\nB - A = %+.3f W (%+.1f%%), combined standard error +/-%.3f W" % (d, pct, err))
+        print("verdict: " + ("difference exceeds 2x the combined standard error" if abs(d) > 2 * err
+                             else "within 2x the combined standard error; not a distinguishable change"))
         if a["workload"] != b["workload"]:
             print("warning: different workloads (%s vs %s)" % (a["workload"], b["workload"]))
     fa, fb = flatten(a.get("config", {})), flatten(b.get("config", {}))
@@ -811,13 +920,16 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(sp):
-        sp.add_argument("--minutes", type=float, default=20.0, help="run length (default 20; 30 gives +/-0.02 W)")
+        sp.add_argument("--minutes", type=float, default=20.0, help="run length (default 20)")
         sp.add_argument("--brightness", type=int, default=30, metavar="PCT",
                         help="backlight percent held for the run (default 30)")
         sp.add_argument("--label", help="tag for the file name, e.g. before / after")
         sp.add_argument("--rails", action="store_true",
                         help="also log the firmware power rails (hwmon qcom_pld_power) if present")
-        sp.add_argument("--sample", type=float, default=5.0, help=argparse.SUPPRESS)
+        sp.add_argument("--gauge-sync", action="store_true",
+                        help="start and stop the clock on an energy_now step (only for fine steps; "
+                             "can wait up to 300 s and abort with whole-percent firmware)")
+        sp.add_argument("--sample", type=float, default=2.0, help=argparse.SUPPRESS)
 
     sp = sub.add_parser("idle", help="idle desktop")
     common(sp)
