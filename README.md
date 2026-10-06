@@ -200,7 +200,7 @@ Deep suspend, 8 to 10 minute traces with `sl7-sleepstats --trace`:
 | ADSP wakeups | ~104/s | ~11.5/s |
 | XO (crystal) | held | still held (one prepare) |
 | CX power collapse (`cxsd`) | no | not yet |
-| Suspend power (overnight) | 0.8-0.9 W (8 h 25 min, 16% of 48.6 Wh, 7.2.8-4) | **0.31 W** (9 h 20 min, 2948 mWh, 7.2.8-14) |
+| Suspend power (overnight) | 0.8-0.9 W (8 h 25 min, 16% of 48.6 Wh, 7.2.8-4) | **0.31 W** (9 h 20 min, 2948 mWh, 7.2.8-13) |
 | Battery life asleep, full charge | about 2.4 days | **about 6.5 days** |
 
 To our knowledge, this is the first published DDR self-refresh in suspend on a
@@ -209,7 +209,7 @@ earlier CX/DDR collapse we found was on Qualcomm's reference CRD with an experim
 branch that disables the ADSP. Reports from the Dell Inspiron 7441, Latitude 7455,
 Yoga Slim 7x and IdeaPad Slim 5x show `ddr` at 0.
 
-Overnight on 7.2.8-14 (`sl7-sleepstats --suspend-test`, charger unplugged): 2948 mWh
+Overnight on 7.2.8-13 (`sl7-sleepstats --suspend-test`, charger unplugged): 2948 mWh
 over 9 h 20 min, **0.31 W**, about 63% less than before the power work. DDR was in
 self-refresh for 94% of the time asleep and the ADSP woke about 10 times a second.
 The night included one spurious wake (02:04, re-suspended by logind after 26 s), so
