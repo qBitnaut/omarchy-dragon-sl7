@@ -38,6 +38,7 @@ poll_s=${SL7_POLL_S:-0.5}
 tracefs=${SL7_TRACEFS:-}
 trace_min=8
 unload=0
+no_sync=0
 
 gauge_step_mwh=10   # energy_now resolution of qcom-battmgr
 cycle_mwh=24        # fixed cost per suspend cycle (Dell 7441; re-measure on the SL7)
@@ -55,6 +56,10 @@ usage: sl7-sleepstats [--suspend-test | --trace] [--minutes N] [--unload-suspect
                    and after the resume print the deltas, the hours asleep and the
                    watts (wake the laptop with the power button; the SL7 RTC has no
                    alarm)
+  --no-sync        with --suspend-test: start the clock on the current reading
+                   instead of waiting for a fresh gauge step (for when the gauge
+                   only updates in large steps); the result carries up to one
+                   gauge step of error at each end, small over a night
   --cycle-mwh N    fixed per-cycle cost to subtract (default 24 mWh)
   --trace          guided capture: awake snapshot (clocks, interconnect, regulators,
                    power domains, runtime PM, wakeup, remoteprocs), RPMh/interconnect/
@@ -97,6 +102,7 @@ while (($# > 0)); do
       minutes_given=1
       ;;
     --unload-suspects) unload=1 ;;
+    --no-sync) no_sync=1 ;;
     --cycle-mwh)
       shift
       [[ ${1:-} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--cycle-mwh needs a number"
@@ -968,9 +974,15 @@ do_suspend() {
   e_first=$(energy_uwh)
   [[ -n $e_first ]] || die "cannot read $battery/energy_now"
 
-  printf 'waiting for a fresh gauge update before starting the clock (energy_now %s uWh)...\n' "$e_first"
   local start e0 t0
-  start=$(wait_gauge_step start "$e_first") || die "the gauge did not update within ${sync_timeout_s} s"
+  if ((no_sync)); then
+    start="$e_first $(boottime_s)"
+    printf 'start: not synced to a gauge step (--no-sync)\n'
+  else
+    printf 'waiting for a fresh gauge update before starting the clock (energy_now %s uWh)...\n' "$e_first"
+    start=$(wait_gauge_step start "$e_first") ||
+      die "the gauge did not update within ${sync_timeout_s} s (try --no-sync for an overnight run)"
+  fi
   e0=${start% *}
   t0=${start#* }
   printf 'start: energy_now %s uWh at boottime %s s\n' "$e0" "$t0"
@@ -1003,11 +1015,18 @@ do_suspend() {
 
   local e_resume end e1 t1
   e_resume=$(energy_uwh)
-  end=$(wait_gauge_step end "$e_resume") || die "the gauge did not update within ${sync_timeout_s} s after the resume"
+  local valid=1 notes=""
+  if ! end=$(wait_gauge_step end "$e_resume"); then
+    if ((no_sync)); then
+      end="$e_resume $t_resume"
+      notes+=" end not synced to a gauge step;"
+    else
+      die "the gauge did not update within ${sync_timeout_s} s after the resume"
+    fi
+  fi
   e1=${end% *}
   t1=${end#* }
-
-  local valid=1 notes=""
+  ((no_sync)) && notes+=" start not synced to a gauge step (--no-sync);"
   if ((ac_at_resume)); then
     valid=0
     notes+=" charger connected at resume;"
