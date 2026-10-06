@@ -10,7 +10,7 @@ pkgname=iptsd-sl7
 _calcommit=e60938dcf707d37d24e782e0029b9c9a567d67b8  # 2026-06-03
 _commit=3663e96e758145801c3cb1ce7c72f362d0d4a5f5  # 2026-07-17 00:26 UTC (2026-07-16 20:26 -0400)
 pkgver=3.1.0.r20260717
-pkgrel=13
+pkgrel=14
 pkgdesc='Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)'
 arch=('aarch64')
 url='https://github.com/alex-lentz/iptsd'
@@ -39,13 +39,14 @@ source=("iptsd-$_commit.tar.gz::https://github.com/alex-lentz/iptsd/archive/$_co
         '0003-daemon-lift-grace.patch'
         '0004-runner-reenable-multitouch-on-legacy-reports.patch'
         '0005-daemon-drag-latch.patch'
-        '0006-daemon-drag-fast-motion-relatch.patch')
+        '0006-daemon-drag-fast-motion-relatch.patch'
+        '0007-daemon-drag-park-and-debug-log.patch')
 sha256sums=('ce9935fb7c38365f4fa65070e819bf901e10082c5fb2ea67e49b3a60b225ed92'
             '2c1ffc2088dd9e65f18e79f1e1b6d3fbcb815e75843ebed8142da6f96f89bbb0'
             'c58408721cd808a51c4970d6e2a8397a136b899bcf6904069646c8f4ea6b86ef'
             '310675731eab637ede77f62c7bf6d2f65324504ddd218742341df483df81a513'
             '6b2bab2ad225a86ef1fd31e2a2736b641a3d5a91f5723d2069c18ecf63ae2889'
-            'fe7ea07b82bff36eba3678f6ec7cc170f30eb9980df2f772cac3e80ff5ce2fe2'
+            '2b1982dd26a021f14e0e6a29ca46c070594433d50c9f89c01d996d0a7c18668c'
             'fea9cfdcbeb3362ac3ddab91263ba2075501e75955888659c1925939b5072cd7'
             '67754ccca79e232a0c068294f7190d949bbee8623fed333edbb7b7f52dca3a3e'
             'c79e82423445434063ce5fc84db251580109b5ba5ba7c727357b395dd21faf76'
@@ -53,7 +54,8 @@ sha256sums=('ce9935fb7c38365f4fa65070e819bf901e10082c5fb2ea67e49b3a60b225ed92'
             'ba7b12f31613d1ce83b451c3b4218d57083e20495602e110208e43f4efda5bbc'
             'bf6048d530ab401fb1e040e12a77383a5d29c5e95431809e993b91126c438794'
             'ecad5d617a471e81a492b971d936b281bfd3a4ad80e34dc5e364eb285d3ce95e'
-            '424cba3e8e013801c60fff70a04defda6be4372ad515686b834d929d06432129')
+            '424cba3e8e013801c60fff70a04defda6be4372ad515686b834d929d06432129'
+            '9f3256216c7cbf370a7e9142c46e5093209446361773c0983203309450d194c8')
 
 _bp='-mbranch-protection=standard'
 
@@ -85,6 +87,11 @@ prepare() {
   # Drag latch fixes for fast motion (follows the contact over tracker re-indexing,
   # rides out invalid / unstable frames, speed latch) and [Touchpad] DragRelatchMs.
   patch -d "iptsd-$_commit" -Np1 -i "$srcdir/0006-daemon-drag-fast-motion-relatch.patch"
+
+  # A still drag is parked instead of released (so the finger can lift and come
+  # back), and [Touchpad] DragDebug / IPTSD_SL7_DRAG_DEBUG=1 logs every latch
+  # state transition.
+  patch -d "iptsd-$_commit" -Np1 -i "$srcdir/0007-daemon-drag-park-and-debug-log.patch"
 }
 
 build() {

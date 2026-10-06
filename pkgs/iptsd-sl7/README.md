@@ -168,6 +168,22 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
   frames). Trade-off: after a real drag ends by lifting, the drop is delayed by `DragRelatchMs`
   (plus up to `LiftGraceMs`); a plain click is not delayed. If the delay bothers you, lower it
   or set 0.
+- `0007-daemon-drag-park-and-debug-log.patch` (applied in `prepare()`, after 0006): lifting
+  the finger to continue a drag (past the pad edge) still ended it. The stillness rule
+  (bit released, contacts still `DragReleaseStillMs`) released the button, and pausing at
+  the edge before lifting is exactly that state, so the drag was over before the relatch
+  window could start. Now a drag whose stillness rule fires is parked: BTN_LEFT stays held,
+  and it ends only after a further `DragRelatchMs` parked and still, or when the finger
+  lifts and no contact lands within `DragRelatchMs`. Moving again or a firmware press
+  un-parks it. `DragRelatchMs = 0` keeps the old release. `DragReleaseStillMs = 0` never
+  releases because of stillness (it never meant "release at once"). Invalid-contact frames
+  (a landing finger at the pad edge failing the size / aspect check) no longer end the drag
+  while it waits for the finger; the wait window decides. A firmware press during the wait
+  is absorbed, never handled as a new press. Adds `[Touchpad] DragDebug` (default false;
+  or env `IPTSD_SL7_DRAG_DEBUG=1`): logs each latch transition with timestamp, reason and
+  state to the journal. To capture: set `DragDebug = true` in
+  `/etc/iptsd.d/94-local.conf`, `sudo systemctl restart 'iptsd@*.service'`, then
+  run `journalctl -f -o short-precise -u 'iptsd@*' | grep drag` next to `sudo libinput debug-events` and compare the clock times.
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset
