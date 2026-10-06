@@ -29,6 +29,8 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 8d | optional kernel test boot entries, PSR (known broken), VRR (experimental) and the IR emitter test boot (`ir-test`), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | IR emitter load gate and the disabled Stage B channel test tool (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
+| 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
+| 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
 
@@ -148,7 +150,9 @@ omarchy-surface-sl7-firmware --status
 
 Installs uncompressed into `/usr/lib/firmware/updates/qcom/x1e80100/microsoft/`: the zap
 shader `qcdxkmsuc8380.mbn` (in `microsoft/`, not `Romulus/`), `Romulus/{qcadsp8380.mbn,
-adsp_dtbs.elf,qccdsp8380.mbn,cdsp_dtbs.elf}` (required) and `Romulus/*.jsn` (optional).
+adsp_dtbs.elf,qccdsp8380.mbn,cdsp_dtbs.elf}` (required) and `Romulus/*.jsn` plus the Iris video
+firmware `Romulus/qcvss8380.mbn` (optional, see 7b). `updates/` is searched before
+`/usr/lib/firmware`, so the kernel finds it at `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn`.
 Each file is checked against an embedded sha256 list for MSI 26.053.36539.0 before
 anything is installed (all-or-nothing); `--allow-unverified` overrides for a newer MSI.
 `--from-msi` needs `msiextract` (msitools); pymsi is not supported. Afterwards it runs
@@ -215,6 +219,144 @@ from ever editing the file again, so removing the block or setting `true` sticks
 Lua in the user's file, so anything below it wins. Run it by hand with
 `omarchy-sl7-touchpad-defaults`, preview with `--check`. `sl7-doctor` warns while it is pending.
 
+### 8h. USB runtime PM (opt-in): `sl7-usb-rpm`
+
+Off by default. The dwc3 core calls `pm_runtime_forbid()` at probe, so the three controllers sit
+at `power/control = on` and never suspend. Awake that keeps their interconnect votes (the
+`a400000` and `a800000` controllers each vote 1 GB/s average, 2.5 GB/s peak on DDR), their
+GDSCs and their PHY and master clocks on. Setting `auto` lets `dwc3-qcom` runtime-suspend them
+when nothing is attached or busy (its suspend path drops those votes and has wake IRQs on the
+DP/DM/SS lines). The estimated gain is 50 to 200 mW for all three; not measured on the SL7.
+
+```
+sl7-usb-rpm status
+sudo sl7-usb-rpm enable a400000 [--record]    # runtime only, until reboot
+sudo sl7-usb-rpm disable a400000 [--forget]   # write power/control=on again
+sudo sl7-usb-rpm enable-all-tested            # what the udev rule does at boot
+```
+
+Controllers: `a400000.usb` is `usb_mp`, the USB-A port behind the PTN3222 repeater;
+`a600000.usb` and `a800000.usb` are the two USB-C ports. Put a stick in each port and look at
+`lsusb -t` to confirm which is which. The `.usb` suffix is optional.
+
+- `enable` writes `power/control = auto` and `power/autosuspend_delay_ms` (default 2000, from
+  `usb-rpm.conf`) for the controller and its xHCI child, one controller per call, after a
+  `sync`. It changes nothing on disk.
+- `--record` adds the controller to `USB_RPM_TESTED_OK` in `/etc/omarchy-surface-sl7/usb-rpm.conf`
+  (a pacman backup file). Only listed controllers get `auto` at boot: the udev rule
+  `80-omarchy-sl7-usb-rpm.rules` runs `sl7-usb-rpm udev-env` on the controller and xHCI platform
+  devices (`add` and `bind`; `bind` comes after the probe that forbids runtime PM) and sets the
+  attributes only when that prints a match. The shipped list is empty, so the rule does nothing
+  until you opt in.
+- `disable` writes `on` (the rollback). `--forget` also drops it from the list. To turn it all off,
+  empty `USB_RPM_TESTED_OK` and reboot.
+
+**Warning.** Val Packett's Dell Latitude 7455 (same SoC family) shut the whole machine down with
+runtime PM on all four of its controllers and was fine with three (lore
+`20260221105245.19328-1-daniel@quora.org`, Linaro arm64-laptops issue 14). Never enable them all
+at once to try. Save your work, enable one controller, use it (plug and unplug, a DP alt mode
+monitor, charging and USB-C role swaps, wake from suspend by a USB keyboard), then `--record` it
+and go on to the next. The SL7 has three dwc3 controllers in use (the fourth, `usb30_tert`, is
+unused), which is not the 7455 layout, so nothing here says that all three are safe.
+
+Measuring one controller with `sl7-powermeter` (SYS rail, battery, same Wi-Fi, backlight pinned at
+30%, nothing plugged into the ports being tested):
+
+```
+sl7-powermeter --log usb-a1.jsonl --seconds 180 --label usb-on     # baseline, control=on
+sudo sl7-usb-rpm enable a400000
+sleep 30                                                           # let it suspend
+sl7-usb-rpm status                                                 # runtime_status must be suspended
+sl7-powermeter --log usb-b1.jsonl --seconds 180 --label usb-auto
+sudo sl7-usb-rpm disable a400000
+sl7-powermeter --log usb-a2.jsonl --seconds 180 --label usb-on
+sl7-powermeter --compare usb-a1.jsonl usb-b1.jsonl                 # then a2 against b1
+```
+
+Alternate A B A B for three rounds and treat a difference below about twice the run-to-run spread
+as no change. If `runtime_status` stays `active`, something is holding the controller (a plugged
+device that does not autosuspend, or a hub): unplug everything from that port and retry. Next
+controller only after this one looks fine.
+
+### 8i. Real refresh rate: `sl7-vrr-rate`
+
+`hyprctl monitors` shows the mode rate (120) whether or not VRR works, and the kernel's vblank
+counters stop when nobody holds a vblank reference. `sl7-vrr-rate` measures the rate at the panel
+side of the pipe.
+
+```
+sl7-vrr-rate -s 10                 # vblank wait loop, no root
+sudo sl7-vrr-rate --hw -s 10       # DPU hardware frame counter, read-only
+sl7-vrr-rate --json -s 10          # one JSON object, for logs
+```
+
+- **vblank (default).** Loops `DRM_IOCTL_WAIT_VBLANK` (relative 1) on the eDP card and timestamps
+  each return in userspace. The kernel's vblank timestamps assume the fixed mode rate, so only the
+  userspace clock is used. It holds a vblank reference (the vsync IRQ stays on) but causes no
+  commits. It finds the CRTC of eDP with read-only mode ioctls (`--crtc N` overrides). Output is
+  the effective rate over the window plus the interval spread.
+- **`--hw` (root).** Maps the eDP INTF block (INTF_5, physical `0x0AE3A000`) through `/dev/mem`
+  with `PROT_READ` only and reads `INTF_FRAME_COUNT` (offset `0x0AC`) once a second; it also
+  prints `INTF_AVR_CONTROL`, `INTF_AVR_MODE` and the AVR VTOTAL to VSYNC period ratio (about 5.0
+  with AVR programmed). It never writes. It refuses to run unless the device tree has the DPU at
+  `0x0ae01000` and an enabled eDP controller with an aux-bus panel at `0x0aea0000`, the DPU and
+  its parent are runtime-active, eDP is connected and enabled, `INTF_VSYNC_PERIOD_F0` is non zero
+  and the frame counter is enabled. Run it with the screen on: reading a powered-down DPU can
+  hang the SoC. It needs `CONFIG_STRICT_DEVMEM` without `IO_STRICT_DEVMEM` (the ALARM config).
+
+#### VRR test procedure
+
+Plan: three readings of the refresh rate, an eyes-on flicker check, then a power A/B. All legs on
+the VRR entry so the kernel is the same.
+
+1. Boot "linux-sl7 (VRR test)" (`sudo omarchy-sl7-test-entry enable vrr`, section 11b). Check that
+   `/sys/module/msm/parameters/vrr_enabled` is `Y`, `sl7-doctor` shows `vrr_capable=1`, and
+   `hyprctl getoption misc:vrr` reads 1.
+2. Kernel: `sudo sl7-vrr-rate --hw -s 10` hands-off. Expect `avr_ctrl` bit 0 = 1, mode 0, ratio
+   about 5.0. If AVR is not programmed, the gating chain failed (`crtc_state->vrr_enabled`, the
+   EDID monitor range). If it is programmed but idle still reads 120 Hz, look at bit 31 of
+   `avr_ctrl` (status) and report it.
+3. Live rate with `sl7-vrr-rate` (either method): hands-off, expect about 24 Hz with a blip a
+   minute from the bar clock; with the mouse circling, about 120 Hz; `mpv --video-sync=display-resample`
+   on a 24 fps file, 24 or 48 Hz; and one run on the normal entry, 120 Hz.
+4. Hyprland VRR on and off at runtime, never written to your config:
+
+   ```
+   hyprctl eval 'hl.config({ misc = { vrr = 0 } })'
+   hyprctl eval 'hl.config({ misc = { vrr = 1 } })'
+   hyprctl getoption misc:vrr -j | jq .int
+   ```
+
+   The user service of `omarchy-sl7-powermode` sets `misc.vrr` from `HYPRLAND_VRR` on this entry
+   and re-applies it after a config reload, so for the `vrr 0` legs set `HYPRLAND_VRR=` (empty)
+   in `/etc/omarchy-surface-sl7/power.conf`, restart it (`systemctl --user restart
+   omarchy-sl7-powermode`) and switch by hand. Use `vrr = 1` only: a VRR change is a full modeset
+   (the panel blanks for a few seconds), and `vrr = 2` would modeset on every fullscreen toggle.
+5. Flicker check at the low rate (eyes on the panel, the 24 Hz floor of an LCD can pulse in dark
+   grey): with `vrr = 1`, hands-off, show a static dark grey full screen and a grey gradient, for
+   example `mpv --fs --no-osc --keep-open=always 'av://lavfi:color=c=0x303030:s=2304x1536:d=0.1'`
+   and the same with `gradients=s=2304x1536:speed=0`. While it is up, confirm with
+   `sl7-vrr-rate` from another terminal that the rate really is low (move nothing). Look for
+   flicker or brightness pulsing, black frames, cursor lag. If it flickers, the minimum rate
+   needs raising (a kernel parameter clamp or an EDID override with a 30 or 40 Hz range; not
+   part of this package yet).
+6. Power A/B with `sl7-powermeter`, battery, backlight 30%, same Wi-Fi, nothing playing, three
+   alternating rounds, the live rate logged next to each run:
+
+   ```
+   sl7-powermeter --log vrr-a1.jsonl --seconds 180 --label vrr0-120hz   # (a) misc.vrr 0, 120 Hz
+   sl7-powermeter --log vrr-b1.jsonl --seconds 180 --label vrr0-60hz    # (b) misc.vrr 0, 60 Hz mode
+   sl7-powermeter --log vrr-c1.jsonl --seconds 180 --label vrr1-120hz   # (c) misc.vrr 1, 120 Hz
+   sl7-vrr-rate -s 20                                                   # beside each run
+   sl7-powermeter --compare vrr-a1.jsonl vrr-c1.jsonl
+   ```
+
+   The 60 Hz leg is a modeset: use `REFRESH_ON_BATTERY=60` in `power.conf` with the machine on
+   battery (the powermode service does the switch), and set it back to empty afterwards. Then one
+   leg of (a) on the normal entry to check that patch 0024 costs nothing when off, then a
+   30 minute `sl7-powertest idle` gauge run of the winner against (a). Expect (c) to beat (a) by
+   roughly 0.35 to 0.5 W if AVR works (an estimate from the 60 Hz difference, not a measurement).
+
 ### 9. Upstream leaf
 
 `surface-laptop-7.sh` (installed under `/usr/share/doc`) is an Omarchy-style
@@ -230,6 +372,39 @@ impossible; `82-omarchy-sl7-battery.hook` runs `omarchy-sl7-battery-patch` after
 `omarchy` install/upgrade (idempotent, no-op once upstream fixes the line). Also makes the
 negative `power_now` absolute. Remove both files and their PKGBUILD lines when #13029 lands.
 
+### 7b. Hardware video (Iris)
+
+linux-sl7 7.2.8-13 enables the Iris codec (patch 0086) with the Microsoft signed
+`qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn`. Get it with `omarchy-surface-sl7-firmware`
+(the file is optional there, so a staging directory made before it existed still installs); the
+installer kit stages it too. It is not in the initramfs hook on purpose: `iris` is a module that
+loads after the root filesystem is mounted, like the ADSP and CDSP images that the hook also
+leaves out. Generic Qualcomm images (`qcom/vpu/vpu30_p4.mbn` and friends) may exist in
+`linux-firmware-qcom`; they are signed for other boards and the SL7 uses the OEM signed file, as
+Surface firmware is OEM signed.
+
+The result is two V4L2 stateful (memory-to-memory) devices, `qcom-iris-decoder` and
+`qcom-iris-encoder`. Decode: H.264, HEVC, VP9, AV1. Encode: H.264, HEVC. It is not VA-API, so
+apps need a V4L2 path. Examples (copy mode, because the frames go back to system memory):
+
+```
+mpv --hwdec=v4l2m2m-copy clip.mp4
+ffmpeg -c:v h264_v4l2m2m -i clip.mp4 -f null -          # decode (also hevc_v4l2m2m)
+ffmpeg -i clip.mp4 -c:v h264_v4l2m2m -b:v 8M out.mp4    # encode (also hevc_v4l2m2m)
+gst-launch-1.0 filesrc location=clip.mp4 ! qtdemux ! h264parse ! v4l2h264dec ! fakesink
+gst-launch-1.0 videotestsrc num-buffers=300 ! video/x-raw,format=NV12 ! v4l2h264enc ! h264parse ! fakesink
+```
+
+(`h264_v4l2m2m` and `hevc_v4l2m2m` need an ffmpeg built with `--enable-v4l2-m2m`; Arch Linux ARM's
+is. Use `v4l2h265dec` and `v4l2h265enc` for HEVC in GStreamer. AV1 and VP9 decode need a
+GStreamer or ffmpeg build whose V4L2 decoder lists those formats.) Browsers: Firefox has an
+ffmpeg V4L2-M2M decode path (since 116, written for the Raspberry Pi); Mozilla bug 1852765
+reports it listed as supported but not used with the Qualcomm Venus decoder, so assume software
+decode in Firefox until `about:support` shows otherwise. Chromium's V4L2 video decoder is
+a ChromeOS feature: on ARM Linux it is not officially supported and needs your own build with
+`use_v4l2_codec=true`. Do not expect browser hardware decode on the SL7 today; mpv, ffmpeg and
+GStreamer are the way to use it. Status: untested on hardware.
+
 ### 11. `sl7-doctor`
 
 Read-only check (`/usr/bin/sl7-doctor`): running kernel and DT, 3 cpufreq policies, SAM
@@ -239,6 +414,8 @@ applied, whether they match the source), PSR state (`msm.psr_enabled`, whether t
 used the PSR test entry, PSR debugfs nodes and dmesg lines when readable; informational only)
 and VRR state (`msm.vrr_enabled`, whether this boot used the VRR test entry, the eDP
 `vrr_capable` property from `modetest`, debugfs `vrr_enabled`, Hyprland's `vrr`; read-only),
+the Iris firmware file, the video-codec node status and the iris V4L2 decoder/encoder devices
+(INFO, or WARN when the firmware is missing or the devices fail to appear; never a failure),
 the pending tap-to-click default (8f) and, from the journal, how often iptsd's mode watchdog had to
 re-enable touchpad multitouch this boot (warn only).
 Exit 1 on any failure.
@@ -309,6 +486,7 @@ Test steps:
    rate), and as root `grep -r vrr_enabled /sys/kernel/debug/dri/*/state`. Run something that
    renders at a varying rate (a game, `mpv` video, `glxgears` unthrottled) and watch for
    tearing-free, steady output. `sl7-doctor` prints all of these.
+   For the real instantaneous rate use `sl7-vrr-rate` (section 8i).
 5. Look for: flicker or brightness pulsing at low rates (the panel can drop to 24 Hz), black
    frames or blanking (link problems; check `dmesg`), cursor lag, resume failures.
 6. Power: on battery, `sl7-powertest idle --minutes 20 --label vrr`, then the same from the
@@ -617,6 +795,9 @@ Untested on hardware:
 - `sl7-powermeter` and `sl7-powertest --rails`: syntax-checked only, never run. Not exercised: the hwmon
   device itself (the kernel patches 0082-0083 are compile-checked only), the live view, `--log` and
   `--compare` on real data.
+- `sl7-usb-rpm` and its udev rule: shellchecked only, never run (not on the SL7, and the rule never
+  applied). `sl7-vrr-rate`: syntax-checked only; the DRM ioctl layouts and register offsets are from
+  the kernel headers and `dpu_hw_intf.c`, not exercised on the panel.
 - `omarchy-sl7-powermode`, `sl7-powertest`: logic exercised against fake sysfs trees with
   stubbed `iw`, `hyprctl`, `brightnessctl`, `gdbus` and `mpv` (caps, idempotency, restore,
   display switch and restore, watcher events, gauge sync, Ctrl-C restore, compare). Not run on
@@ -625,5 +806,8 @@ Untested on hardware:
   the GPU devfreq node name and OPP list, the real UPower signal and the `hl.monitor`
   refresh switch on the 2304x1536 panel (other monitor attributes such as bit depth are not
   carried over), and the gauge's real update cadence.
+- Iris hardware video (patch 0086, firmware `qcvss8380.mbn`, the `sl7-doctor` Iris lines, the
+  installer-kit staging): syntax and shellcheck only. Whether the Microsoft image loads and
+  authenticates, and each codec, is unknown until run on the SL7.
 - Not covered by this package: the ADSP late-start service, board-2 for Wi-Fi, the romulus13
   cpu fusing DTB hook.

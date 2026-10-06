@@ -1,0 +1,10 @@
+# Opt-in USB runtime PM for the dwc3 controllers (sl7-usb-rpm, README 8h). The
+# dwc3 core calls pm_runtime_forbid() at probe, so nothing suspends until
+# power/control is set to auto. "bind" runs after probe, so it wins.
+#
+# DISABLED BY DEFAULT: `sl7-usb-rpm udev-env` prints nothing unless the
+# device is under a controller listed in USB_RPM_TESTED_OK in
+# /etc/omarchy-surface-sl7/usb-rpm.conf, and that list ships empty. Root-owned
+# paths only.
+SUBSYSTEM=="platform", ACTION=="add|bind", KERNEL=="a400000.usb|a600000.usb|a800000.usb|xhci-hcd.*.auto", IMPORT{program}="/usr/bin/sl7-usb-rpm udev-env %p"
+SUBSYSTEM=="platform", ACTION=="add|bind", ENV{SL7_USB_RPM}=="auto", ATTR{power/autosuspend_delay_ms}="$env{SL7_USB_RPM_DELAY_MS}", ATTR{power/control}="auto"

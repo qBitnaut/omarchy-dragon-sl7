@@ -14,7 +14,7 @@ image-mode runs). A full ISO build and a boot on the SL7 are not verified yet.
 | Part | Content |
 |---|---|
 | ISO (partitions 1 and 2) | Omarchy `dragon` installer for `aarch64/snapdragon` with the `linux-sl7` kernel, a live UKI carrying the Qualcomm device trees (`.dtbauto` romulus13/15 picked by SMBIOS), the SAM keyboard modules in the live initramfs, and an offline mirror holding `linux-sl7`, `omarchy-surface-sl7`, `iptsd-sl7`, `qcom-firmware-extract` and the pkgbase shim. No firmware. |
-| `SL7DATA` (partition 3, FAT32, type Microsoft basic data) | `firmware/qcom/x1e80100/microsoft/...` (zap shader, ADSP, CDSP), `README.txt`, `installer-info.txt` |
+| `SL7DATA` (partition 3, FAT32, type Microsoft basic data) | `firmware/qcom/x1e80100/microsoft/...` (zap shader, ADSP, CDSP, Iris video), `README.txt`, `installer-info.txt` |
 
 At boot `sl7-firmware-stage.service` mounts `LABEL=SL7DATA` read-only, runs
 `qcom-firmware-extract --stage /run/omarchy/firmware -d /run/sl7data/firmware`

@@ -71,6 +71,9 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0072 | PCI: allow D3 for native hotplug-capable Root Ports on non-x86 | torvalds `d4c79b63d82d` (Manivannan Sadhasivam, v7.3-rc1) | merged for 7.3 (backport) |
 | 0082 | hwmon: `qcom_pld_power`, read-only firmware power telemetry (CPU clusters, GPU, system, USB) | ItsLucas, `drivers/qcom-pld-power/` at `1cc387f` (GPL-2.0-only), author kept, only build glue changed | not submitted; author says it needs a reviewed binding and more firmware evidence |
 | 0083 | romulus (13.8 and 15 inch): `pld-power@81f30000` node for 0082 | ours; resource from ItsLucas's `sl7_pld_device` | not submitted |
+| 0084 | SL7 local: romulus13 disables `&pcie3` and `&pcie3_phy` (the 15 inch card reader slot, empty on the 13.8 inch) | ours; RUNTIME-PLAN C1 | not submitted (candidate: romulus13 fix) |
+| 0085 | ath12k: DTIM stick mode for station vdevs (the STA follows the AP DTIM instead of listen interval 5) | torvalds `af50baccaa5f` (Daizhuang Bai, v7.3-rc1) | merged for 7.3 (backport) |
+| 0086 | SL7 local: romulus (13.8 and 15 inch) enables `&iris` with the Microsoft signed `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn` (V4L2 stateful decoder and encoder) | ours; firmware from the SL7 MSI via `omarchy-surface-sl7-firmware` | not submitted (needs signed firmware in linux-firmware) |
 
 Notes on the DT patches:
 
@@ -245,7 +248,7 @@ applied).
 
 ### Rebase onto 7.3
 
-When 7.3 is tagged, drop 0045-0052, 0061 and 0068-0069 and 0072, and also 0053-0058, 0059, 0062-0065
+When 7.3 is tagged, drop 0045-0052, 0061 and 0068-0069, 0072 and 0085, and also 0053-0058, 0059, 0062-0065
 only if they are in the tag (check with `git merge-base --is-ancestor`; they are
 7.4-queued). Re-run `scripts/fast-check.sh`.
 
@@ -337,6 +340,66 @@ power1-7 are CPU_CLUSTER_0, CPU_CLUSTER_1, CPU_CLUSTER_2, GPU, PSU_USB, USBC_TOT
   driver's checks should pass either way, but this is read from the code, not seen on hardware.
 - It loads on every boot once built (the DT node triggers the module alias). To switch it off:
   `echo 'blacklist qcom_pld_power' | sudo tee /etc/modprobe.d/no-pld-power.conf`.
+
+## Runtime power, round 1 (7.2.8-13)
+
+Two small patches for screen-on power and Wi-Fi power save. Neither has been built into a kernel
+package or run on the SL7 yet; the checks below are static.
+
+- **0084, no card reader on the 13.8 inch.** `x1e80100-microsoft-romulus.dtsi` enables `pcie3` and
+  `pcie3_phy` for the 15 inch's RTS5261 card reader. The 13.8 inch has none (Windows lists only the
+  Wi-Fi and NVMe root ports), so the controller never trains a link, and `pcie-qcom` keeps the
+  maximum OPP it voted at probe: a 15.75 GB/s peak interconnect vote on DDR (the largest on the
+  system), the Gen4 x8 PHY with its clocks and the `tcsr_pcie_8l_clkref_en` XO reference. The
+  patch sets both nodes to `disabled` in `x1e80100-microsoft-romulus13.dts` only; romulus15 is
+  unchanged. Nothing else references pcie3: `pcie3_port0` is a child of the controller, the
+  `pcie3_default` pinctrl state is used only by `pcie3`, the PHY supplies (`vreg_l3c`, `vreg_l3e`)
+  are shared and stay, `vreg_nvme` belongs to `pcie6a`, and the gcc node's `pcie3_phy` clock
+  parent is a disabled-by-default node on every other board. There is no dedicated pcie3 slot
+  regulator in the romulus DT. Expected: the `llcc_mc` peak falls from 15753000 to 7876500 kBps and
+  the DDR vote with it (NVMe becomes the floor at 7.88 GB/s), and the pcie3 PHY, clocks and GDSC
+  go off. Estimated gain 0.1 to 0.4 W; not measured. `dtc` was not available when the patch was
+  written, so the DTS change was reviewed by hand, not compiled.
+- **0085, ath12k DTIM stick mode.** `af50baccaa5f` applies to 7.2.8 with the queue (two offsets,
+  no fuzz) and `ath12k/mac.o` compiles for arm64 with the ALARM config. It sets
+  `WMI_VDEV_PARAM_DTIM_POLICY` to stick for station vdevs when the target supports STA power save.
+  With power save on, the firmware followed listen interval 5 (500 ms) instead of the AP's DTIM,
+  which added latency. It does not save power by itself; it makes Wi-Fi power save on battery
+  (`omarchy-surface-sl7-power wifi-powersave enable`) less painful. Tested upstream on WCN7850.
+
+Measure with `sl7-powermeter` (omarchy-surface-sl7 README, section 12d), battery, backlight 30%:
+
+- 0084: `sl7-powermeter --log` for 180 s three times on the previous kernel (or the same kernel with
+  a `fdtput`-patched DTB as the plan describes) and three times on 7.2.8-13, alternating, same
+  Wi-Fi. Compare SYS. Also check `cat /sys/kernel/debug/interconnect/interconnect_summary | grep -E
+  'llcc_mc|ebi|1bd0000'` (peak 7876500 kBps, no `1bd0000.pcie` entry), `dmesg | grep -i pcie` (no
+  `1bd0000` probe, no "Device not found" at resume) and that Wi-Fi and NVMe are unaffected.
+- 0085: `iw dev wlan0 set power_save on`, then `ping -i 0.2 -c 300 <gateway>` on 7.2.8-12 and
+  7.2.8-13 and compare the average and maximum round trip time; then the power A/B with power save
+  on against off on 7.2.8-13.
+
+## Iris video codec (7.2.8-13, patch 0086)
+
+`hamoa.dtsi` describes `iris: video-codec@aa00000` (`qcom,x1e80100-iris`, falling back to
+`qcom,sm8550-iris`) and leaves it `disabled` because the firmware is signed by the OEM. Patch 0086
+enables it in `x1e80100-microsoft-romulus.dtsi` (both the 13.8 and the 15 inch) with
+`firmware-name = "qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn"`, the Microsoft signed image from the
+SL7 MSI (`omarchy-surface-sl7-firmware` installs it; nothing here ships it). The driver is
+`VIDEO_QCOM_IRIS=m` and the clock controller `SM_VIDEOCC_8550=m` (it binds `qcom,x1e80100-videocc`,
+which `hamoa.dtsi` enables by default); both were already in `config.sl7`.
+
+Checked statically against v7.2: `video_mem` (`video@87700000`, 7 MiB, `no-map`) is in `hamoa.dtsi`
+and romulus does not override it; the node carries its own clocks, GDSCs, OPP table, interconnects
+and IOMMU streams. The `firmware-name` property overrides the driver default
+(`qcom/vpu/vpu30_p4.mbn`, which the sm8550 data would otherwise request). The patch applies on top
+of the queue (checked against a v7.2 tree with 0043, 0064 and 0083 applied). The DTS was not compiled
+(no `dtc` here). Not run on the SL7.
+
+Codecs the 7.2 driver advertises for this platform (`iris_platform_vpu3x.c`, `iris_vdec.c`,
+`iris_venc.c`, `iris_hfi_gen2_defines.h`): the decoder accepts H.264, HEVC, VP9 and AV1 and outputs
+NV12 (plus the Qualcomm tiled `QC08C` and 10 bit `P010`/`QC10C`); the encoder produces H.264 and HEVC
+from NV12 (or `QC08C`). There is no VP9 or AV1 encode. Whether the Microsoft firmware image supports
+each codec is untested.
 
 ## Build
 

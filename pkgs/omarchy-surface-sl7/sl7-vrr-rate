@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Measure the real refresh rate of the Surface Laptop 7 panel over N seconds.
+
+  sl7-vrr-rate [-s N]            vblank wait loop (no root)
+  sl7-vrr-rate --hw [-s N]       DPU hardware frame counter (root, read-only)
+
+`hyprctl monitors` shows the mode rate, never the instantaneous VRR rate, so
+neither does a "120" there prove anything. This tool measures the rate at the
+panel side of the display pipe instead.
+
+vblank (default): loops DRM_IOCTL_WAIT_VBLANK (relative 1) on the DRM card of
+eDP-1 and timestamps each return in userspace with CLOCK_MONOTONIC. The
+kernel's own vblank timestamps assume the fixed mode rate and are wrong under
+AVR, so they are not used. Holding a vblank reference keeps the vsync IRQ on
+but causes no atomic commits. Needs read access to /dev/dri/cardN only.
+
+--hw: as root, maps the eDP DPU interface block (INTF_5, physical
+0x0AE3A000) through /dev/mem READ-ONLY (PROT_READ, no write mapping, no write
+ever) and reads INTF_FRAME_COUNT once a second. It first refuses to run unless:
+the device tree says the DPU is at 0x0ae01000 and the eDP controller at
+0x0aea0000 is enabled with an aux-bus panel; the DPU and its parent are
+runtime-active; eDP-1 is connected and enabled; and the interface registers
+look sane (INTF_VSYNC_PERIOD_F0 non zero, INTF_FRAME_LINE_COUNT_EN set).
+Reading a powered-down DPU can hang the SoC, so run it with the screen on.
+Registers (drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c): INTF_VSYNC_PERIOD_F0
+0x00C, INTF_FRAME_LINE_COUNT_EN 0x0A8, INTF_FRAME_COUNT 0x0AC, INTF_AVR_CONTROL
+/MODE/TRIGGER/VTOTAL 0x270/0x274/0x278/0x27C.
+
+Expected with VRR working (VRR test entry, misc.vrr 1): about 24 Hz hands-off,
+about 120 Hz while the mouse moves, 120 Hz on the normal entry.
+"""
+
+import argparse
+import ctypes
+import fcntl
+import glob
+import json
+import mmap
+import os
+import statistics
+import struct
+import sys
+import time
+
+# eDP controller aea0000 is MSM_DP_CONTROLLER_3 = intf_5, catalog base 0x39000
+# inside the mdss_mdp register range starting at 0x0ae01000 (dpu_9_2_x1e80100.h).
+MDP_BASE = 0x0AE01000
+EDP_CTRL_BASE = 0x0AEA0000
+INTF_BASE = MDP_BASE + 0x39000
+INTF_VSYNC_PERIOD_F0 = 0x00C
+INTF_FRAME_LINE_COUNT_EN = 0x0A8
+INTF_FRAME_COUNT = 0x0AC
+INTF_AVR_CONTROL = 0x270
+INTF_AVR_MODE = 0x274
+INTF_AVR_VTOTAL = 0x27C
+DT = "/proc/device-tree/soc@0/display-subsystem@ae00000"
+DT_MDP = DT + "/display-controller@ae01000"
+DT_DP3 = DT + "/displayport-controller@aea0000"
+
+DRM_MODE_CONNECTOR_EDP = 14
+
+
+def die(msg, code=1):
+    print(f"sl7-vrr-rate: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ioc_rw(nr, size):
+    # _IOWR('d', nr, size): dir read|write = 3
+    return (3 << 30) | (size << 16) | (ord("d") << 8) | nr
+
+
+# ---------------------------------------------------------------- DRM lookup
+
+class ModeCardRes(ctypes.Structure):
+    _fields_ = [("fb_id_ptr", ctypes.c_uint64), ("crtc_id_ptr", ctypes.c_uint64),
+                ("connector_id_ptr", ctypes.c_uint64), ("encoder_id_ptr", ctypes.c_uint64),
+                ("count_fbs", ctypes.c_uint32), ("count_crtcs", ctypes.c_uint32),
+                ("count_connectors", ctypes.c_uint32), ("count_encoders", ctypes.c_uint32),
+                ("min_width", ctypes.c_uint32), ("max_width", ctypes.c_uint32),
+                ("min_height", ctypes.c_uint32), ("max_height", ctypes.c_uint32)]
+
+
+class ModeGetConnector(ctypes.Structure):
+    _fields_ = [("encoders_ptr", ctypes.c_uint64), ("modes_ptr", ctypes.c_uint64),
+                ("props_ptr", ctypes.c_uint64), ("prop_values_ptr", ctypes.c_uint64),
+                ("count_modes", ctypes.c_uint32), ("count_props", ctypes.c_uint32),
+                ("count_encoders", ctypes.c_uint32), ("encoder_id", ctypes.c_uint32),
+                ("connector_id", ctypes.c_uint32), ("connector_type", ctypes.c_uint32),
+                ("connector_type_id", ctypes.c_uint32), ("connection", ctypes.c_uint32),
+                ("mm_width", ctypes.c_uint32), ("mm_height", ctypes.c_uint32),
+                ("subpixel", ctypes.c_uint32), ("pad", ctypes.c_uint32)]
+
+
+class ModeGetEncoder(ctypes.Structure):
+    _fields_ = [("encoder_id", ctypes.c_uint32), ("encoder_type", ctypes.c_uint32),
+                ("crtc_id", ctypes.c_uint32), ("possible_crtcs", ctypes.c_uint32),
+                ("possible_clones", ctypes.c_uint32)]
+
+
+def find_edp_card():
+    """Return (device path, connector name) of the eDP connector's card."""
+    for path in sorted(glob.glob("/sys/class/drm/card[0-9]*-eDP-*")):
+        base = os.path.basename(path)
+        card, _, conn = base.partition("-")
+        return f"/dev/dri/{card}", conn
+    return "/dev/dri/card0", None
+
+
+def edp_crtc_index(fd):
+    """Index of the CRTC currently driving eDP, or None. Mode ioctls only, no
+    master needed, nothing is changed."""
+    res = ModeCardRes()
+    fcntl.ioctl(fd, ioc_rw(0xA0, ctypes.sizeof(res)), res)
+    crtcs = (ctypes.c_uint32 * res.count_crtcs)()
+    conns = (ctypes.c_uint32 * res.count_connectors)()
+    res2 = ModeCardRes()
+    res2.crtc_id_ptr = ctypes.addressof(crtcs)
+    res2.connector_id_ptr = ctypes.addressof(conns)
+    res2.count_crtcs = res.count_crtcs
+    res2.count_connectors = res.count_connectors
+    fcntl.ioctl(fd, ioc_rw(0xA0, ctypes.sizeof(res2)), res2)
+    for cid in list(conns)[:res2.count_connectors]:
+        con = ModeGetConnector()
+        con.connector_id = cid
+        fcntl.ioctl(fd, ioc_rw(0xA7, ctypes.sizeof(con)), con)
+        if con.connector_type != DRM_MODE_CONNECTOR_EDP or not con.encoder_id:
+            continue
+        enc = ModeGetEncoder()
+        enc.encoder_id = con.encoder_id
+        fcntl.ioctl(fd, ioc_rw(0xA6, ctypes.sizeof(enc)), enc)
+        if enc.crtc_id in list(crtcs):
+            return list(crtcs).index(enc.crtc_id)
+    return None
+
+
+# ------------------------------------------------------------- vblank method
+
+def run_vblank(args):
+    dev, conn = (args.card, None) if args.card else find_edp_card()
+    try:
+        fd = os.open(dev, os.O_RDWR | os.O_CLOEXEC)
+    except OSError as e:
+        die(f"cannot open {dev}: {e.strerror} (needs access to the DRM card)")
+    crtc = args.crtc
+    if crtc is None:
+        try:
+            crtc = edp_crtc_index(fd)
+        except OSError as e:
+            print(f"sl7-vrr-rate: CRTC lookup failed ({e.strerror}); assuming 0", file=sys.stderr)
+            crtc = None
+        if crtc is None:
+            print("sl7-vrr-rate: eDP is not on a CRTC (screen off?); trying CRTC 0", file=sys.stderr)
+            crtc = 0
+    if not 0 <= crtc < 32:
+        die("--crtc must be 0..31")
+    vtype = (crtc << 1) & 0x3E  # _DRM_VBLANK_RELATIVE | HIGH_CRTC bits
+    fmt = "@IIll"  # union drm_wait_vblank: type, sequence, long, long
+    req = ioc_rw(0x3A, struct.calcsize(fmt))
+
+    stamps = []
+    timeouts = 0
+    end = time.monotonic() + args.seconds
+    while time.monotonic() < end:
+        buf = bytearray(struct.pack(fmt, vtype, 1, 0, 0))
+        try:
+            fcntl.ioctl(fd, req, buf, True)
+        except OSError as e:
+            timeouts += 1
+            if timeouts >= 3:
+                die(f"vblank wait keeps failing ({e.strerror}): no vsync interrupt "
+                    "on this CRTC (screen off, or wrong --crtc)")
+            continue
+        timeouts = 0
+        stamps.append(time.monotonic())
+    os.close(fd)
+    if len(stamps) < 2:
+        die("fewer than two vblanks in the window: the panel is not refreshing, or the screen is off")
+    iv = [(b - a) * 1000.0 for a, b in zip(stamps, stamps[1:])]
+    span = stamps[-1] - stamps[0]
+    hz = (len(stamps) - 1) / span
+    out = {"method": "vblank", "device": dev, "connector": conn, "crtc": crtc,
+           "seconds": round(span, 3), "vblanks": len(stamps),
+           "effective_hz": round(hz, 3),
+           "interval_ms": {"min": round(min(iv), 2), "median": round(statistics.median(iv), 2),
+                           "mean": round(statistics.fmean(iv), 2), "max": round(max(iv), 2)}}
+    report(out, args, f"{len(stamps)} vblanks in {span:.2f} s")
+
+
+# ---------------------------------------------------------- hardware method
+
+def dt_u32s(path):
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    return struct.unpack(f">{len(raw) // 4}I", raw[: len(raw) // 4 * 4])
+
+
+def dt_str(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read().rstrip(b"\0").decode()
+    except OSError:
+        return None
+
+
+def sysfs_text(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def refuse(why):
+    die(f"refusing to read the hardware counter: {why}", 2)
+
+
+def check_hw_target():
+    reg = dt_u32s(DT_MDP + "/reg")
+    if not reg or len(reg) < 4 or ((reg[0] << 32) | reg[1]) != MDP_BASE:
+        refuse(f"device tree has no DPU (display-controller) at {MDP_BASE:#x}; "
+               "this is not a Surface Laptop 7 with the expected hamoa layout")
+    reg = dt_u32s(DT_DP3 + "/reg")
+    if not reg or len(reg) < 4 or ((reg[0] << 32) | reg[1]) != EDP_CTRL_BASE:
+        refuse(f"device tree has no DP controller at {EDP_CTRL_BASE:#x}")
+    if dt_str(DT_DP3 + "/status") not in (None, "okay"):
+        refuse("the DP controller at 0xaea0000 is not enabled in the device tree")
+    if not os.path.isdir(DT_DP3 + "/aux-bus"):
+        refuse("the DP controller at 0xaea0000 has no aux-bus panel, so it is not the eDP link")
+    compat = dt_str(DT_MDP + "/compatible") or ""
+    if "x1e80100" not in compat:
+        refuse(f"DPU compatible is {compat!r}, expected qcom,x1e80100-dpu")
+    for name in ("ae00000.display-subsystem", "ae01000.display-controller"):
+        st = sysfs_text(f"/sys/bus/platform/devices/{name}/power/runtime_status")
+        if st != "active":
+            refuse(f"{name} runtime status is {st!r}, not 'active' (screen off?)")
+    cards = glob.glob("/sys/class/drm/card[0-9]*-eDP-*")
+    if not cards:
+        refuse("no eDP connector in /sys/class/drm")
+    if sysfs_text(cards[0] + "/status") != "connected" or sysfs_text(cards[0] + "/enabled") != "enabled":
+        refuse("eDP is not connected and enabled")
+
+
+def run_hw(args):
+    if os.geteuid() != 0:
+        die("--hw reads /dev/mem and needs root", 2)
+    check_hw_target()
+    try:
+        fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+        mm = mmap.mmap(fd, mmap.PAGESIZE, mmap.MAP_SHARED, mmap.PROT_READ, offset=INTF_BASE)
+    except OSError as e:
+        die(f"cannot map {INTF_BASE:#x} read-only through /dev/mem: {e.strerror} "
+            "(CONFIG_STRICT_DEVMEM allows MMIO; CONFIG_IO_STRICT_DEVMEM or lockdown does not)", 2)
+    # Aligned 32-bit loads only: struct.unpack_from copies byte by byte and
+    # could tear the counter.
+    regs = memoryview(mm).cast("I")
+
+    def rd(off):
+        return regs[off // 4]
+
+    period = rd(INTF_VSYNC_PERIOD_F0)
+    if period in (0, 0xFFFFFFFF):
+        refuse(f"INTF_VSYNC_PERIOD_F0 reads {period:#x}: this is not a programmed eDP interface block")
+    cnt_en = rd(INTF_FRAME_LINE_COUNT_EN)
+    if cnt_en == 0:
+        refuse("INTF_FRAME_LINE_COUNT_EN is 0: the frame counter is not enabled, so it would not count")
+    avr_ctrl, avr_mode, avr_vtotal = rd(INTF_AVR_CONTROL), rd(INTF_AVR_MODE), rd(INTF_AVR_VTOTAL)
+    ratio = avr_vtotal / period
+
+    print(f"sl7-vrr-rate: hardware counter at {INTF_BASE:#x}, read-only", file=sys.stderr)
+    print(f"  avr_ctrl {avr_ctrl:#x} (bit0 enable {avr_ctrl & 1}, bit31 status {avr_ctrl >> 31}) "
+          f"avr_mode {avr_mode:#x} vtotal ratio {ratio:.2f} (AVR on: ~5.00)", file=sys.stderr)
+
+    t0, c0 = time.monotonic(), rd(INTF_FRAME_COUNT)
+    prev_t, prev_c = t0, c0
+    per_sec = []
+    end = t0 + args.seconds
+    while True:
+        time.sleep(max(0.0, min(1.0, end - time.monotonic())))
+        t, c = time.monotonic(), rd(INTF_FRAME_COUNT)
+        per_sec.append(((c - prev_c) & 0xFFFFFFFF) / (t - prev_t))
+        prev_t, prev_c = t, c
+        if t >= end:
+            break
+    total = (prev_c - c0) & 0xFFFFFFFF
+    span = prev_t - t0
+    out = {"method": "hw-frame-counter", "address": hex(INTF_BASE), "seconds": round(span, 3),
+           "frames": total, "effective_hz": round(total / span, 3),
+           "per_second_hz": {"min": round(min(per_sec), 2), "max": round(max(per_sec), 2)},
+           "avr_control": hex(avr_ctrl), "avr_mode": hex(avr_mode),
+           "avr_vtotal_ratio": round(ratio, 3)}
+    report(out, args, f"{total} frames in {span:.2f} s")
+
+
+def report(out, args, what):
+    if args.json:
+        print(json.dumps(out))
+        return
+    print(f"sl7-vrr-rate: {out['method']}: {what}")
+    print(f"  effective refresh rate: {out['effective_hz']:.2f} Hz")
+    if "interval_ms" in out:
+        iv = out["interval_ms"]
+        print(f"  interval ms: min {iv['min']} median {iv['median']} mean {iv['mean']} max {iv['max']}")
+    if "per_second_hz" in out:
+        p = out["per_second_hz"]
+        print(f"  per second: min {p['min']} Hz, max {p['max']} Hz")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Effective refresh rate of the SL7 panel over N seconds.")
+    ap.add_argument("-s", "--seconds", type=float, default=10.0, help="window length (default 10)")
+    ap.add_argument("--hw", action="store_true",
+                    help="root: read the DPU hardware frame counter through /dev/mem (read-only)")
+    ap.add_argument("--card", help="DRM card node for the vblank method (default: the eDP card)")
+    ap.add_argument("--crtc", type=int, help="CRTC index for the vblank method (default: found from eDP)")
+    ap.add_argument("--json", action="store_true", help="print one JSON object")
+    args = ap.parse_args()
+    if not 1 <= args.seconds <= 3600:
+        die("--seconds must be 1..3600")
+    try:
+        (run_hw if args.hw else run_vblank)(args)
+    except KeyboardInterrupt:
+        die("interrupted", 130)
+
+
+if __name__ == "__main__":
+    main()

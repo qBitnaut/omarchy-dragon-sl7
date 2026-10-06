@@ -128,3 +128,8 @@
 # 14. Power telemetry: qcom_pld_power (ItsLucas) hwmon driver + romulus DT node
 0082-hwmon-Add-Qualcomm-X1E-PLD-firmware-power-telemetry.patch
 0083-SL7-arm64-dts-qcom-x1e80100-romulus-Add-the-PLD-power-telemetry-node.patch
+
+# 15. Runtime power, round 1: no card reader on the 13.8 inch (SL7 local), ath12k DTIM stick mode (7.3); Iris video codec (SL7 local)
+0084-SL7-arm64-dts-qcom-x1e80100-romulus13-Disable-the-empty-pcie3-card-reader-slot.patch
+0085-wifi-ath12k-Set-DTIM-policy-to-stick-mode-for-station-i.patch
+0086-SL7-arm64-dts-qcom-x1e80100-romulus-Enable-the-Iris-video-codec.patch

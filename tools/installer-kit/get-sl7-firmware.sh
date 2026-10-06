@@ -38,6 +38,7 @@ required=(
 	"b03f066e2645dbe35a33a08a91312842f5cee3676cac3e111f1f3dabd1cf4e9e proextadsp8380/adsp_dtbs.elf"
 	"4a67a03367f2eff2f8a0e867ca25d2bf2fcd5aee3e41e2c9f436c804e257c789 qcnspmcdmextcdsp8380/qccdsp8380.mbn"
 	"93941f040da14b8305d39579686d886706d22954a538b03da676c1aaa191797f qcnspmcdmextcdsp8380/cdsp_dtbs.elf"
+	"121d6864e5b8408f5c43d211f1634b59a6fb333c98c880cdbcd1bcb9f3c7e2f4 qcdx8380/qcvss8380.mbn"
 )
 
 fw_rel="ProgramFiles64Folder/SurfaceUpdate"

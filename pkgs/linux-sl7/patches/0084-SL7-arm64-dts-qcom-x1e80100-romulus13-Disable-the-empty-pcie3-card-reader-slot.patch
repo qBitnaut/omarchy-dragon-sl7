@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 22:01:00 -0500
+Subject: [PATCH] SL7 local: arm64: dts: qcom: x1e80100-romulus13: Disable the empty pcie3 card reader slot
+
+SL7 local: arm64: dts: qcom: x1e80100-romulus13: Disable the empty pcie3 card reader slot
+
+The shared romulus DTSI enables pcie3 and pcie3_phy for the RTS5261 card
+reader of the 15 inch Surface Laptop 7. The 13.8 inch has no card reader
+(Windows lists only two PCIe root ports there: Wi-Fi and NVMe), so on
+romulus13 the controller never trains a link.
+
+pcie-qcom votes the maximum OPP at probe and lowers it only after link-up,
+so the empty controller keeps a 15.75 GB/s peak interconnect vote on
+DDR (the largest on the system), the Gen4 x8 PHY with its pipe, aux and
+rchng clocks, and the tcsr_pcie_8l_clkref_en XO reference on for as long as
+the machine is awake.
+
+Disable both nodes in romulus13 only. romulus15 is untouched. Nothing else
+needs a change:
+  - pcie3_port0 (reset and wake GPIOs) is a child of the disabled
+    controller and is not probed.
+  - The pcie3_default pinctrl state is referenced only by pcie3, so it is
+    simply never applied; the three pads stay in their reset state.
+  - The PHY supplies vreg_l3c and vreg_l3e are shared with other
+    consumers and stay as they are. There is no dedicated pcie3 slot
+    regulator in the romulus DT (vreg_nvme belongs to pcie6a).
+  - The gcc node lists pcie3_phy as a clock parent. hamoa.dtsi leaves the
+    PHY disabled by default, so boards without pcie3 already run this way.
+
+Rationale: RUNTIME-PLAN.md section 4.1 (C1). Expected on the 13.8 inch: the
+llcc_mc peak falls from 15753000 to 7876500 kBps and the PCIe3 PHY, clocks
+and GDSC go off. Not measured yet.
+
+Origin: ours
+Upstream-Status: Not submitted (candidate: romulus13 card reader fix)
+---
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+@@ -156,6 +156,21 @@
+ };
+ 
+ /*
++ * No card reader on the 13.8 inch: the RTS5261 behind pcie3 is a 15 inch
++ * (romulus15) part and the slot is empty here, so the link never trains.
++ * Leaving the controller enabled keeps the maximum OPP and the 15.75 GB/s
++ * peak interconnect vote that pcie-qcom casts at probe, plus the 8 lane PHY
++ * and its clocks, for as long as the machine is awake.
++ */
++&pcie3 {
++	status = "disabled";
++};
++
++&pcie3_phy {
++	status = "disabled";
++};
++
++/*
+  * Touch digitizer (GTCH, MSHW0460 on units with a Surface Touch G6 module):
+  * HID over SPI in QSPI mode on QUP1 SE2. Wiring from the ACPI GTCH device:
+  * SpiSerialBusV2 40 MHz mode 0, IRQ GPIO51, reset GPIO48, VDD enable GPIO64.

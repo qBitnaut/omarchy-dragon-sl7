@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Opt-in USB runtime power management for the three dwc3 controllers of the
+# Surface Laptop 7, one controller at a time.
+#
+#   sl7-usb-rpm status
+#   sl7-usb-rpm enable <controller> [--record]
+#   sl7-usb-rpm disable <controller> [--forget]
+#   sl7-usb-rpm enable-all-tested
+#
+# Controllers: a400000.usb (usb_mp, the USB-A port behind the PTN3222 repeater),
+# a600000.usb and a800000.usb (the two USB-C ports). The ".usb" suffix is optional.
+# Confirm which bus is which port with `lsusb -t` and a stick in each port.
+#
+# The dwc3 core calls pm_runtime_forbid() at probe, so by default nothing here
+# ever runtime-suspends (power/control = on). `enable` writes power/control=auto
+# (and power/autosuspend_delay_ms) for the controller and its xHCI child, now,
+# until reboot. `--record` also lists the controller in
+# /etc/omarchy-surface-sl7/usb-rpm.conf as tested OK. Only controllers listed
+# there are enabled at boot by /usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules
+# (through `sl7-usb-rpm udev-env`, an internal subcommand). The shipped list is
+# empty, so the rule does nothing until you opt in. `disable` writes `on` again
+# (the rollback); `--forget` also removes the controller from the list.
+#
+# WARNING: a Dell Latitude 7455 (same SoC family) shut itself down with runtime PM
+# enabled on all four of its controllers and was fine with three
+# (lore 20260221105245.19328-1-daniel@quora.org; Linaro arm64-laptops issue 14).
+# Enable one controller, use it for a while (plug and unplug, a DP monitor, charging,
+# wake from suspend by a USB keyboard), and only then record it and go on to the
+# next. Save your work first; `enable` runs sync before it writes.
+set -euo pipefail
+
+CONF=${SL7_USB_RPM_CONF:-/etc/omarchy-surface-sl7/usb-rpm.conf}
+SYS=${SL7_USB_RPM_SYSFS:-/sys}
+CONTROLLERS=(a400000.usb a600000.usb a800000.usb)
+DEFAULT_DELAY_MS=2000
+
+die() {
+  echo "sl7-usb-rpm: $*" >&2
+  exit 1
+}
+
+usage() {
+  sed -n '7,10p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+need_root() {
+  [[ $EUID -eq 0 ]] || die "needs root (sudo sl7-usb-rpm $*)"
+}
+
+# a400000, a400000.usb -> a400000.usb ; anything else is refused.
+norm() {
+  local c=${1%.usb} n
+  for n in "${CONTROLLERS[@]}"; do
+    [[ $n == "$c.usb" ]] && { echo "$n"; return 0; }
+  done
+  die "unknown controller '$1' (known: ${CONTROLLERS[*]})"
+}
+
+# conf_get KEY: last KEY=value line, quotes stripped. The file is never sourced.
+conf_get() {
+  local v
+  [[ -r $CONF ]] || return 0
+  v=$(grep -E "^$1=" "$CONF" | tail -n 1 || true)
+  v=${v#*=}
+  v=${v//\"/}
+  v=${v//\'/}
+  echo "$v"
+}
+
+tested_list() {
+  local n out=() list
+  list=" $(conf_get USB_RPM_TESTED_OK) "
+  for n in "${CONTROLLERS[@]}"; do
+    [[ $list == *" $n "* ]] && out+=("$n")
+  done
+  echo "${out[*]:-}"
+}
+
+delay_ms() {
+  local d
+  d=$(conf_get USB_RPM_DELAY_MS)
+  [[ $d =~ ^[0-9]+$ ]] || d=$DEFAULT_DELAY_MS
+  echo "$d"
+}
+
+is_tested() {
+  [[ " $(tested_list) " == *" $1 "* ]]
+}
+
+# conf_set_tested "list": rewrite the USB_RPM_TESTED_OK line in place.
+conf_set_tested() {
+  local line="USB_RPM_TESTED_OK=\"$1\"" tmp
+  [[ -f $CONF ]] || die "$CONF is missing (reinstall omarchy-surface-sl7)"
+  tmp=$(mktemp)
+  if grep -qE '^USB_RPM_TESTED_OK=' "$CONF"; then
+    awk -v l="$line" '/^USB_RPM_TESTED_OK=/ { print l; next } { print }' "$CONF" > "$tmp"
+  else
+    { cat "$CONF"; echo "$line"; } > "$tmp"
+  fi
+  cat "$tmp" > "$CONF"
+  rm -f "$tmp"
+}
+
+record() {
+  local n list=() c
+  for n in "${CONTROLLERS[@]}"; do
+    if [[ $n == "$1" ]]; then
+      [[ $2 == add ]] && list+=("$n")
+    elif is_tested "$n"; then
+      list+=("$n")
+    fi
+  done
+  c=${list[*]:-}
+  conf_set_tested "$c"
+}
+
+# Sysfs directory of the controller, and its xHCI children.
+dev_dir() {
+  local d="$SYS/bus/platform/devices/$1"
+  [[ -e $d ]] || return 1
+  readlink -f "$d"
+}
+
+xhci_dirs() {
+  local ctrl=$1 x
+  for x in "$SYS"/bus/platform/devices/xhci-hcd.*.auto; do
+    [[ -e $x ]] || continue
+    x=$(readlink -f "$x")
+    [[ $x == "$ctrl"/* ]] && echo "$x"
+  done
+}
+
+attr() {
+  local v
+  v=$(cat "$1/power/$2" 2>/dev/null) || v=-
+  echo "$v"
+}
+
+put() {
+  # put DIR ATTR VALUE: write one power attribute if it exists.
+  [[ -w $1/power/$2 ]] || return 1
+  echo "$3" > "$1/power/$2"
+}
+
+apply_one() {
+  local name=$1 want=$2 d x ms
+  d=$(dev_dir "$name") || die "$name is not present in sysfs (not bound, or not an SL7?)"
+  ms=$(delay_ms)
+  # xHCI child first when enabling, parent first when disabling: the parent must
+  # stay awake while a child is being changed.
+  if [[ $want == auto ]]; then
+    while read -r x; do
+      [[ -n $x ]] || continue
+      put "$x" autosuspend_delay_ms "$ms" || true
+      put "$x" control auto || echo "sl7-usb-rpm: could not write $x/power/control" >&2
+    done < <(xhci_dirs "$d")
+    put "$d" autosuspend_delay_ms "$ms" || true
+    put "$d" control auto || die "could not write $d/power/control"
+  else
+    put "$d" control on || die "could not write $d/power/control"
+    while read -r x; do
+      [[ -n $x ]] || continue
+      put "$x" control on || true
+    done < <(xhci_dirs "$d")
+  fi
+  echo "$name: power/control=$(attr "$d" control) runtime_status=$(attr "$d" runtime_status)"
+}
+
+warn_enable() {
+  cat >&2 <<'EOF'
+sl7-usb-rpm: WARNING: USB runtime PM is experimental on this SoC family. A Dell
+Latitude 7455 shut the machine down with all four controllers enabled and was fine
+with three. Enable one controller at a time and test it (plug and unplug, a DP
+monitor, charging, wake from suspend by a USB keyboard) before recording it.
+Roll back with: sudo sl7-usb-rpm disable <controller>
+EOF
+}
+
+cmd_status() {
+  local n d x listed
+  printf 'tested OK (usb-rpm.conf): %s\n' "$(tested_list)"
+  printf 'autosuspend delay: %s ms\n\n' "$(delay_ms)"
+  printf '%-14s %-9s %-10s %-10s %-9s %s\n' controller control runtime delay "listed" xhci
+  for n in "${CONTROLLERS[@]}"; do
+    listed=no
+    is_tested "$n" && listed=yes
+    if ! d=$(dev_dir "$n"); then
+      printf '%-14s %s\n' "$n" "not present"
+      continue
+    fi
+    printf '%-14s %-9s %-10s %-10s %-9s' "$n" "$(attr "$d" control)" "$(attr "$d" runtime_status)" \
+      "$(attr "$d" autosuspend_delay_ms)" "$listed"
+    while read -r x; do
+      [[ -n $x ]] && printf ' %s=%s/%s' "$(basename "$x")" "$(attr "$x" control)" "$(attr "$x" runtime_status)"
+    done < <(xhci_dirs "$d")
+    echo
+  done
+  echo
+  echo "control 'on' means never suspended (the default). Check which port is which with lsusb -t."
+}
+
+cmd_enable() {
+  local n rec=no
+  need_root enable "$@"
+  [[ $# -ge 1 ]] || usage
+  n=$(norm "$1")
+  shift
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --record) rec=yes ;;
+      *) usage ;;
+    esac
+    shift
+  done
+  warn_enable
+  sync
+  apply_one "$n" auto
+  if [[ $rec == yes ]]; then
+    record "$n" add
+    echo "$n recorded as tested OK in $CONF"
+  else
+    echo "$n enabled until reboot. After testing: sudo sl7-usb-rpm enable $n --record"
+  fi
+}
+
+cmd_disable() {
+  local n forget=no
+  need_root disable "$@"
+  [[ $# -ge 1 ]] || usage
+  n=$(norm "$1")
+  shift
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --forget) forget=yes ;;
+      *) usage ;;
+    esac
+    shift
+  done
+  apply_one "$n" on
+  if [[ $forget == yes ]]; then
+    record "$n" remove
+    echo "$n removed from the tested list in $CONF"
+  fi
+}
+
+cmd_enable_all_tested() {
+  local list n count=0
+  need_root enable-all-tested
+  list=$(tested_list)
+  if [[ -z $list ]]; then
+    echo "sl7-usb-rpm: no controller is listed as tested OK in $CONF; nothing to do."
+    return 0
+  fi
+  warn_enable
+  sync
+  for n in $list; do
+    apply_one "$n" auto
+    count=$((count + 1))
+    sleep 1
+  done
+  echo "sl7-usb-rpm: $count controller(s) enabled until reboot"
+}
+
+# Internal, called by the udev rule: print udev environment assignments for the
+# device path in $1 if it belongs to a listed controller. Prints nothing otherwise,
+# so the default (empty list) never touches a device.
+cmd_udev_env() {
+  local path=$1 n
+  for n in $(tested_list); do
+    if [[ /$path/ == */"$n"/* ]]; then
+      echo "SL7_USB_RPM=auto"
+      echo "SL7_USB_RPM_DELAY_MS=$(delay_ms)"
+      return 0
+    fi
+  done
+  return 0
+}
+
+main() {
+  local sub=${1:-}
+  [[ $# -gt 0 ]] && shift
+  case $sub in
+    status) cmd_status ;;
+    enable) cmd_enable "$@" ;;
+    disable) cmd_disable "$@" ;;
+    enable-all-tested) cmd_enable_all_tested ;;
+    udev-env) cmd_udev_env "${1:-}" ;;
+    -h | --help | help | '') usage ;;
+    *) usage ;;
+  esac
+}
+
+main "$@"

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install the Microsoft/Qualcomm firmware the Surface Laptop 7 needs and that
-# linux-firmware does not carry: the Adreno zap shader and the ADSP/CDSP images.
+# linux-firmware does not carry: the Adreno zap shader, the ADSP/CDSP images and
+# the Iris video codec firmware.
 #
 # The files are licensed by Microsoft/Qualcomm and are never part of this
 # package; they come from the public driver MSI (download id 106120) or from
@@ -18,13 +19,16 @@ msi_url="https://download.microsoft.com/download/b7ca2c3f-d320-4795-be0f-529a011
 dest_root=${OMARCHY_SL7_FW_ROOT:-/usr/lib/firmware/updates/qcom/x1e80100/microsoft}
 
 # kind  sha256  path relative to qcom/x1e80100/microsoft/  msi dir under SurfaceUpdate
-# "req" files must be present; "opt" files are installed if present.
+# "req" files must be present; "opt" files are installed if present. The Iris
+# image (qcvss8380.mbn) is "opt" so a directory staged before it was added still
+# installs; only hardware video decode and encode wait for it.
 manifest=(
   "req b526e365b644b019b4866d0eec9544de6aa61975a7ab7086af6ea4ee4f7ef8c7 qcdxkmsuc8380.mbn qcdx8380"
   "req 3a0240f9a1c0c43b657959b1bf10433a1a9793eb5c4af9f6beff8644c174f5a0 Romulus/qcadsp8380.mbn proextadsp8380"
   "req b03f066e2645dbe35a33a08a91312842f5cee3676cac3e111f1f3dabd1cf4e9e Romulus/adsp_dtbs.elf proextadsp8380"
   "req 4a67a03367f2eff2f8a0e867ca25d2bf2fcd5aee3e41e2c9f436c804e257c789 Romulus/qccdsp8380.mbn qcnspmcdmextcdsp8380"
   "req 93941f040da14b8305d39579686d886706d22954a538b03da676c1aaa191797f Romulus/cdsp_dtbs.elf qcnspmcdmextcdsp8380"
+  "opt 121d6864e5b8408f5c43d211f1634b59a6fb333c98c880cdbcd1bcb9f3c7e2f4 Romulus/qcvss8380.mbn qcdx8380"
   "opt e9ba7199626b0c03f2ec02822d744f678ad567fe0625a28fe5f5908b7281e9db Romulus/adspr.jsn proextadsp8380"
   "opt 19b1396b5e2c0d14fb8a4eb8e47181df7f62989f4af519b439cf0ee45a46f76e Romulus/adsps.jsn proextadsp8380"
   "opt d65dc1aedce2c1131da8ffaed7dcffc05cc9c58da491e0c39acb2ac5b3f4bc1d Romulus/adspua.jsn proextadsp8380"
@@ -42,6 +46,7 @@ Usage:
 
   --from DIR        DIR holds the staged layout
                     qcom/x1e80100/microsoft/{qcdxkmsuc8380.mbn,Romulus/*}
+                    (Romulus/qcvss8380.mbn, the Iris video firmware, is optional)
   --from-msi FILE   extract FILE (needs msiextract from msitools) and install
   --no-rebuild      do not rebuild the initramfs/UKI afterwards
   --allow-unverified

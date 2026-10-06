@@ -46,7 +46,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Variable refresh (VRR) | Experimental | Off by default; boot entry `linux-sl7 (VRR test)`. No measurable idle power gain in a first test. |
 | Panel self refresh (PSR) | Not yet | Known broken: the panel goes black when idle. Keep it off. |
 | GPU acceleration | Works | Adreno via `msm`; the zap shader comes from the Microsoft MSI. |
-| Hardware video decode (Iris) | Not yet | The kernel driver is built, but the device tree node is not enabled yet. Video decodes in software. |
+| Hardware video (Iris) | Experimental | Enabled in the device tree with the Microsoft signed firmware from the MSI (`omarchy-surface-sl7-firmware`); untested on hardware. V4L2 decode (H.264, HEVC, VP9, AV1) and encode (H.264, HEVC) for mpv `--hwdec=v4l2m2m-copy`, ffmpeg and GStreamer. Browsers are not expected to use it. |
 | Wi-Fi | Works | WCN7850 with a board-file fix and the factory MAC restored. |
 | Bluetooth | Partial | Works with the factory address restored (it does not work at all without it); less tested than Wi-Fi. |
 | Audio | Partial | Speakers and microphones work with the kernel volume caps. The Pro Audio profile is deliberately blocked to protect the speakers. Headphone jack quality is unverified. |

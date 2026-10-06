@@ -72,11 +72,12 @@ stage_firmware() {
 	for f in qccdsp8380.mbn cdsp_dtbs.elf cdspr.jsn; do
 		fw_copy "qcnspmcdmextcdsp8380/$f" "$r/$f"
 	done
+	fw_copy qcdx8380/qcvss8380.mbn "$r/qcvss8380.mbn"
 	if [ -f "$MSI_ROOT/SHA256SUMS.extracted" ]; then
 		(
 			cd "$MSI_ROOT/extracted"
 			for f in qcdx8380/qcdxkmsuc8380.mbn proextadsp8380/qcadsp8380.mbn proextadsp8380/adsp_dtbs.elf \
-				qcnspmcdmextcdsp8380/qccdsp8380.mbn qcnspmcdmextcdsp8380/cdsp_dtbs.elf; do
+				qcnspmcdmextcdsp8380/qccdsp8380.mbn qcnspmcdmextcdsp8380/cdsp_dtbs.elf qcdx8380/qcvss8380.mbn; do
 				grep -F "./ProgramFiles64Folder/SurfaceUpdate/$f" "$MSI_ROOT/SHA256SUMS.extracted" | sha256sum -c --quiet - ||
 					exit 1
 			done

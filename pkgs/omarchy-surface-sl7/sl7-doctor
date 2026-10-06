@@ -299,5 +299,48 @@ if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [[ -n 
   [[ -n $vrr_hypr ]] && printf 'INFO  VRR: Hyprland %s (misc.vrr %s)\n' "$vrr_hypr" "$(hyprctl getoption misc:vrr -j 2>/dev/null | jq -r '.int // "?"' 2>/dev/null)"
 fi
 
+# Iris hardware video codec (linux-sl7 patch 0086, V4L2 stateful decoder and
+# encoder). Read-only and never a failure: software decode still works.
+iris_fw=qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn
+v4l_sys=${OMARCHY_SL7_V4L_SYSFS:-/sys/class/video4linux}
+dt_base=${OMARCHY_SL7_DT_BASE:-/sys/firmware/devicetree/base}
+iris_fw_ok=0
+if fw_ok "$iris_fw"; then
+  iris_fw_ok=1
+  printf 'INFO  Iris: firmware %s installed\n' "${iris_fw##*/}"
+else
+  warn "Iris: firmware ${iris_fw##*/} missing; no hardware video (sudo omarchy-surface-sl7-firmware --from-msi ...)"
+fi
+iris_dt=
+for node in "$dt_base"/soc@0/video-codec@*; do
+  [[ -r $node/status ]] && iris_dt=$(tr -d '\0' <"$node/status")
+done
+case $iris_dt in
+  okay) printf 'INFO  Iris: video-codec node is enabled in the running device tree\n' ;;
+  '') printf 'INFO  Iris: no video-codec node found in the running device tree\n' ;;
+  *) printf 'INFO  Iris: video-codec node status is "%s" in the running device tree (kernel without patch 0086?)\n' "$iris_dt" ;;
+esac
+iris_dec=0 iris_enc=0
+for node in "$v4l_sys"/video*; do
+  [[ -r $node/name ]] || continue
+  case $(<"$node/name") in
+    *iris*decoder*) iris_dec=1 ;;
+    *iris*encoder*) iris_enc=1 ;;
+  esac
+done
+if ((iris_dec && iris_enc)); then
+  printf 'INFO  Iris: V4L2 decoder and encoder present (/sys/class/video4linux)\n'
+elif [[ $iris_dt == okay ]] && ((iris_fw_ok)); then
+  warn "Iris: node enabled and firmware installed but no iris decoder/encoder in /dev/video* (dmesg | grep -i iris)"
+else
+  printf 'INFO  Iris: no iris V4L2 decoder/encoder device (decode stays in software)\n'
+fi
+if command -v v4l2-ctl >/dev/null 2>&1; then
+  while IFS= read -r line; do printf 'INFO  Iris: v4l2-ctl: %s\n' "$line"; done \
+    < <(v4l2-ctl --list-devices 2>/dev/null | awk '/^[^[:space:]]/ { show = ($0 ~ /[Ii]ris/) } show && NF { sub(/^[[:space:]]+/, ""); print }' | head -n 6)
+else
+  printf 'INFO  Iris: v4l2-ctl (v4l-utils) not installed; checked /sys/class/video4linux only\n'
+fi
+
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
 ((fails == 0))
