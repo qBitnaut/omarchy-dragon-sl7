@@ -223,6 +223,51 @@ else
   warn "omarchy-sl7-powermode not installed; power mode check skipped"
 fi
 
+# Wi-Fi power save on battery (WARN: the radio idles at full power otherwise).
+# NetworkManager applies Omarchy's wifi.powersave=2 on every association unless
+# the zz-omarchy-sl7-wifi-powersave.conf drop-in and the dispatcher script win.
+wifi_net=${OMARCHY_SL7_NET:-/sys/class/net}
+wifi_ps_dir=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
+wifi_conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
+read -r wifi_enable wifi_policy < <(
+  ENABLE=yes
+  WIFI_PS=yes
+  # shellcheck source=/dev/null
+  [[ -r $wifi_conf ]] && . "$wifi_conf"
+  echo "$ENABLE $WIFI_PS"
+)
+wifi_on_ac=0
+wifi_have_source=0
+for supply in "$wifi_ps_dir"/*; do
+  [[ -r $supply/type && -r $supply/online ]] || continue
+  case $(<"$supply/type") in
+    Mains | USB*)
+      wifi_have_source=1
+      [[ $(<"$supply/online") == 1 ]] && wifi_on_ac=1
+      ;;
+  esac
+done
+for wifi_w in "$wifi_net"/*/wireless; do
+  [[ -d $wifi_w ]] || continue
+  wifi_dev=$(basename "$(dirname "$wifi_w")")
+  if ! command -v iw >/dev/null 2>&1; then
+    warn "Wi-Fi power save: iw not installed, $wifi_dev not checked"
+    continue
+  fi
+  wifi_cur=$(iw dev "$wifi_dev" get power_save 2>/dev/null | awk '/Power save/ {print $3}')
+  if [[ $wifi_enable != yes || $wifi_policy != yes ]]; then
+    printf 'INFO  Wi-Fi power save: %s is %s (policy off in power.conf)\n' "$wifi_dev" "${wifi_cur:-unknown}"
+  elif ((!wifi_have_source)); then
+    printf 'INFO  Wi-Fi power save: %s is %s (power source unknown)\n' "$wifi_dev" "${wifi_cur:-unknown}"
+  elif ((wifi_on_ac)); then
+    printf 'INFO  Wi-Fi power save: %s is %s (on AC, off is expected)\n' "$wifi_dev" "${wifi_cur:-unknown}"
+  elif [[ $wifi_cur == on ]]; then
+    pass "Wi-Fi power save is on for $wifi_dev (battery)"
+  else
+    warn "Wi-Fi power save is ${wifi_cur:-unknown} for $wifi_dev on battery (want on): check /usr/lib/NetworkManager/conf.d/zz-omarchy-sl7-wifi-powersave.conf and /usr/lib/NetworkManager/dispatcher.d/90-omarchy-sl7-wifi-powersave, then sudo omarchy-sl7-powermode auto"
+  fi
+done
+
 # eDP Panel Self Refresh (optional "linux-sl7 (PSR test)" boot entry, see
 # omarchy-sl7-test-entry). Informational only: PSR off is the normal state, and
 # PSR is KNOWN BROKEN on this panel (it turns black when idle).

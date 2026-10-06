@@ -4,9 +4,12 @@
 # Omarchy forces Wi-Fi power save off everywhere
 # (/etc/NetworkManager/conf.d/omarchy-wifi-powersave.conf, wifi.powersave=2)
 # because of latency spikes and Intel BE200/BE211 link drops. On a 54 Wh ARM
-# laptop idling at 3-4 W the trade-off differs. "enable" tells NetworkManager
-# to stop managing power save (wifi.powersave=1) and has udev apply
-# "iw set power_save on" on battery and "off" on AC.
+# laptop idling at 3-4 W the trade-off differs. The package now ships a
+# NetworkManager drop-in (zz-omarchy-sl7-wifi-powersave.conf, wifi.powersave=3)
+# and a dispatcher script that apply power save by power source by default.
+# "enable" is the stricter variant: it tells NetworkManager to stop managing
+# power save (wifi.powersave=1, which sorts after the shipped drop-in and wins)
+# and has udev apply "iw set power_save on" on battery and "off" on AC.
 set -euo pipefail
 
 nm_conf=${OMARCHY_SL7_NM_CONF:-/etc/NetworkManager/conf.d/zz-omarchy-surface-sl7-wifi-powersave.conf}

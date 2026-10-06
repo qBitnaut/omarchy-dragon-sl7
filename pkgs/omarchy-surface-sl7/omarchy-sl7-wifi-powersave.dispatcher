@@ -1,0 +1,48 @@
+#!/bin/bash
+# NetworkManager dispatcher: re-apply Wi-Fi power save after every (re)association.
+# Installed as /usr/lib/NetworkManager/dispatcher.d/90-omarchy-sl7-wifi-powersave.
+#
+# NetworkManager sets wifi.powersave while it activates a connection, and the
+# interface may not even exist when omarchy-sl7-powermode runs at boot, so the
+# udev/boot/resume runs alone can leave power save off. This runs right after
+# the connection is up (and on a DHCP change) and does what omarchy-sl7-powermode
+# does: "iw dev <wlan> set power_save on" on battery, "off" on AC, only when
+# /etc/omarchy-surface-sl7/power.conf has ENABLE=yes and WIFI_PS=yes.
+iface=${1:-}
+action=${2:-}
+
+case $action in
+  up | dhcp4-change | dhcp6-change | reapply) ;;
+  *) exit 0 ;;
+esac
+
+net=${OMARCHY_SL7_NET:-/sys/class/net}
+ps=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
+conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
+
+[[ $iface =~ ^[A-Za-z0-9._-]+$ && -d $net/$iface/wireless ]] || exit 0
+command -v iw >/dev/null 2>&1 || exit 0
+
+ENABLE=yes
+WIFI_PS=yes
+# shellcheck source=/dev/null
+[[ -r $conf ]] && . "$conf"
+[[ $ENABLE == yes && $WIFI_PS == yes ]] || exit 0
+
+on_ac=0
+have_source=0
+for supply in "$ps"/*; do
+  [[ -r $supply/type && -r $supply/online ]] || continue
+  case $(<"$supply/type") in
+    Mains | USB*)
+      have_source=1
+      [[ $(<"$supply/online") == 1 ]] && on_ac=1
+      ;;
+  esac
+done
+((have_source)) || exit 0
+
+if ((on_ac)); then state=off; else state=on; fi
+iw dev "$iface" set power_save "$state" &&
+  echo "omarchy-sl7-wifi-powersave: $iface power_save $state ($action)"
+exit 0

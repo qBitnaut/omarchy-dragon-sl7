@@ -355,7 +355,7 @@ status() {
       echo "wifi $dev: power_save ${cur:-unknown}"
       if [[ $ENABLE == yes && $WIFI_PS == yes && -n $cur ]]; then
         if [[ $src == battery ]]; then want=on; else want=off; fi
-        [[ $cur == "$want" ]] || bad=1
+        [[ $cur == "$want" ]] || echo "wifi $dev: WARN power_save is $cur, want $want (NetworkManager re-applied its setting? see sl7-doctor)"
       fi
     else
       echo "wifi $dev: iw not installed"

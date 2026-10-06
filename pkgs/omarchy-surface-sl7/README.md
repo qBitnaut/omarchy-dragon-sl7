@@ -169,10 +169,34 @@ use this tool for the SL7.
   (those that exist), because the firmware sends no event for charger plug/unplug and
   UPower's OnBattery otherwise goes stale (Omarchy's shell never switches profiles).
   Root-owned paths only.
-- **Opt-in** Wi-Fi power save (Omarchy forces it off): `sudo omarchy-surface-sl7-power
-  wifi-powersave enable` writes a NetworkManager drop-in (`wifi.powersave = 1`, ignore) and a
-  flag file; `power-event` then runs `iw dev <wlan> set power_save on|off` by power
-  source. Needs `iw`. `disable` reverts. Not enabled by default.
+- Wi-Fi power save on battery, on by default with the power mode (`WIFI_PS=yes`). Omarchy
+  ships `/etc/NetworkManager/conf.d/omarchy-wifi-powersave.conf` (`wifi.powersave = 2`,
+  disable), and NetworkManager applies it every time a connection (re)associates, so a
+  bench run on battery (bench v2, 30 min idle) found `wlan0 power save: off` 100% of the time
+  although `omarchy-sl7-powermode` had asked for `on`: it only runs at boot (possibly before
+  `wlan0` exists), on a battery event and after resume, and NetworkManager undid it at the next
+  association. Three parts now cooperate:
+  - `/usr/lib/NetworkManager/conf.d/zz-omarchy-sl7-wifi-powersave.conf` sets `wifi.powersave = 3`
+    (enable; 0 default, 1 ignore, 2 disable). NetworkManager reads conf.d from every directory
+    sorted by file name and later files win, so the name must sort after Omarchy's
+    `omarchy-wifi-powersave.conf`; a `50-` name would lose. Run `sudo nmcli general reload conf`
+    or reconnect after installing.
+  - `/usr/lib/NetworkManager/dispatcher.d/90-omarchy-sl7-wifi-powersave` runs on `up` and
+    `dhcp4-change` (also `dhcp6-change`, `reapply`) of a wireless interface and sets
+    `iw dev <wlan> set power_save on` on battery and `off` on AC, when `power.conf` has
+    `ENABLE=yes` and `WIFI_PS=yes`. NetworkManager applies its own value during activation,
+    before `up`, so the dispatcher has the last word. On AC power save is therefore off again
+    right after connecting.
+  - `sl7-doctor` warns when power save is not on while on battery (`WARN`, not `FAIL`).
+  Trade-off: a sleeping radio adds latency, tens of milliseconds on the first packet after the
+  link idled (SSH keystrokes, game input, the first request of a page load). Omarchy disables
+  power save for that reason and for Intel BE200/BE211 link drops; ath12k (WCN7850) on this laptop
+  has the DTIM fix (linux-sl7 patch 0085, DTIM policy stick mode: the station follows the AP's
+  DTIM interval), which is what makes power save usable there. Opt out: `WIFI_PS=no` stops the dispatcher and powermode, and
+  `sudo ln -sf /dev/null /etc/NetworkManager/conf.d/zz-omarchy-sl7-wifi-powersave.conf` masks the
+  drop-in (then Omarchy's 2 applies again). The older opt-in `sudo omarchy-surface-sl7-power
+  wifi-powersave enable` still works: it writes `wifi.powersave = 1` (ignore) to `/etc`, which
+  sorts after the shipped drop-in and wins, and `power-event` applies `iw` by power source.
 - **AC/battery power mode** (`omarchy-sl7-powermode`, config
   `/etc/omarchy-surface-sl7/power.conf`, enabled by default; `ENABLE=no` turns it off).
   `power-event` runs it as root on every battery change event, at boot
@@ -196,8 +220,9 @@ use this tool for the SL7.
   backend on ARM), so this runs beside it on the same signal and does not change the PPD
   profile. Restart the user part after editing the config:
   `systemctl --user restart omarchy-sl7-powermode`. Check with `omarchy-sl7-powermode status`
-  or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting (off) when a connection is
-  re-activated; run `sudo omarchy-surface-sl7-power wifi-powersave enable` to stop that.
+  or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting when a connection is
+  re-activated; the shipped drop-in and dispatcher script (above) make that setting
+  `enable` and put the power-source policy back right after.
 
 ### 8f. Touchpad defaults (tap-to-click off)
 
@@ -987,7 +1012,7 @@ Untested on hardware:
 - `sl7-mac` on this machine (Bluetooth was not checked in run 5), and its interplay with
   Omarchy's iwd/NetworkManager MAC settings.
 - The WirePlumber guard script (no SL7 card here; syntax only).
-- The power rule and the opt-in Wi-Fi power save (latency impact unmeasured).
+- The power rule and the Wi-Fi power save policy (latency impact unmeasured).
 - `sl7-powermeter` and `sl7-powertest --rails`: syntax-checked only, never run. Not exercised: the hwmon
   device itself (the kernel patches 0082-0083 are compile-checked only), the live view, `--log` and
   `--compare` on real data.
