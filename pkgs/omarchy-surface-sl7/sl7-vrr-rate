@@ -26,7 +26,7 @@ Registers (drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c): INTF_VSYNC_PERIOD_F0
 0x00C, INTF_FRAME_LINE_COUNT_EN 0x0A8, INTF_FRAME_COUNT 0x0AC, INTF_AVR_CONTROL
 /MODE/TRIGGER/VTOTAL 0x270/0x274/0x278/0x27C.
 
-Expected with VRR working (VRR test entry, misc.vrr 1): about 24 Hz hands-off,
+Expected with VRR working (default boot, misc.vrr 1): about 24 Hz hands-off,
 about 120 Hz while the mouse moves, 120 Hz on the normal entry.
 """
 

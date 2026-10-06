@@ -43,7 +43,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Touchpad | Works | `iptsd-sl7` (a fork with Surface Laptop 7 fixes). Tap-to-click is off by default (it caused false clicks while scrolling; set `tap_to_click = true` in `~/.config/hypr/input.lua` to bring it back). Drag latch keeps click-and-drag held, lift-and-continue bridges brief lifts, and a watchdog re-enables multitouch if the pad falls back to mouse mode. |
 | Touchscreen | Partial | SPI touch modules only (the 13.8" unit here). Units with the I2C module are not covered. Pen is untested. |
 | Display | Works | Native 2304x1536 at 120 Hz. |
-| Variable refresh (VRR) | Experimental | Off by default; boot entry `linux-sl7 (VRR test)`. No measurable idle power gain in a first test. |
+| Variable refresh (VRR) | Works | 24-120 Hz, on by default (`msm.vrr_enabled=1`; Hyprland `misc.vrr` set by the power mode service). Panel measured at 24 Hz idle, about 116 Hz under motion, no flicker. No chip-rail power change; battery power not measurable yet. Off: remove the `msm.vrr_enabled=1` line from `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, `sudo limine-mkinitcpio`, reboot. |
 | Panel self refresh (PSR) | Not yet | Known broken: the panel goes black when idle. Keep it off. |
 | GPU acceleration | Works | Adreno via `msm`; the zap shader comes from the Microsoft MSI. |
 | Hardware video (Iris) | Experimental | Enabled in the device tree with the Microsoft signed firmware from the MSI (`omarchy-surface-sl7-firmware`); untested on hardware. V4L2 decode (H.264, HEVC, VP9, AV1) and encode (H.264, HEVC) for mpv `--hwdec=v4l2m2m-copy`, ffmpeg and GStreamer. Browsers are not expected to use it. |
@@ -173,7 +173,7 @@ All ship in `omarchy-surface-sl7` unless noted.
 | `sl7-sleepstats` | Prints SoC sleep counters (`cxsd`, `ddr`, `aosd`); `--trace` finds what blocks deep sleep, `--suspend-test` runs a measured suspend. |
 | `sl7-ir-probe` | Read-only camera probe: sensor binding, media topology and a 30-frame IR capture. |
 | `omarchy-sl7-powermode` | Applies or shows the AC or battery power mode (frequency caps, Wi-Fi power save). |
-| `omarchy-sl7-test-entry` | Adds optional boot entries for experiments (`psr`, `vrr`, `ir-test`); off by default. |
+| `omarchy-sl7-test-entry` | Adds optional boot entries for experiments (`psr`, `ir-test`, `clk-unused`); off by default. |
 | `omarchy-sl7-faceunlock` | Face Unlock setup and face manager (Omarchy menu: Setup > Security > Face Unlock). Package `omarchy-sl7-faceunlock`. |
 | `sl7-ir-bridge` | On-demand bridge from the IR camera to a stable V4L2 device, `/dev/v4l/by-id/sl7-ir-camera`. Package `sl7-ir-bridge`. |
 
@@ -232,7 +232,7 @@ From the `linux-sl7` README (Power sections):
 
 ### Known
 
-- VRR showed no measurable idle gain in a first test.
+- VRR: no chip-rail power change measured; battery-gauge power is not measurable yet.
 - PSR blanks the panel, so it stays off.
 
 ## Roadmap

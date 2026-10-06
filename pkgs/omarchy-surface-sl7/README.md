@@ -26,7 +26,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
-| 8d | optional kernel test boot entries, PSR (known broken), VRR (experimental), the IR emitter test boot (`ir-test`) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8d | optional kernel test boot entries, PSR (known broken), the IR emitter test boot (`ir-test`) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | IR emitter load gate and the disabled Stage B channel test tool (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
@@ -189,9 +189,9 @@ use this tool for the SL7.
   re-applies after a config reload, which would otherwise undo the 60 Hz mode. The refresh
   switch is opt-in (`REFRESH_ON_BATTERY=60`): on the SL7 a rate change is a full modeset and the
   panel blanks for a few seconds on every plug/unplug, so the default leaves it alone. Animations and
-  blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). Only when
-  booted through the VRR test entry (section 11b) it also sets Hyprland's `misc.vrr`
-  (`HYPRLAND_VRR`). Omarchy has no
+  blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). When the kernel
+  runs with `msm.vrr_enabled=1` (the default, section 11b) it also sets Hyprland's `misc.vrr`
+  (`HYPRLAND_VRR`: 1 always, 2 fullscreen only, empty or 0 leaves it alone). Omarchy has no
   hook for its own `omarchy-powerprofiles-set`, which only calls power-profiles-daemon (no
   backend on ARM), so this runs beside it on the same signal and does not change the PPD
   profile. Restart the user part after editing the config:
@@ -309,9 +309,10 @@ sl7-vrr-rate --json -s 10          # one JSON object, for logs
 #### VRR test procedure
 
 Plan: three readings of the refresh rate, an eyes-on flicker check, then a power A/B. All legs on
-the VRR entry so the kernel is the same.
+the default entry; the "off" comparison needs a boot without `msm.vrr_enabled=1` (see "Turning VRR
+off" in section 11b).
 
-1. Boot "linux-sl7 (VRR test)" (`sudo omarchy-sl7-test-entry enable vrr`, section 11b). Check that
+1. Boot the normal linux-sl7 entry (VRR is on by default, section 11b). Check that
    `/sys/module/msm/parameters/vrr_enabled` is `Y`, `sl7-doctor` shows `vrr_capable=1`, and
    `hyprctl getoption misc:vrr` reads 1.
 2. Kernel: `sudo sl7-vrr-rate --hw -s 10` hands-off. Expect `avr_ctrl` bit 0 = 1, mode 0, ratio
@@ -320,7 +321,7 @@ the VRR entry so the kernel is the same.
    `avr_ctrl` (status) and report it.
 3. Live rate with `sl7-vrr-rate` (either method): hands-off, expect about 24 Hz with a blip a
    minute from the bar clock; with the mouse circling, about 120 Hz; `mpv --video-sync=display-resample`
-   on a 24 fps file, 24 or 48 Hz; and one run on the normal entry, 120 Hz.
+   on a 24 fps file, 24 or 48 Hz; and one run with VRR turned off, 120 Hz.
 4. Hyprland VRR on and off at runtime, never written to your config:
 
    ```
@@ -329,8 +330,8 @@ the VRR entry so the kernel is the same.
    hyprctl getoption misc:vrr -j | jq .int
    ```
 
-   The user service of `omarchy-sl7-powermode` sets `misc.vrr` from `HYPRLAND_VRR` on this entry
-   and re-applies it after a config reload, so for the `vrr 0` legs set `HYPRLAND_VRR=` (empty)
+   The user service of `omarchy-sl7-powermode` sets `misc.vrr` from `HYPRLAND_VRR` when
+   `msm.vrr_enabled=1` is set and re-applies it after a config reload, so for the `vrr 0` legs set `HYPRLAND_VRR=` (empty)
    in `/etc/omarchy-surface-sl7/power.conf`, restart it (`systemctl --user restart
    omarchy-sl7-powermode`) and switch by hand. Use `vrr = 1` only: a VRR change is a full modeset
    (the panel blanks for a few seconds), and `vrr = 2` would modeset on every fullscreen toggle.
@@ -459,8 +460,9 @@ modules in the initramfs, firmware, iptsd units, `BOOT_ORDER`, uki.conf, no acti
 `surface_device_modules.conf`, Pro Audio guard, and the power mode (current source, caps
 applied, whether they match the source), PSR state (`msm.psr_enabled`, whether this boot
 used the PSR test entry, PSR debugfs nodes and dmesg lines when readable; informational only)
-and VRR state (`msm.vrr_enabled`, whether this boot used the VRR test entry, the eDP
-`vrr_capable` property from `modetest`, debugfs `vrr_enabled`, Hyprland's `vrr`; read-only),
+and VRR state (`msm.vrr_enabled` in the running kernel and on the default entry's command line, the
+eDP `vrr_capable` property from `modetest`, debugfs `vrr_enabled`, Hyprland's `vrr`; INFO, WARN
+when the default entry lacks `msm.vrr_enabled=1`),
 the Iris firmware file, the video-codec node status and the iris V4L2 decoder/encoder devices
 (INFO, or WARN when the firmware is missing or the devices fail to appear; never a failure),
 the pending tap-to-click default (8f) and, from the journal, how often iptsd's mode watchdog had to
@@ -474,20 +476,22 @@ must not be in the normal command line. The default entry, `default_entry` and `
 never touched. All are disabled by default.
 
 ```
-sudo omarchy-sl7-test-entry enable psr|vrr|ir-test|clk-unused|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
+sudo omarchy-sl7-test-entry enable psr|ir-test|clk-unused|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
 sudo omarchy-sl7-test-entry disable NAME                      # remove it
 omarchy-sl7-test-entry list                                   # presets, state, and what is in limine.conf
 sudo omarchy-sl7-test-entry cleanup                           # remove every test entry and its state
 omarchy-sl7-test-entry status [NAME]
 ```
 
-Presets: `psr` = `msm.psr_enabled=1`, `vrr` = `msm.vrr_enabled=1`, `ir-test` = `sl7.ir_test=1 panic=5`
+Presets: `psr` = `msm.psr_enabled=1`, `ir-test` = `sl7.ir_test=1 panic=5`
 (entry "linux-sl7 (IR test)", fixed parameters, section 11c), `clk-unused` = `-clk_ignore_unused
 -pd_ignore_unused clk_unused_defer` (a leading `-` removes the word from the entry's cmdline, see below).
 Any other NAME needs PARAMS.
 `omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset). The old r6
 `psr-entry.enabled` state file, hook and block are removed on upgrade (`cleanup --legacy`);
-PSR is not carried over.
+PSR is not carried over. The former `vrr` preset is gone: VRR is on by default now, and an old
+"linux-sl7 (VRR test)" entry is removed on upgrade (`cleanup --legacy`, with a copy of `limine.conf`
+in `/etc/omarchy-surface-sl7/limine.conf.pre-vrr-entry-removal`). `enable vrr` only prints that.
 
 How it works: limine-entry-tool has no per-entry command line variants, and it rewrites
 `limine.conf` on every UKI rebuild. So `omarchy-sl7-test-entry` copies the live linux-sl7 entry
@@ -511,37 +515,40 @@ the panel turns off (black) when the screen is idle and comes back only when som
 Tested on real hardware via the "linux-sl7 (PSR test)" entry. Do not enable PSR in the normal
 command line. The entry stays only to retest after a kernel update.
 
-#### VRR (`vrr`): EXPERIMENTAL
+#### VRR: on by default
 
 linux-sl7 patch 0024 (scuggo's `msm-vrr-avr.patch`, rebased) adds eDP variable refresh to the
 msm driver: the eDP connector gets `vrr_capable`, the DPU INTF Adaptive Refresh block is
-programmed for the EDID range (24-120 Hz) and the DP link sets MSA timing ignore. All of it is
-behind `msm.vrr_enabled`, default 0, so a normal boot behaves exactly as before. Needs
-linux-sl7 `7.2.8-2` or later.
+programmed for the EDID range (24-120 Hz) and the DP link sets MSA timing ignore. It is behind
+`msm.vrr_enabled`, which the limine drop-in `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`
+adds to the normal entry's command line. Needs linux-sl7 `7.2.8-2` or later. Measured on the SL7:
+the panel runs at 24 Hz idle and about 116 Hz under motion with no flicker. Chip-rail power is
+unchanged; battery power is not measurable yet.
 
-Test steps:
+Checks:
 
-1. `sudo omarchy-sl7-test-entry enable vrr`, reboot, pick "linux-sl7 (VRR test)".
-2. `sl7-doctor` must show `msm.vrr_enabled=1` (running kernel), "booted via the VRR test
-   entry" and `eDP vrr_capable=1`. With `vrr_capable=0` or missing, stop: the kernel did not
-   expose VRR (check `dmesg | grep -i -E 'dp|dpu|msm'`).
-3. Hyprland needs VRR on at runtime (`misc.vrr`: 0 off, 1 always, 2 fullscreen only). The
-   power mode user service does this by itself on this entry (`HYPRLAND_VRR=1` in `power.conf`;
-   empty or 0 to disable). By hand:
-   `hyprctl eval 'hl.config({ misc = { vrr = 1 } })'` (back: `vrr = 0`). It is a runtime
-   setting, never written to your config.
-4. Observe: `hyprctl monitors -j | jq '.[] | {name, vrr, refreshRate}'` (`vrr` is true while
-   active; `refreshRate` is the current mode rate, so it does not show the instantaneous VRR
-   rate), and as root `grep -r vrr_enabled /sys/kernel/debug/dri/*/state`. Run something that
-   renders at a varying rate (a game, `mpv` video, `glxgears` unthrottled) and watch for
-   tearing-free, steady output. `sl7-doctor` prints all of these.
-   For the real instantaneous rate use `sl7-vrr-rate` (section 8i).
-5. Look for: flicker or brightness pulsing at low rates (the panel can drop to 24 Hz), black
-   frames or blanking (link problems; check `dmesg`), cursor lag, resume failures.
-6. Power: on battery, `sl7-powertest idle --minutes 20 --label vrr`, then the same from the
-   normal entry with `--label normal`, then `sl7-powertest compare ...-normal.jsonl ...-vrr.jsonl`
-   (VRR does not lower an idle desktop's refresh by itself; the gain is for varying content).
-7. Done: `sudo omarchy-sl7-test-entry disable vrr` and boot the normal entry.
+1. `sl7-doctor` shows `msm.vrr_enabled=1` (running kernel, command line and default entry) and
+   `eDP vrr_capable=1`. With `vrr_capable=0` or missing, the kernel did not expose VRR
+   (`dmesg | grep -i -E 'dp|dpu|msm'`).
+2. Hyprland needs `misc.vrr` at runtime (0 off, 1 always, 2 fullscreen only). The power mode user
+   service sets it (`HYPRLAND_VRR=1` in `power.conf`; 2 for fullscreen only, empty or 0 to leave
+   Hyprland alone). By hand: `hyprctl eval 'hl.config({ misc = { vrr = 1 } })'` (back:
+   `vrr = 0`). It is a runtime setting, never written to your config.
+3. Observe: `hyprctl monitors -j | jq '.[] | {name, vrr, refreshRate}'` (`refreshRate` is the mode
+   rate, not the instantaneous VRR rate), as root `grep -r vrr_enabled /sys/kernel/debug/dri/*/state`,
+   and `sl7-vrr-rate` for the real rate (section 8i).
+4. Look for flicker or brightness pulsing at low rates, black frames or blanking (check `dmesg`),
+   cursor lag, resume failures.
+
+Upgrade: the new command line reaches the normal entry when the package regenerates the UKI and
+`limine.conf` (post-upgrade `limine-mkinitcpio`); reboot to use it. An unmodified drop-in is
+replaced by pacman; if you had edited it, merge the `.pacnew` (`sl7-doctor` warns when the default
+entry lacks `msm.vrr_enabled=1`).
+
+Turning VRR off: delete the `msm.vrr_enabled=1` line in
+`/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, run `sudo limine-mkinitcpio` and reboot. Also
+set `HYPRLAND_VRR=` in `power.conf` only if Hyprland's own `misc.vrr` should stay untouched with
+the parameter present.
 
 #### Unused clocks and domains (`clk-unused`): EXPERIMENTAL
 

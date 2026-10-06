@@ -11,7 +11,8 @@
 #                                                    really in limine.conf
 #   omarchy-sl7-test-entry cleanup [--legacy]        remove ALL our entries and
 #                                                    state (--legacy: only the
-#                                                    r6 psr-entry leftovers; the
+#                                                    r6 psr-entry and the retired
+#                                                    VRR test entry; the
 #                                                    enabled new-style entries
 #                                                    are regenerated)
 #   omarchy-sl7-test-entry status [NAME]
@@ -20,9 +21,6 @@
 #   psr   msm.psr_enabled=1   eDP Panel Self Refresh. KNOWN BROKEN on the
 #                             Sharp LQ138P1JX61: the panel goes black when
 #                             idle and only returns when something paints.
-#   vrr   msm.vrr_enabled=1   EXPERIMENTAL eDP variable refresh (24-120 Hz,
-#                             linux-sl7 patch 0024). Needs misc.vrr in
-#                             Hyprland at runtime (see the README).
 #   ir-test  sl7.ir_test=1 panic=5
 #                             IR EMITTER TEST BOOT, entry "linux-sl7 (IR test)".
 #                             Lets leds-qcom-flash load (modprobe gate in
@@ -39,6 +37,9 @@
 #                             cmdline instead of adding it. About 1 boot in 5
 #                             froze on the Dell XPS 13 without the deferral;
 #                             the fallback is the normal entry. See the README.
+# VRR (msm.vrr_enabled=1) used to be a preset here. It is now on the default
+# cmdline of the normal entry (omarchy-surface-sl7 limine drop-in); `cleanup`
+# removes a leftover "linux-sl7 (VRR test)" entry, with a backup of limine.conf.
 # Any other NAME (lowercase letters, digits, dashes) needs PARAMS.
 #
 # limine-entry-tool has no per-entry cmdline variants and rewrites limine.conf
@@ -61,14 +62,13 @@ export tag_new tag_old
 
 usage() {
   echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME] | cleanup [--legacy]" >&2
-  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), vrr (msm.vrr_enabled=1, EXPERIMENTAL), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL)" >&2
+  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL)" >&2
   exit 2
 }
 
 preset_params() {
   case $1 in
     psr) echo "msm.psr_enabled=1" ;;
-    vrr) echo "msm.vrr_enabled=1" ;;
     ir-test) echo "sl7.ir_test=1 panic=5" ;;
     clk-unused) echo "-clk_ignore_unused -pd_ignore_unused clk_unused_defer" ;;
   esac
@@ -77,7 +77,6 @@ preset_params() {
 preset_note() {
   case $1 in
     psr) echo "KNOWN BROKEN: the panel turns off when idle and returns only when something paints" ;;
-    vrr) echo "EXPERIMENTAL: eDP variable refresh; also needs misc.vrr in Hyprland" ;;
     ir-test) echo "IR EMITTER TEST BOOT: the PM8550 IR flash LEDs exist on this boot only; nothing fires by itself (README 11c)" ;;
     clk-unused) echo "EXPERIMENTAL: no clk_ignore_unused/pd_ignore_unused, unused clocks and domains disabled 30 s after boot; a boot may freeze (1 in 5 on the Dell without the deferral): choose the normal entry" ;;
   esac
@@ -123,6 +122,7 @@ enabled_entries() {
         [[ -f $f ]] || continue
         n=${f##*/}
         valid_name "$n" || continue
+        [[ $n == vrr ]] && continue # retired preset: now on by default, never honoured
         p=$(head -n 1 "$f")
         [[ -n $p ]] || p=$(preset_params "$n")
         [[ -n $p ]] && printf '%s\t%s\n' "$n" "$p"
@@ -275,6 +275,25 @@ reenroll() {
   fi
 }
 
+# The retired "VRR test" entry (msm.vrr_enabled=1 is now on the default cmdline):
+# drop its state file and, if limine.conf still carries the entry, keep a copy of
+# limine.conf first. apply() then rewrites limine.conf without the entry.
+retire_vrr() {
+  local conf bak_dir bak
+  rm -f "${state_dir:?}/vrr"
+  conf=$(find_conf) || return 0
+  grep -Eq '^[[:space:]]*/+[[:space:]]*linux-sl7 \(VRR test\)|### BEGIN omarchy-sl7-test-entry vrr ' "$conf" 2>/dev/null || return 0
+  bak_dir=${OMARCHY_SL7_BACKUP_DIR:-/etc/omarchy-surface-sl7}
+  bak="$bak_dir/limine.conf.pre-vrr-entry-removal"
+  mkdir -p "$bak_dir" 2>/dev/null || true
+  if [[ -e $bak ]] || cp -p "$conf" "$bak" 2>/dev/null; then
+    echo "omarchy-sl7-test-entry: removing the retired 'linux-sl7 (VRR test)' entry (VRR is on by default now); limine.conf backup: $bak"
+  else
+    echo "omarchy-sl7-test-entry: could not back up $conf to $bak; leaving the VRR test entry in place" >&2
+    return 1
+  fi
+}
+
 need_root() {
   if ((EUID != 0)) && [[ -z ${OMARCHY_SL7_TEST_STATE_DIR:-} ]]; then
     exec sudo "$0" "$@"
@@ -330,8 +349,13 @@ case $cmd in
     apply || exit 1
     ;;
   enable)
-    need_root "$@"
     name=${2:-}
+    if [[ $name == vrr ]]; then
+      echo "omarchy-sl7-test-entry: VRR is now on by default (msm.vrr_enabled=1 on the normal linux-sl7 entry); there is no VRR test entry any more." >&2
+      echo "  To turn it off, remove the msm.vrr_enabled=1 line from /etc/limine-entry-tool.d/omarchy-surface-sl7.conf and run: sudo limine-mkinitcpio" >&2
+      exit 0
+    fi
+    need_root "$@"
     valid_name "$name" || usage
     shift 2
     params=$*
@@ -340,7 +364,7 @@ case $cmd in
       exit 2
     fi
     [[ -n $params ]] || params=$(preset_params "$name")
-    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, vrr, ir-test, clk-unused); give PARAMS" >&2; exit 2; }
+    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, ir-test, clk-unused); give PARAMS" >&2; exit 2; }
     [[ $params =~ ^[A-Za-z0-9._=:,/+-]+( [A-Za-z0-9._=:,/+-]+)*$ ]] || { echo "omarchy-sl7-test-entry: unsafe characters in PARAMS" >&2; exit 2; }
     mkdir -p "$state_dir"
     sf="${state_dir:?}/${name:?}"
@@ -362,12 +386,13 @@ case $cmd in
     valid_name "$name" || usage
     rm -f "${state_dir:?}/${name:?}"
     [[ $name == psr ]] && rm -f "${legacy_psr:?}"
+    [[ $name == vrr ]] && { retire_vrr || exit 1; }
     apply || true
     reenroll
     if [[ $name == ir-test ]]; then ir_approval_note; fi
     ;;
   list)
-    for p in psr vrr ir-test clk-unused; do
+    for p in psr ir-test clk-unused; do
       if is_enabled "$p"; then s=enabled; else s=disabled; fi
       printf '%-10s %-8s %s  [%s]\n' "$p" "$s" "$(preset_params "$p")" "$(preset_note "$p")"
     done
@@ -389,6 +414,7 @@ case $cmd in
       *) usage ;;
     esac
     rm -f "${legacy_psr:?}" "${legacy_hook:?}"
+    retire_vrr || exit 1
     apply || true
     reenroll
     [[ ${2:-} == --legacy ]] || ir_approval_note
@@ -401,7 +427,6 @@ case $cmd in
       status_one "$2" "${p:-}"
     else
       status_one psr "$(preset_params psr)"
-      status_one vrr "$(preset_params vrr)"
       status_one ir-test "$(preset_params ir-test)"
       status_one clk-unused "$(preset_params clk-unused)"
       while IFS=$'\t' read -r name params; do

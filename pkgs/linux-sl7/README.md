@@ -53,7 +53,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0019 | qcom_battmgr: report capacity on X1E80100 | Liviu Nicoara, patchwork series 1169875 | submitted 2026-09-20 |
 | 0020-0022 | ps883x v5 (DP state F, config delay, disable USB4 on incomplete platforms) | Jens Glathe, usb-next `42411ff1a7bb`, `d9eadbba6663`, `647f31f34d40` | in usb-next, expected in 7.4 |
 | 0023 | ath12k: ignore the false rfkill hard block | linux-sp11 `37f883437b` (Jiajie Chen) | will not go upstream |
-| 0024 | EXPERIMENTAL: eDP variable refresh (DPU INTF AVR, MSA ignore, `vrr_capable`) behind `msm.vrr_enabled=1` (default 0; see `omarchy-sl7-test-entry`) | scuggo/x1e-nixos `msm-vrr-avr.patch` (ca7db70), rebased and gated by us | will not go upstream as is |
+| 0024 | eDP variable refresh (DPU INTF AVR, MSA ignore, `vrr_capable`) behind `msm.vrr_enabled=1` (kernel default 0; omarchy-surface-sl7 sets it on the default cmdline) | scuggo/x1e-nixos `msm-vrr-avr.patch` (ca7db70), rebased and gated by us | will not go upstream as is |
 | 0025-0026 | qcom MIPI CSI2 DPHY schema and driver (`phy-qcom-mipi-csi2`) | Bryan O'Donoghue v18 (patchwork 1166977, 2026-09-16) | in linux-next, expected in 7.4 |
 | 0027-0032 | `phy_get_by_of_node()` helpers, CAMSS PHY API, data-lanes start at 1 | Bryan O'Donoghue v20 (patchwork 1168715, 2026-09-18) | posted v20 |
 | 0033-0034 | x1e80100 CAMSS binding: iommus, optional csiphy supplies | x1e/Hamoa camera DTSI v7 patches 1-2 (patchwork 1167605) | posted v7 |

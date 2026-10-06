@@ -280,11 +280,11 @@ user_toggle() { # battery|ac name option lua_prefix lua_suffix
   fi
 }
 
-# EXPERIMENTAL: only when this boot used the "linux-sl7 (VRR test)" entry
-# (msm.vrr_enabled=1 on the kernel command line; see omarchy-sl7-test-entry),
-# turn Hyprland's VRR on (misc.vrr: 0 off, 1 always, 2 fullscreen only) and
-# re-apply it after a config reload. HYPRLAND_VRR empty or 0 leaves it alone.
-# Never touches the normal boot entry.
+# When the kernel has VRR on (msm.vrr_enabled=1 on the command line, the
+# default from the omarchy-surface-sl7 limine drop-in), turn Hyprland's VRR on
+# (misc.vrr: 0 off, 1 always, 2 fullscreen only) and re-apply it after a config
+# reload. HYPRLAND_VRR empty or 0 leaves Hyprland alone; without the kernel
+# parameter nothing is touched either.
 user_vrr() {
   local cur
   grep -qw 'msm.vrr_enabled=1' "$cmdline" 2>/dev/null || return 0
@@ -292,7 +292,7 @@ user_vrr() {
   cur=$(hyprctl getoption misc:vrr -j 2>/dev/null | jq -r '.int // empty' 2>/dev/null)
   [[ $cur == "$HYPRLAND_VRR" ]] && return 0
   hyprctl eval "hl.config({ misc = { vrr = $HYPRLAND_VRR } })" >/dev/null &&
-    echo "hyprland misc.vrr $HYPRLAND_VRR (VRR test entry)"
+    echo "hyprland misc.vrr $HYPRLAND_VRR (msm.vrr_enabled=1)"
 }
 
 apply_user() { # battery|ac
@@ -376,7 +376,7 @@ status() {
     cur=$(hyprctl monitors -j 2>/dev/null | jq -r --arg m "$mon" '.[] | select(.name == $m) | "\(.width)x\(.height)@\(.refreshRate)"')
     [[ -n $cur ]] && echo "display $mon: $cur"
     if grep -qw 'msm.vrr_enabled=1' "$cmdline" 2>/dev/null; then
-      echo "vrr: VRR test entry; misc.vrr $(hyprctl getoption misc:vrr -j 2>/dev/null | jq -r '.int // "?"'), $mon vrr active: $(hyprctl monitors -j 2>/dev/null | jq -r --arg m "$mon" '.[] | select(.name == $m) | .vrr')"
+      echo "vrr: msm.vrr_enabled=1; misc.vrr $(hyprctl getoption misc:vrr -j 2>/dev/null | jq -r '.int // "?"'), $mon vrr active: $(hyprctl monitors -j 2>/dev/null | jq -r --arg m "$mon" '.[] | select(.name == $m) | .vrr')"
     fi
   fi
   if ((bad)); then

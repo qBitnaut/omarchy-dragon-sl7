@@ -259,9 +259,9 @@ if [[ -x $test_entry ]]; then
   while IFS= read -r line; do printf 'INFO  test entry: %s\n' "$line"; done < <("$test_entry" list 2>&1 | cut -c1-160 | head -n 6)
 fi
 
-# EXPERIMENTAL eDP variable refresh (linux-sl7 patch 0024, optional "linux-sl7
-# (VRR test)" boot entry). Read-only and informational: VRR off is the normal
-# state.
+# eDP variable refresh (linux-sl7 patch 0024). On by default: the omarchy-
+# surface-sl7 limine drop-in adds msm.vrr_enabled=1 to the normal entry. State
+# is INFO; WARN only when the default entry lacks the parameter.
 vrr_param=${OMARCHY_SL7_MSM_VRR:-/sys/module/msm/parameters/vrr_enabled}
 if [[ -r $vrr_param ]]; then
   printf 'INFO  VRR: msm.vrr_enabled=%s (running kernel)\n' "$(<"$vrr_param")"
@@ -269,9 +269,38 @@ else
   printf 'INFO  VRR: msm.vrr_enabled not exposed by the running kernel (no patch 0024)\n'
 fi
 if grep -qw 'msm.vrr_enabled=1' "$psr_cmdline" 2>/dev/null; then
-  printf 'INFO  VRR: booted via the VRR test entry (msm.vrr_enabled=1 on the cmdline)\n'
+  printf 'INFO  VRR: msm.vrr_enabled=1 is on the running kernel command line\n'
 else
-  printf 'INFO  VRR: normal boot entry (no msm.vrr_enabled=1 on the cmdline)\n'
+  printf 'INFO  VRR: msm.vrr_enabled=1 is not on the running kernel command line\n'
+fi
+vrr_conf=${OMARCHY_SL7_LIMINE_CONF:-}
+if [[ -z $vrr_conf ]]; then
+  for f in /boot/limine.conf /efi/limine.conf /boot/efi/limine.conf /limine/limine.conf; do
+    [[ -r $f ]] && { vrr_conf=$f; break; }
+  done
+fi
+if [[ -n $vrr_conf && -r $vrr_conf ]]; then
+  # cmdline of the plain linux-sl7 entry (generated test entries excluded)
+  vrr_entry=$(awk '
+    function done_sec() { if (id) { print (have ? cmd : "-"); found = 1; exit } }
+    /^[ \t]*\/+[^\/]/ { done_sec(); id = 0; have = 0; cmd = ""; skip = 0; next }
+    index($0, "### BEGIN omarchy-sl7") == 1 { skip = 1 }
+    index($0, "### END omarchy-sl7") == 1 { skip = 0; next }
+    skip { next }
+    /^[ \t]*comment:[ \t]*kernel-id=linux-sl7[ \t]*$/ { id = 1 }
+    /^[ \t]*(kernel_)?cmdline:/ { have = 1; cmd = $0 }
+    END { if (!found) done_sec() }' "$vrr_conf" 2>/dev/null) || vrr_entry=
+  if [[ -z $vrr_entry ]]; then
+    printf 'INFO  VRR: no linux-sl7 entry found in %s; default entry not checked\n' "$vrr_conf"
+  elif grep -qw 'msm.vrr_enabled=1' <<<"$vrr_entry"; then
+    printf 'INFO  VRR: msm.vrr_enabled=1 is on the default linux-sl7 entry in %s\n' "$vrr_conf"
+  elif [[ $vrr_entry == - ]]; then
+    printf 'INFO  VRR: the linux-sl7 entry in %s has no cmdline line (UKI cmdline); default entry not checked\n' "$vrr_conf"
+  else
+    warn "VRR: msm.vrr_enabled=1 is missing on the default linux-sl7 entry (edited /etc/limine-entry-tool.d/omarchy-surface-sl7.conf, or a .pacnew not merged? then: sudo limine-mkinitcpio and reboot)"
+  fi
+else
+  printf 'INFO  VRR: limine.conf not readable as this user; default entry not checked (run as root)\n'
 fi
 modetest=${OMARCHY_SL7_MODETEST:-modetest}
 if command -v "$modetest" >/dev/null 2>&1; then
