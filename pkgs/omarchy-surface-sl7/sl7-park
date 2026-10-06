@@ -1,0 +1,203 @@
+#!/bin/bash
+# Opt-in cluster parking for the Surface Laptop 7 (Snapdragon X, 4/3/3 CPU clusters).
+#
+#   sl7-park status          what is parked, the cluster map, the config
+#   sl7-park on              park now (root; manual test, ignores source and config)
+#   sl7-park off             restore all CPUs (root), only if sl7-park parked them
+#   sl7-park apply battery|ac
+#                            what omarchy-sl7-powermode runs on every switch: on
+#                            battery with PARK_ON_BATTERY=yes in
+#                            /etc/omarchy-surface-sl7/power.conf, park; otherwise
+#                            restore (if we parked). Default is PARK_ON_BATTERY=no.
+#
+# "Park" means: systemd AllowedCPUs on user.slice and system.slice, set with
+# "systemctl set-property --runtime", confined to the CPUs of the cluster that
+# holds CPU 0. The other clusters then see almost no work and can sit in their
+# deepest idle state. Nothing is persistent: a reboot clears it, and "off" or
+# an AC switch undoes it. The cluster layout is read from sysfs (the cpufreq
+# policies' related_cpus), never hard-coded: an X1P-64-100 reports 0-3, 4-6 and
+# 8-10 (CPU7 and CPU11 are fused off), an X1E-80-100 0-3, 4-7 and 8-11.
+#
+# Expected gain: about 0 at idle (the idle clusters already reach their deepest
+# state), up to about 0.3 W under bursty light load such as browsing, because
+# the wakeups of three clusters collapse onto one [estimate, RUNTIME-PLAN 4.6].
+# Risk: all user and system work shares 4 cores, so a burst that would have
+# spread over 10 cores queues behind the others (compiles, many tabs, video
+# calls). Only the two slices are confined: kernel threads, IRQs and anything
+# outside them keep their affinity.
+set -u
+
+conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
+cpufreq=${OMARCHY_SL7_CPUFREQ:-/sys/devices/system/cpu/cpufreq}
+run_dir=${OMARCHY_SL7_RUN_DIR:-/run/omarchy-surface-sl7}
+cgroot=${OMARCHY_SL7_CGROUP:-/sys/fs/cgroup}
+systemctl=${OMARCHY_SL7_SYSTEMCTL:-systemctl}
+slices=(user.slice system.slice)
+
+PARK_ON_BATTERY=no
+load_conf() {
+  # shellcheck disable=SC1090
+  [[ -r $conf ]] && . "$conf"
+  return 0
+}
+load_conf
+
+usage() {
+  echo "usage: ${0##*/} status | on | off | apply battery|ac" >&2
+  exit 2
+}
+
+say() {
+  echo "$*"
+  [[ -t 1 ]] || logger -t sl7-park -- "$*" 2>/dev/null || true
+}
+
+# --- cluster map from sysfs ------------------------------------------------------
+
+rng() { # first last
+  if [[ $1 == "$2" ]]; then echo "$1"; else echo "$1-$2"; fi
+}
+
+# compact N...: ascending CPU numbers -> "0-3,8"
+compact() {
+  local n start='' prev='' out=''
+  for n in "$@"; do
+    if [[ -z $start ]]; then
+      start=$n
+      prev=$n
+    elif ((n == prev + 1)); then
+      prev=$n
+    else
+      out+="${out:+,}$(rng "$start" "$prev")"
+      start=$n
+      prev=$n
+    fi
+  done
+  if [[ -n $start ]]; then
+    out+="${out:+,}$(rng "$start" "$prev")"
+  fi
+  echo "$out"
+}
+
+# One line per cpufreq policy, ordered by its lowest CPU: "<cpulist>".
+clusters() {
+  local pol cpus sorted
+  for pol in "$cpufreq"/policy*; do
+    [[ -r $pol/related_cpus ]] || continue
+    read -r -a cpus <"$pol/related_cpus" || continue
+    ((${#cpus[@]})) || continue
+    mapfile -t sorted < <(printf '%s\n' "${cpus[@]}" | sort -n)
+    echo "${sorted[0]} $(compact "${sorted[@]}")"
+  done | sort -n | cut -d' ' -f2
+}
+
+# The cpulist to park on: the cluster holding CPU 0 (the first one). Fails when
+# there is only one cluster, since parking onto everything does nothing.
+park_cpus() {
+  local list
+  mapfile -t list < <(clusters)
+  if ((${#list[@]} < 2)); then
+    echo "fewer than two cpufreq clusters under $cpufreq; nothing to park" >&2
+    return 1
+  fi
+  echo "${list[0]}"
+}
+
+# --- state -------------------------------------------------------------------------
+
+parked_cpus() { cat "$run_dir/park" 2>/dev/null; }
+
+slice_cpus() { # slice -> effective cpuset ("?" when unreadable)
+  local f="$cgroot/$1/cpuset.cpus.effective"
+  if [[ -r $f ]]; then cat "$f"; else echo '?'; fi
+}
+
+need_root() {
+  if ((EUID != 0)) && [[ -z ${OMARCHY_SL7_ALLOW_NONROOT:-} ]]; then
+    if [[ ${1:-} == apply ]]; then
+      echo "sl7-park apply needs root" >&2
+      exit 1
+    fi
+    exec sudo "$0" "$@"
+  fi
+}
+
+do_park() {
+  local cpus s rc=0 eff
+  cpus=$(park_cpus) || return 1
+  for s in "${slices[@]}"; do
+    "$systemctl" set-property --runtime "$s" "AllowedCPUs=$cpus" || rc=1
+  done
+  ((rc == 0)) || { echo "systemctl set-property failed (cgroup v2 with the cpuset controller needed)" >&2; return 1; }
+  mkdir -p "$run_dir" 2>/dev/null && printf '%s\n' "$cpus" >"$run_dir/park" 2>/dev/null
+  for s in "${slices[@]}"; do
+    eff=$(slice_cpus "$s")
+    if [[ $eff != '?' && $eff != "$cpus" ]]; then
+      echo "warning: $s effective CPUs are $eff, expected $cpus" >&2
+    fi
+  done
+  say "parked user.slice and system.slice on CPUs $cpus"
+}
+
+do_unpark() {
+  local s rc=0
+  [[ -n $(parked_cpus) ]] || return 0
+  for s in "${slices[@]}"; do
+    "$systemctl" set-property --runtime "$s" "AllowedCPUs=" || rc=1
+  done
+  ((rc == 0)) || { echo "systemctl set-property failed; CPUs may still be restricted" >&2; return 1; }
+  rm -f "${run_dir:?}/park"
+  say "restored all CPUs for user.slice and system.slice"
+}
+
+status() {
+  local list i s cur want
+  echo "config $conf: PARK_ON_BATTERY=$PARK_ON_BATTERY"
+  mapfile -t list < <(clusters)
+  if ((${#list[@]})); then
+    for i in "${!list[@]}"; do echo "cluster $i: CPUs ${list[i]}"; done
+    want=$(park_cpus 2>/dev/null) && echo "park target: CPUs $want"
+  else
+    echo "no cpufreq policies under $cpufreq"
+  fi
+  cur=$(parked_cpus)
+  if [[ -n $cur ]]; then echo "state: parked on CPUs $cur (by sl7-park)"; else echo "state: not parked by sl7-park"; fi
+  for s in "${slices[@]}"; do
+    echo "$s: AllowedCPUs=$("$systemctl" show -p AllowedCPUs --value "$s" 2>/dev/null) effective $(slice_cpus "$s")"
+  done
+  return 0
+}
+
+case ${1:-} in
+  status)
+    [[ $# -eq 1 ]] || usage
+    status
+    ;;
+  on)
+    [[ $# -eq 1 ]] || usage
+    need_root on
+    do_park
+    ;;
+  off)
+    [[ $# -eq 1 ]] || usage
+    need_root off
+    do_unpark
+    ;;
+  apply)
+    [[ $# -eq 2 ]] || usage
+    need_root apply "$2"
+    case $2 in
+      battery)
+        if [[ $PARK_ON_BATTERY == yes ]]; then
+          if [[ $(parked_cpus) == "$(park_cpus 2>/dev/null)" && -n $(parked_cpus) ]]; then exit 0; fi
+          do_park
+        else
+          do_unpark
+        fi
+        ;;
+      ac) do_unpark ;;
+      *) usage ;;
+    esac
+    ;;
+  *) usage ;;
+esac

@@ -26,11 +26,13 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
-| 8d | optional kernel test boot entries, PSR (known broken), VRR (experimental) and the IR emitter test boot (`ir-test`), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8d | optional kernel test boot entries, PSR (known broken), VRR (experimental), the IR emitter test boot (`ir-test`) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | IR emitter load gate and the disabled Stage B channel test tool (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
 | 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
+| 8j | opt-in cluster parking on battery, off by default (section 8j) | `/usr/bin/sl7-park` |
+| 12e | read-only per-process CPU and wakeup sampler (section 12e) | `/usr/bin/sl7-proftop` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
 
@@ -357,6 +359,51 @@ the VRR entry so the kernel is the same.
    30 minute `sl7-powertest idle` gauge run of the winner against (a). Expect (c) to beat (a) by
    roughly 0.35 to 0.5 W if AVR works (an estimate from the 60 Hz difference, not a measurement).
 
+### 8j. Cluster parking (opt-in): `sl7-park`
+
+Off by default. With `PARK_ON_BATTERY=yes` in `/etc/omarchy-surface-sl7/power.conf`,
+`omarchy-sl7-powermode` calls `sl7-park apply battery|ac` on every plug, unplug, boot and resume.
+On battery it confines `user.slice` and `system.slice` to the CPUs of cluster 0 with systemd
+`AllowedCPUs` (`systemctl set-property --runtime`, so nothing survives a reboot); on AC, or when
+the option is `no`, it restores all CPUs. The cluster layout is read from sysfs (each cpufreq
+policy's `related_cpus`), never hard-coded: an X1P-64-100 shows 0-3, 4-6 and 8-10 (CPU7 and
+CPU11 fused off), an X1E-80-100 shows 0-3, 4-7 and 8-11. Kernel threads, IRQs and anything outside
+the two slices keep their affinity.
+
+```
+sl7-park status                       # cluster map, park target, state, AllowedCPUs and effective cpuset
+sudo sl7-park on                      # park now (manual test; ignores power source and config)
+sudo sl7-park off                     # restore, only if sl7-park parked
+sudo omarchy-sl7-powermode battery    # the normal path: honours PARK_ON_BATTERY
+```
+
+`omarchy-sl7-powermode status` prints a `park:` line. `omarchy-sl7-powermode auto` exits early when
+`ENABLE=no` and then does not restore a manual park: run `sudo sl7-park off`.
+
+Expected gain: about 0 at idle (the two idle clusters already sit in their deepest idle state,
+RUNTIME-PLAN 4.6), up to about 0.3 W under bursty light load (browsing, chat, a terminal), where
+the wakeups of three clusters collapse onto one [estimate]. Risk: latency under bursts. Everything
+shares the 4 CPUs of cluster 0, so a build, many busy tabs or a
+video call queues behind the rest where it would have spread over 10 cores. Turn it off with
+`PARK_ON_BATTERY=no` and `sudo sl7-park off`.
+
+Test (battery, backlight pinned, same Wi-Fi, same fixed light workload such as a looped browser
+page or `mpv` of a local file, 10 minutes of warm-up):
+
+```
+sl7-powermeter --log unparked-1.jsonl --seconds 180 --label unparked   # three runs each, alternating
+sudo sl7-park on
+sl7-park status                                   # system.slice and user.slice effective cpuset = cluster 0
+sl7-powermeter --log parked-1.jsonl --seconds 180 --label parked
+sudo sl7-park off
+sl7-powermeter --compare unparked-1.jsonl parked-1.jsonl
+```
+
+Compare `SYS` and `CPU_CLUSTER_0/1/2` (clusters 1 and 2 should fall), first at idle (expect no
+difference) then under the workload. Also read the idle residency of the clusters in
+`/sys/kernel/debug/pm_genpd/power-domain-cpu-cluster{1,2}/idle_states` (root) and watch for
+latency: `sl7-proftop` while parked shows where the time goes.
+
 ### 9. Upstream leaf
 
 `surface-laptop-7.sh` (installed under `/usr/share/doc`) is an Omarchy-style
@@ -427,7 +474,7 @@ must not be in the normal command line. The default entry, `default_entry` and `
 never touched. All are disabled by default.
 
 ```
-sudo omarchy-sl7-test-entry enable psr|vrr|ir-test|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
+sudo omarchy-sl7-test-entry enable psr|vrr|ir-test|clk-unused|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
 sudo omarchy-sl7-test-entry disable NAME                      # remove it
 omarchy-sl7-test-entry list                                   # presets, state, and what is in limine.conf
 sudo omarchy-sl7-test-entry cleanup                           # remove every test entry and its state
@@ -435,7 +482,9 @@ omarchy-sl7-test-entry status [NAME]
 ```
 
 Presets: `psr` = `msm.psr_enabled=1`, `vrr` = `msm.vrr_enabled=1`, `ir-test` = `sl7.ir_test=1 panic=5`
-(entry "linux-sl7 (IR test)", fixed parameters, section 11c). Any other NAME needs PARAMS.
+(entry "linux-sl7 (IR test)", fixed parameters, section 11c), `clk-unused` = `-clk_ignore_unused
+-pd_ignore_unused clk_unused_defer` (a leading `-` removes the word from the entry's cmdline, see below).
+Any other NAME needs PARAMS.
 `omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset). The old r6
 `psr-entry.enabled` state file, hook and block are removed on upgrade (`cleanup --legacy`);
 PSR is not carried over.
@@ -493,6 +542,40 @@ Test steps:
    normal entry with `--label normal`, then `sl7-powertest compare ...-normal.jsonl ...-vrr.jsonl`
    (VRR does not lower an idle desktop's refresh by itself; the gain is for varying content).
 7. Done: `sudo omarchy-sl7-test-entry disable vrr` and boot the normal entry.
+
+#### Unused clocks and domains (`clk-unused`): EXPERIMENTAL
+
+```
+sudo omarchy-sl7-test-entry enable clk-unused     # entry "linux-sl7 (CLK-UNUSED test)"
+```
+
+Boots linux-sl7 without `clk_ignore_unused pd_ignore_unused` and with `clk_unused_defer`.
+Omarchy's `qualcomm-snapdragon.conf` drop-in puts the two ignore flags on every Snapdragon
+cmdline (we do not set them, section 3); they stay on the normal entry. With the flag, linux-sl7
+patches 0087 and 0088 (Johan Hovold's deferred disabling, see the linux-sl7 README) wait 30 s
+before they disable unused clocks and power domains, so dispcc, gpucc and msm can claim theirs
+first. Without `clk_unused_defer` the kernel behaves as before, so the normal entry is unchanged.
+
+The preset's PARAMS contain two words that start with `-`: such a word **removes** that word from
+the copied entry's `cmdline:` (limine-entry-tool offers no per-entry removal, so the script edits
+its own copy; the normal entry and the regeneration hook are untouched). `omarchy-sl7-test-entry
+status clk-unused` checks the running `/proc/cmdline` for the added word and the absence of the
+removed ones.
+
+RISK (medium): the Dell XPS 13 owner saw one boot in five freeze without the deferral
+(#12441 in the plan's notes). The deferral is meant to fix that, but it is not proven on the SL7. A
+frozen or garbled boot is the failure mode; the fallback is choosing the normal `linux-sl7` entry
+in the Limine menu (the default entry and `BOOT_ORDER` are never changed). Needs linux-sl7
+7.2.8-15 or newer: on an older kernel the unknown `clk_unused_defer` is ignored, and the entry
+just has no ignore flags and no deferral, which is the risky case, so check `dmesg | grep -E
+'clk: |genpd: '` for "Deferring" before trusting it.
+
+Test: boot the entry; `cat /proc/cmdline` (no ignore flags, `clk_unused_defer` present); after 30
+s `dmesg | grep -E 'clk: |genpd: '` shows "Disabling unused clocks" and "Disabling unused power
+domains"; the screen stays up. A/B: three `sl7-powermeter --log FILE --seconds 180` runs on each
+entry after 10 minutes idle, alternating, then `sl7-powermeter --compare`; expected 10 to 50 mW
+awake [estimate]. `sl7-sleepstats --suspend-test` covers the suspend side. Done: `sudo
+omarchy-sl7-test-entry disable clk-unused`.
 
 ### 11c. IR emitter test boot and `sl7-ir-emitter-test` (Stage A and B of the IR emitter plan)
 
@@ -733,6 +816,41 @@ anything reads it, so reading adds nothing there, but a live `sl7-powermeter` wa
 second and can raise an idle reading. For gauge runs use `sl7-powertest idle --rails` instead: it
 adds `rails_w` to each 5 s record and `rails_mean_w` to the summary (shown by `compare`), with no
 extra process. The watts in the summary stay the gauge's.
+
+### 12e. Who uses CPU and wakes up at idle: `sl7-proftop`
+
+Read-only, no root, like `pidstat`. It reads `/proc/<pid>/task/<tid>/stat` (user and system ticks)
+twice, N seconds apart, and reports CPU% per process, plus the wakeups of each: `runs/s` from
+`schedstat` (how often the task was put on a CPU) and `vcsw/s` (voluntary context switches, how
+often it blocked by itself). It also prints per-CPU busy percent and the busiest interrupt lines of
+the window.
+
+```
+sl7-proftop                               # 30 s, top 15 by CPU and the top wakers
+sl7-proftop -n 60 -t 25 --group           # 60 s, merge same-named processes (two iptsd@ instances)
+sl7-proftop --threads                     # per thread (Hyprland's and quickshell's threads)
+sl7-proftop --watch 'iptsd|Hyprland|quickshell'   # always listed, even outside the top rows
+sl7-proftop --json
+```
+
+At idle the CPU% column is near zero for everything, and the waker table is the interesting one: a
+daemon that polls, a compositor frame callback or a shell animation timer shows up as thousands of
+`runs/s` for almost no CPU, and every wakeup can pull a cluster out of its idle state. The SPI
+lines in the interrupt list (`88c000.spi`, `a88000.spi`) show whether the touch sensors stream
+while nobody touches them (RUNTIME-PLAN 4.7).
+
+With the power meter, to attribute watts (idle desktop, battery, backlight pinned):
+
+```
+sl7-powermeter --log idle.jsonl --seconds 60 --label idle &
+sl7-proftop -n 60 --group
+wait
+```
+
+Repeat while scrolling on the touchpad to see iptsd under touch. A process that exits during the
+window is not counted; one that starts counts from its birth. `sl7-proftop` itself uses some CPU
+while it samples (not measured), which is part of the idle reading: do not run it during a
+gauge-grade A/B (section 12d), only next to it for attribution.
 
 ### 12c. Finding what blocks SoC sleep: `sl7-sleepstats --trace`
 

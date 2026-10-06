@@ -15,7 +15,7 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.8
-pkgrel=14
+pkgrel=15
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -120,6 +120,8 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0084-SL7-arm64-dts-qcom-x1e80100-romulus13-Disable-the-empty-pcie3-card-reader-slot.patch'
         'patches/0085-wifi-ath12k-Set-DTIM-policy-to-stick-mode-for-station-i.patch'
         'patches/0086-SL7-arm64-dts-qcom-x1e80100-romulus-Enable-the-Iris-video-codec.patch'
+        'patches/0087-clk-Defer-disabling-of-unused-clocks-behind-clk_unused_defer.patch'
+        'patches/0088-pmdomain-core-Defer-disabling-of-unused-domains-behind-clk_unused_defer.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
@@ -201,6 +203,8 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
          'SKIP'
          'SKIP'
          'SKIP'
+            'SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'

@@ -30,6 +30,15 @@
 #                             the four PM8550 IR flash LEDs exist. Nothing fires
 #                             by itself. Fixed parameters: no custom PARAMS.
 #                             See the README, section 11c.
+#   clk-unused  -clk_ignore_unused -pd_ignore_unused clk_unused_defer
+#                             EXPERIMENTAL: boots without Omarchy's two
+#                             ignore flags, with linux-sl7 patches 0087/0088
+#                             deferring the disabling of unused clocks and
+#                             power domains by 30 s. A PARAMS word that starts
+#                             with "-" REMOVES that word from the entry's
+#                             cmdline instead of adding it. About 1 boot in 5
+#                             froze on the Dell XPS 13 without the deferral;
+#                             the fallback is the normal entry. See the README.
 # Any other NAME (lowercase letters, digits, dashes) needs PARAMS.
 #
 # limine-entry-tool has no per-entry cmdline variants and rewrites limine.conf
@@ -52,7 +61,7 @@ export tag_new tag_old
 
 usage() {
   echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME] | cleanup [--legacy]" >&2
-  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), vrr (msm.vrr_enabled=1, EXPERIMENTAL), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot)" >&2
+  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), vrr (msm.vrr_enabled=1, EXPERIMENTAL), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL)" >&2
   exit 2
 }
 
@@ -61,6 +70,7 @@ preset_params() {
     psr) echo "msm.psr_enabled=1" ;;
     vrr) echo "msm.vrr_enabled=1" ;;
     ir-test) echo "sl7.ir_test=1 panic=5" ;;
+    clk-unused) echo "-clk_ignore_unused -pd_ignore_unused clk_unused_defer" ;;
   esac
 }
 
@@ -69,6 +79,7 @@ preset_note() {
     psr) echo "KNOWN BROKEN: the panel turns off when idle and returns only when something paints" ;;
     vrr) echo "EXPERIMENTAL: eDP variable refresh; also needs misc.vrr in Hyprland" ;;
     ir-test) echo "IR EMITTER TEST BOOT: the PM8550 IR flash LEDs exist on this boot only; nothing fires by itself (README 11c)" ;;
+    clk-unused) echo "EXPERIMENTAL: no clk_ignore_unused/pd_ignore_unused, unused clocks and domains disabled 30 s after boot; a boot may freeze (1 in 5 on the Dell without the deferral): choose the normal entry" ;;
   esac
 }
 
@@ -155,8 +166,23 @@ strip_block() {
 insert_block() {
   awk '
     function is_header(l) { return l ~ /^[ \t]*\/+[^\/]/ }
+    # Drop every whole word w from a "cmdline:" line.
+    function rmword(l, w,    pre, rest, n, a, i, out) {
+      match(l, /^[ \t]*(kernel_)?cmdline:[ \t]*/)
+      pre = substr(l, 1, RLENGTH)
+      rest = substr(l, RLENGTH + 1)
+      n = split(rest, a, /[ \t]+/)
+      out = ""
+      for (i = 1; i <= n; i++)
+        if (a[i] != "" && a[i] != w) out = out (out == "" ? "" : " ") a[i]
+      return pre out
+    }
     { line[NR] = $0; if (is_header($0)) hdr[++nh] = NR }
     END {
+      np = split(ENVIRON["param"], pw, " ")
+      add = ""
+      for (k = 1; k <= np; k++)
+        if (!(substr(pw[k], 1, 1) == "-" && length(pw[k]) > 1)) add = add (add == "" ? "" : " ") pw[k]
       s = 0
       for (h = 1; h <= nh && !s; h++) {
         last = (h < nh) ? hdr[h + 1] - 1 : NR
@@ -179,10 +205,16 @@ insert_block() {
       for (i = s + 1; i <= n; i++) {
         l = line[i]
         if (l ~ /^[ \t]*comment:[ \t]*(kernel-id=|Kernel version:)/ || l ~ /^[ \t]*###/) continue
-        if (l ~ /^[ \t]*(kernel_)?cmdline:/) { sub(/[ \t]+$/, "", l); l = l " " ENVIRON["param"]; cmd = 1 }
+        if (l ~ /^[ \t]*(kernel_)?cmdline:/) {
+          sub(/[ \t]+$/, "", l)
+          for (k = 1; k <= np; k++)
+            if (substr(pw[k], 1, 1) == "-" && length(pw[k]) > 1) l = rmword(l, substr(pw[k], 2))
+          if (add != "") l = l " " add
+          cmd = 1
+        }
         print l
       }
-      if (!cmd) print ind "cmdline: " ENVIRON["param"]
+      if (!cmd && add != "") print ind "cmdline: " add
       print "### END omarchy-sl7-test-entry " ENVIRON["tag"]
       for (i = n + 1; i <= NR; i++) print line[i]
     }'
@@ -251,11 +283,20 @@ need_root() {
 
 running_state() { # NAME PARAMS
   local p
+  local w
   for p in $2; do
-    grep -qw -- "$p" "${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}" 2>/dev/null || {
-      echo "this boot: not the $1 test entry (missing $p on the running cmdline)"
-      return
-    }
+    if [[ $p == -?* ]]; then
+      w=${p#-}
+      if grep -qw -- "$w" "${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}" 2>/dev/null; then
+        echo "this boot: not the $1 test entry ($w is still on the running cmdline)"
+        return
+      fi
+    else
+      grep -qw -- "$p" "${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}" 2>/dev/null || {
+        echo "this boot: not the $1 test entry (missing $p on the running cmdline)"
+        return
+      }
+    fi
   done
   echo "this boot: $1 test entry ($2 on the running cmdline)"
 }
@@ -299,7 +340,7 @@ case $cmd in
       exit 2
     fi
     [[ -n $params ]] || params=$(preset_params "$name")
-    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, vrr, ir-test); give PARAMS" >&2; exit 2; }
+    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, vrr, ir-test, clk-unused); give PARAMS" >&2; exit 2; }
     [[ $params =~ ^[A-Za-z0-9._=:,/+-]+( [A-Za-z0-9._=:,/+-]+)*$ ]] || { echo "omarchy-sl7-test-entry: unsafe characters in PARAMS" >&2; exit 2; }
     mkdir -p "$state_dir"
     sf="${state_dir:?}/${name:?}"
@@ -326,13 +367,13 @@ case $cmd in
     if [[ $name == ir-test ]]; then ir_approval_note; fi
     ;;
   list)
-    for p in psr vrr ir-test; do
+    for p in psr vrr ir-test clk-unused; do
       if is_enabled "$p"; then s=enabled; else s=disabled; fi
-      printf '%-7s %-8s %s  [%s]\n' "$p" "$s" "$(preset_params "$p")" "$(preset_note "$p")"
+      printf '%-10s %-8s %s  [%s]\n' "$p" "$s" "$(preset_params "$p")" "$(preset_note "$p")"
     done
     while IFS=$'\t' read -r name params; do
       [[ -n $name ]] || continue
-      [[ -n $(preset_params "$name") ]] || printf '%-7s %-8s %s\n' "$name" enabled "$params"
+      [[ -n $(preset_params "$name") ]] || printf '%-10s %-8s %s\n' "$name" enabled "$params"
     done < <(enabled_entries)
     if conf=$(find_conf); then
       echo "in $conf:"
@@ -362,6 +403,7 @@ case $cmd in
       status_one psr "$(preset_params psr)"
       status_one vrr "$(preset_params vrr)"
       status_one ir-test "$(preset_params ir-test)"
+      status_one clk-unused "$(preset_params clk-unused)"
       while IFS=$'\t' read -r name params; do
         [[ -n $name && -z $(preset_params "$name") ]] && status_one "$name" "$params"
       done < <(enabled_entries)

@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=28
+pkgrel=29
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -89,7 +89,9 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-usb-rpm'
         'sl7-vrr-rate'
         '80-omarchy-sl7-usb-rpm.rules'
-        'usb-rpm.conf')
+        'usb-rpm.conf'
+        'sl7-park'
+        'sl7-proftop')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -117,7 +119,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             '9bcfc98e53c1a7a522565a156b3aa5d2c3e9083489a8717a5b0f5a7cb006b911'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            'b68a0fcb417622593f7f74f869fc65b58ce18a967623235459f4fa135d59b792'
+            '4f76b294df3f96dfd71a6bd75aebf4ddc207bd7127cf136abb043f8d683da13e'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -126,16 +128,16 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '796d977f39d10441bdd32a2c44377241697d7fba6a34b25cb01a4f835f709dd1'
             'd002cab0467b46cc91db61494686e21347d0d05e7be67695d387f86b3b5bae24'
             '6ac11a2da8156315c769d10df8efcaffff2a8be44cc92c830bda3a2fb1a7c588'
-            '6dc205ff6d9a2b6e178e8fa35a3971ac40bd817254c02b7a03339d58c5998a28'
+            'c9b7e343630609d45a3ab2233e44b0b388fecb28cba99873a2e4362c02aa2638'
             '5e3c6ab285f06d1564b51f978156f9e2fe6cf21e5c25db2013720b2fe5f581d0'
             '43be05503a70fa3badf65785b9230d5997a23f1b9f93ff380a8f77fd63951d76'
             '9c7cdc52e2e47585fd813f8e34d217708665a5a65f2514bdfda122c715483a88'
             '1b2d124782a26a26b4ea6245a425b5b29c402f7d2e511116156612269b71f589'
-            '9b6e16a7fd17caa108ac20e13f22b836b8b248296b97856ea29fe032144be593'
+            '0761215ed02837aa1ed78bf5145e84bafa9c0dd81c6453447e60516b1533d11b'
             'e46273cb99ff5aff8700bc82498a45c2117598bce403074e6771a0160c387d3e'
             'bd5f5bef8154e7ab596149b378f51334eb46db25518a0a93412f05b264f33d23'
             '345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff'
-            '5fdf6b5d4f54be60964953585a728d318c434d4958698b6827ae898a23d36df9'
+            'ce89a62bc6f4e2bed6399f6e6f8eaa62a916272427098bee88ddc46b07ef69a1'
             '3e181253a2aa10511f046ef2cec0fed990d217b310ff06bf511ebb0cbfb641b2'
             '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a'
             '41cf0f5821f9dc5bee37b55e32f220b022e8b8cf008d5269281b293f283c4c92'
@@ -145,7 +147,9 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'c7ca33e4083f2c0f7222b61b9e39892f7d83842a509bcf14915b48ba57fb91eb'
             'b24d5712b0035a4dd883ff8e351874bf4837f1d14e72bd5aad4668cfa978c2f5'
             '5eb4d3cde19057bb20fe87a742acd41e37fbe1ee8b006e1959962369d5fd8ceb'
-            'ae0fb8eda052019cf3105ad1d260ad0ed24041eafe9fe6109296682a66f39797')
+            'ae0fb8eda052019cf3105ad1d260ad0ed24041eafe9fe6109296682a66f39797'
+            'da3c35d8fa9813e0ac202ef45f46516cfb50ec0eecc2280657aa6bed604e1dbc'
+            '286938c724910386607f413c90ba58cda2f5e14111a345b6fb1859e91b30d472')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -263,7 +267,7 @@ package() {
   install -Dm755 sl7-powermeter "$pkgdir/usr/bin/sl7-powermeter"
   install -Dm755 sl7-sleepstats "$pkgdir/usr/bin/sl7-sleepstats"
 
-  # 8d. optional kernel test boot entries (PSR: known broken, VRR: experimental;
+  # 8d. optional kernel test boot entries (PSR: known broken, VRR and clk-unused: experimental;
   # disabled until `omarchy-sl7-test-entry enable NAME`): the post hook
   # re-creates them after limine-entry-tool rewrites limine.conf.
   # omarchy-sl7-psr-entry is a wrapper kept for the old command name.
@@ -291,6 +295,12 @@ package() {
 
   # 8i. real refresh rate of the panel (vblank loop, or read-only DPU frame counter as root)
   install -Dm755 sl7-vrr-rate "$pkgdir/usr/bin/sl7-vrr-rate"
+
+  # 8j. opt-in cluster parking on battery (PARK_ON_BATTERY=yes in power.conf;
+  # called by omarchy-sl7-powermode, runtime only), and the read-only
+  # per-process CPU/wakeup sampler.
+  install -Dm755 sl7-park "$pkgdir/usr/bin/sl7-park"
+  install -Dm755 sl7-proftop "$pkgdir/usr/bin/sl7-proftop"
 
   # 9. omarchy-sl7 package repository: config, the script that keeps it Included
   # above [core]/[alarm]/[omarchy], its pacman hook and boot service, and the

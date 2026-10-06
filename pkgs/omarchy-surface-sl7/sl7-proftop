@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""Who spends CPU and wakes up at idle: a read-only per-process sampler.
+
+  sl7-proftop                      sample 30 s, print the top 15 by CPU time
+  sl7-proftop -n 60 -t 25          60 s window, 25 rows
+  sl7-proftop --threads            one row per thread instead of per process
+  sl7-proftop --group              merge processes with the same name (two iptsd@)
+  sl7-proftop --watch 'iptsd|Hyprland|quickshell'
+                                   always show these (regex on the process name),
+                                   even when they are not in the top rows
+  sl7-proftop --json               machine-readable result
+
+Like pidstat: it reads /proc/<pid>/task/<tid>/stat twice (utime and stime, in
+clock ticks), N seconds apart, and reports the difference. The wakeup columns
+come from /proc/<pid>/task/<tid>/schedstat (runs = how many times the task was
+put on a CPU, the closest thing to a wakeup count; needs CONFIG_SCHED_INFO,
+which linux-sl7 has) and from voluntary_ctxt_switches in the task's status
+(times it blocked by itself). It also prints per-CPU busy percent and the
+busiest interrupt lines of the window. Read-only: it needs no root, writes
+nothing and never touches a process. Tasks owned by other users are still
+readable in /proc, so the whole system shows up.
+
+Run it next to the power meter to attribute the watts:
+
+  sl7-powermeter --log idle.jsonl --seconds 60 & sl7-proftop -n 60
+
+CPU% is of one CPU (200% = two CPUs busy). A process or thread that starts
+during the window counts from its birth; one that exits before the second sample
+is lost. Wakeups of a task that only runs for
+microseconds show as runs/s with CPU% near 0: that is the interesting case at
+idle (iptsd polling, a compositor frame callback, a shell animation timer).
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+
+TCK = os.sysconf("SC_CLK_TCK")
+
+
+def read_text(path):
+    try:
+        with open(path, "r", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def parse_stat(text):
+    """(comm, utime, stime) from a /proc stat line; comm may hold spaces and ')'."""
+    head, _, tail = text.rpartition(")")
+    comm = head.partition("(")[2]
+    f = tail.split()
+    return comm, int(f[11]), int(f[12])  # fields 14 and 15 of the stat line
+
+
+def parse_vol(text):
+    for line in text.splitlines():
+        if line.startswith("voluntary_ctxt_switches:"):
+            return int(line.split()[1])
+    return 0
+
+
+def cmdline_of(pid):
+    t = read_text("/proc/%s/cmdline" % pid)
+    if not t:
+        return ""
+    return " ".join(t.replace("\0", " ").split())
+
+
+def snapshot():
+    """{pid: {"cmd": str, "tasks": {tid: (comm, utime, stime, runs, vol)}}}."""
+    procs = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return procs
+    for pid in names:
+        if not pid.isdigit():
+            continue
+        try:
+            tids = os.listdir("/proc/%s/task" % pid)
+        except OSError:
+            continue
+        tasks = {}
+        for tid in tids:
+            base = "/proc/%s/task/%s" % (pid, tid)
+            st = read_text(base + "/stat")
+            if not st:
+                continue
+            try:
+                comm, ut, stm = parse_stat(st)
+            except (ValueError, IndexError):
+                continue
+            runs = 0
+            ss = read_text(base + "/schedstat")
+            if ss:
+                try:
+                    runs = int(ss.split()[2])
+                except (ValueError, IndexError):
+                    pass
+            vol = 0
+            sts = read_text(base + "/status")
+            if sts:
+                try:
+                    vol = parse_vol(sts)
+                except (ValueError, IndexError):
+                    pass
+            tasks[tid] = (comm, ut, stm, runs, vol)
+        if tasks:
+            procs[pid] = {"tasks": tasks}
+    return procs
+
+
+def cpu_times():
+    """{cpu index: (busy ticks, total ticks)} from /proc/stat."""
+    out = {}
+    t = read_text("/proc/stat") or ""
+    for line in t.splitlines():
+        m = re.match(r"cpu(\d+)\s+(.*)", line)
+        if not m:
+            continue
+        v = [int(x) for x in m.group(2).split()]
+        total = sum(v[:8])
+        idle = v[3] + (v[4] if len(v) > 4 else 0)
+        out[int(m.group(1))] = (total - idle, total)
+    return out
+
+
+def irq_counts():
+    """{irq: (sum over CPUs, label)} from /proc/interrupts."""
+    out = {}
+    t = read_text("/proc/interrupts")
+    if not t:
+        return out
+    lines = t.splitlines()
+    ncpu = len(lines[0].split()) if lines else 0
+    for line in lines[1:]:
+        label, _, rest = line.partition(":")
+        label = label.strip()
+        toks = rest.split()
+        if not label or len(toks) < 1:
+            continue
+        total = 0
+        used = 0
+        for tok in toks[:ncpu]:
+            if not tok.isdigit():
+                break
+            total += int(tok)
+            used += 1
+        name = " ".join(toks[used:])
+        out[label] = (total, name)
+    return out
+
+
+def build_rows(a, b, elapsed, mode, cmds):
+    """mode: proc | thread | group. Rows from two snapshots."""
+    rows = {}
+    for pid, pb in b.items():
+        pa = a.get(pid, {"tasks": {}})["tasks"]
+        for tid, (comm, ut, stm, runs, vol) in pb["tasks"].items():
+            if tid in pa:
+                _, ut0, st0, runs0, vol0 = pa[tid]
+            else:
+                ut0 = st0 = runs0 = vol0 = 0  # born in the window: its whole life counts
+            d_ut, d_st = ut - ut0, stm - st0
+            d_runs, d_vol = runs - runs0, vol - vol0
+            lead = pb["tasks"].get(pid)
+            pname = lead[0] if lead else comm
+            if mode == "thread":
+                key = (pid, tid)
+                label = comm
+            elif mode == "group":
+                key = pname
+                label = pname
+            else:
+                key = pid
+                label = pname
+            r = rows.setdefault(key, {"label": label, "pid": pid if mode != "group" else "-",
+                                      "tid": tid if mode == "thread" else None,
+                                      "ut": 0, "st": 0, "runs": 0, "vol": 0, "n": 0,
+                                      "pids": set()})
+            r["ut"] += d_ut
+            r["st"] += d_st
+            r["runs"] += d_runs
+            r["vol"] += d_vol
+            r["n"] += 1
+            r["pids"].add(pid)
+    out = []
+    for r in rows.values():
+        cpu = (r["ut"] + r["st"]) / TCK / elapsed * 100.0
+        row = {
+            "name": r["label"],
+            "pid": r["pid"],
+            "tid": r["tid"],
+            "cpu_pct": round(cpu, 2),
+            "user_pct": round(r["ut"] / TCK / elapsed * 100.0, 2),
+            "sys_pct": round(r["st"] / TCK / elapsed * 100.0, 2),
+            "runs_per_s": round(r["runs"] / elapsed, 1),
+            "vcsw_per_s": round(r["vol"] / elapsed, 1),
+            "threads": r["n"] if mode != "thread" else None,
+            "procs": len(r["pids"]),
+        }
+        if mode == "group":
+            row["cmd"] = "%d process(es)" % row["procs"]
+        else:
+            row["cmd"] = cmds.get(r["pid"], "")
+        out.append(row)
+    return out
+
+
+def fmt_rows(rows, mode):
+    pid_h = "PID" if mode != "thread" else "PID/TID"
+    lines = ["%7s %6s %6s %9s %9s %4s  %-12s %s" % ("CPU%", "usr%", "sys%", "runs/s", "vcsw/s", "thr", pid_h, "name  command")]
+    for r in rows:
+        who = str(r["pid"]) if mode != "thread" else "%s/%s" % (r["pid"], r["tid"])
+        thr = "" if r["threads"] is None else str(r["threads"])
+        lines.append("%7.2f %6.2f %6.2f %9.1f %9.1f %4s  %-12s %s  %s" % (
+            r["cpu_pct"], r["user_pct"], r["sys_pct"], r["runs_per_s"], r["vcsw_per_s"],
+            thr, who, r["name"], r["cmd"][:60]))
+    return lines
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Read-only per-process CPU time and wakeup sampler (see the file header).")
+    ap.add_argument("-n", "--seconds", type=float, default=30.0, help="sample window, default 30")
+    ap.add_argument("-t", "--top", type=int, default=15, help="rows to show, default 15")
+    ap.add_argument("--threads", action="store_true", help="one row per thread")
+    ap.add_argument("--group", action="store_true", help="merge processes with the same name")
+    ap.add_argument("--watch", default=r"iptsd|[Hh]yprland|[Qq]uickshell",
+                    help="regex on the name: always shown (default: iptsd, Hyprland, quickshell)")
+    ap.add_argument("--irq-top", type=int, default=8, help="busiest interrupt lines to show (0 = off)")
+    ap.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    args = ap.parse_args()
+
+    if args.seconds < 1 or args.top < 1:
+        sys.exit("sl7-proftop: --seconds must be at least 1 and --top at least 1")
+    if args.threads and args.group:
+        sys.exit("sl7-proftop: --threads and --group exclude each other")
+    try:
+        watch = re.compile(args.watch) if args.watch else None
+    except re.error as e:
+        sys.exit("sl7-proftop: bad --watch regex: %s" % e)
+    mode = "thread" if args.threads else "group" if args.group else "proc"
+
+    if read_text("/proc/self/schedstat") is None:
+        print("sl7-proftop: no /proc/<pid>/schedstat (CONFIG_SCHED_INFO off); runs/s will be 0", file=sys.stderr)
+
+    t0 = time.monotonic()
+    snap_a = snapshot()
+    cpu_a = cpu_times()
+    irq_a = irq_counts()
+    try:
+        time.sleep(args.seconds)
+    except KeyboardInterrupt:
+        pass
+    snap_b = snapshot()
+    cpu_b = cpu_times()
+    irq_b = irq_counts()
+    elapsed = time.monotonic() - t0
+    if elapsed <= 0:
+        sys.exit("sl7-proftop: no time elapsed")
+
+    cmds = {pid: cmdline_of(pid) for pid in snap_b}
+    rows = build_rows(snap_a, snap_b, elapsed, mode, cmds)
+
+    by_cpu = sorted(rows, key=lambda r: (-r["cpu_pct"], -r["runs_per_s"]))
+    by_runs = sorted(rows, key=lambda r: (-r["runs_per_s"], -r["cpu_pct"]))
+    top_cpu = by_cpu[:args.top]
+    top_runs = [r for r in by_runs[:min(args.top, 10)] if r["runs_per_s"] > 0]
+    seen = {id(r) for r in top_cpu}
+    watched = []
+    if watch:
+        for r in by_cpu:
+            if id(r) not in seen and watch.search(r["name"]):
+                watched.append(r)
+
+    percpu = {}
+    for cpu, (busy1, tot1) in cpu_b.items():
+        busy0, tot0 = cpu_a.get(cpu, (busy1, tot1))
+        dt = tot1 - tot0
+        percpu[cpu] = round((busy1 - busy0) / dt * 100.0, 1) if dt > 0 else 0.0
+
+    irqs = []
+    if args.irq_top > 0:
+        for irq, (n1, name) in irq_b.items():
+            n0 = irq_a.get(irq, (n1, name))[0]
+            rate = (n1 - n0) / elapsed
+            if rate >= 0.5:
+                irqs.append({"irq": irq, "per_s": round(rate, 1), "name": name})
+        irqs.sort(key=lambda x: -x["per_s"])
+        irqs = irqs[:args.irq_top]
+
+    total_cpu = sum(r["cpu_pct"] for r in rows)
+    result = {
+        "seconds": round(elapsed, 2),
+        "mode": mode,
+        "clk_tck": TCK,
+        "cpus": len(percpu),
+        "sum_cpu_pct": round(total_cpu, 2),
+        "per_cpu_busy_pct": percpu,
+        "top_cpu": top_cpu,
+        "top_runs": top_runs,
+        "watched": watched,
+        "irqs": irqs,
+    }
+    if args.json:
+        json.dump(result, sys.stdout, indent=2)
+        print()
+        return 0
+
+    print("sl7-proftop: %.1f s window, %d CPUs, %s rows; CPU%% is of one CPU (100 = one CPU busy)" % (
+        elapsed, len(percpu), {"proc": "per-process", "thread": "per-thread", "group": "per-name"}[mode]))
+    print("sum over all tasks: %.2f%%   per-CPU busy%%: %s" % (
+        total_cpu, " ".join("%d:%.1f" % (c, v) for c, v in sorted(percpu.items()))))
+    print()
+    print("Top %d by CPU time" % len(top_cpu))
+    print("\n".join(fmt_rows(top_cpu, mode)))
+    if top_runs:
+        print()
+        print("Top by wakeups (runs/s, how often the task was put on a CPU)")
+        print("\n".join(fmt_rows(top_runs, mode)))
+    if watched:
+        print()
+        print("Watched (--watch %s), outside the top rows" % args.watch)
+        print("\n".join(fmt_rows(watched, mode)))
+    if irqs:
+        print()
+        print("Busiest interrupt lines (sum over CPUs)")
+        for i in irqs:
+            print("%9.1f /s  %s: %s" % (i["per_s"], i["irq"], i["name"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

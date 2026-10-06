@@ -74,6 +74,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0084 | SL7 local: romulus13 disables `&pcie3` and `&pcie3_phy` (the 15 inch card reader slot, empty on the 13.8 inch) | ours; RUNTIME-PLAN C1 | not submitted (candidate: romulus13 fix) |
 | 0085 | ath12k: DTIM stick mode for station vdevs (the STA follows the AP DTIM instead of listen interval 5) | torvalds `af50baccaa5f` (Daizhuang Bai, v7.3-rc1) | merged for 7.3 (backport) |
 | 0086 | SL7 local: romulus (13.8 and 15 inch) enables `&iris` with the Microsoft signed `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn` (V4L2 stateful decoder and encoder) | ours; firmware from the SL7 MSI via `omarchy-surface-sl7-firmware` | not submitted (needs signed firmware in linux-firmware) |
+| 0087-0088 | clk and genpd: defer disabling of unused clocks and power domains by 30 s, **only with `clk_unused_defer` on the command line** (used by `omarchy-sl7-test-entry enable clk-unused`) | jhovold/linux `1e3e4a97ba7e`, `b3f09e07cfbb` (Johan Hovold, Sep 2024) plus our opt-in gate | not mainline; Hovold's WIP, drop when mainline has an equivalent |
 
 Notes on the DT patches:
 
@@ -400,6 +401,59 @@ Codecs the 7.2 driver advertises for this platform (`iris_platform_vpu3x.c`, `ir
 NV12 (plus the Qualcomm tiled `QC08C` and 10 bit `P010`/`QC10C`); the encoder produces H.264 and HEVC
 from NV12 (or `QC08C`). There is no VP9 or AV1 encode. Whether the Microsoft firmware image supports
 each codec is untested.
+
+## Runtime power, round 2 (7.2.8-15): deferred unused-clock disabling, opt-in
+
+Patches 0087 and 0088 backport Johan Hovold's `1e3e4a97ba7e` ("clk: defer disabling of unused
+clocks") and `b3f09e07cfbb` ("pm_domain: defer disabling of unused domains"), both from
+`jhovold/linux` (Sep 2024, not in mainline). Each turns the `late_initcall_sync` disabling into a
+30 s delayed work, so modular clock and power domain providers and consumers (dispcc, gpucc, msm)
+can probe and claim their clocks first. That is the reason Omarchy puts `clk_ignore_unused
+pd_ignore_unused` on the Snapdragon command line (`qualcomm-snapdragon.conf` of limine-entry-tool,
+not our drop-in).
+
+**Nothing changes on a normal boot.** Our backport is gated: the deferral is active only when
+`clk_unused_defer` is on the kernel command line. Without it the disabling still runs in the
+late_initcall exactly as before (0087 keeps the old body as `clk_disable_unused_now()` and the
+genpd body as `genpd_power_off_unused_now()`), and the existing `clk_ignore_unused` and
+`pd_ignore_unused` flags keep working the same way (they are now checked when the work runs).
+The flag is parsed once in `drivers/clk/clk.c` (`__setup`, returns 1 so init does not see it) and
+shared with `drivers/pmdomain/core.c` through `clk_unused_defer_requested()` (declared in
+`include/linux/clk.h`, with a `false` stub for `!COMMON_CLK`), because two `__setup()` handlers
+for one string would not both run. The `__init` markers on the clk subtree helpers and on
+`clk_ignore_unused` are dropped, as in the originals, since they now run after init.
+
+Use it only through the test entry, which removes both ignore flags and adds the defer flag:
+
+```
+sudo omarchy-sl7-test-entry enable clk-unused     # entry "linux-sl7 (CLK-UNUSED test)"
+```
+
+Risk (medium): without the deferral the Dell XPS 13 owner saw one boot in five freeze (framebuffer
+clocks cut before dispcc/gpucc/msm probed). With the deferral those clocks are claimed within the
+30 s window, but this is not proven on the SL7. A frozen or garbled boot is the failure; the
+fallback is choosing the normal linux-sl7 entry in the Limine menu (the default entry and
+`BOOT_ORDER` never change). `fw_devlink.sync_state=timeout` (already on our cmdline) fires its
+sync_state at about the same 30 s, so providers' unused resources are also released then.
+Expected gain 10 to 50 mW awake (idle clock trees, two TCSR clkref buffers), more in suspend
+[estimate, RUNTIME-PLAN 4.5].
+
+Checked statically only: both patches apply after 0086 on a v7.2.8 tree (apply-series.sh, 81
+patches), and `drivers/clk/clk.o` and `drivers/pmdomain/core.o` compile for arm64 with clang
+without warnings (the `__setup` strings and the exported symbol are in the objects). Not booted.
+
+Test (battery, backlight pinned, same Wi-Fi), alternating normal and CLK-UNUSED boots, three
+`sl7-powermeter --log FILE --seconds 180` runs each after 10 minutes idle, then
+`sl7-powermeter --compare`:
+
+- on the test boot: `cat /proc/cmdline` has `clk_unused_defer` and neither ignore flag;
+  `dmesg | grep -E 'clk: |genpd: '` shows "Deferring ... by 30 s", then, 30 s later,
+  "Disabling unused clocks" and "Disabling unused power domains" (not "Not disabling");
+  the display stays up at that moment;
+- `/sys/kernel/debug/clk/clk_summary` (root): the enable count of the clocks listed in the plan's
+  141-clock set drops to 0 after the 30 s;
+- compare SYS and the CPU rails; also `sl7-sleepstats --suspend-test` for the suspend side.
+- If the screen freezes or garbles: hold power, choose the normal entry.
 
 ## Build
 

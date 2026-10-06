@@ -6,7 +6,8 @@
 #
 # System part (root; run by udev through power-event, and at boot): per-policy
 # scaling_max_freq cap, GPU devfreq max_freq cap, Wi-Fi power save, platform
-# profile. User part (your session): eDP refresh rate, optionally animations
+# profile, and (opt-in, PARK_ON_BATTERY=yes) cluster parking through sl7-park.
+# User part (your session): eDP refresh rate, optionally animations
 # and blur, through "hyprctl eval" at runtime only; monitors.lua is never
 # touched. Without a flag, root runs the system part and anyone else the user
 # part. Policy lives in /etc/omarchy-surface-sl7/power.conf.
@@ -39,6 +40,8 @@ EDP_OUTPUT=eDP-1
 DISABLE_ANIMATIONS_ON_BATTERY=no
 DISABLE_BLUR_ON_BATTERY=no
 HYPRLAND_VRR=1
+PARK_ON_BATTERY=no
+park_cmd=${OMARCHY_SL7_PARK:-sl7-park}
 cmdline=${OMARCHY_SL7_PROC_CMDLINE:-/proc/cmdline}
 load_conf() {
   # shellcheck disable=SC1090
@@ -187,11 +190,22 @@ sys_platform_profile() {
   done < <(pp_files)
 }
 
+# Opt-in cluster parking (user.slice and system.slice confined to CPUs of
+# cluster 0 on battery). sl7-park reads PARK_ON_BATTERY itself, parks only when
+# it is "yes" on battery, and restores on AC or when it is off (a no-op when it
+# never parked), so this is called on every switch. Never fatal.
+sys_park() { # battery|ac
+  command -v "$park_cmd" >/dev/null 2>&1 || return 0
+  "$park_cmd" apply "$1" || echo "sl7-park apply $1 failed" >&2
+  return 0
+}
+
 apply_system() { # battery|ac
   sys_cpu "$1"
   sys_gpu "$1"
   sys_wifi "$1"
   sys_platform_profile "$1"
+  sys_park "$1"
   mkdir -p "$run_dir" 2>/dev/null && printf '%s\n' "$1" >"$run_dir/mode" 2>/dev/null
   return 0
 }
@@ -352,6 +366,9 @@ status() {
     echo "platform profile: $(<"$f") (choices: $(pp_choices "$f"))"
   else
     echo "platform profile: none"
+  fi
+  if command -v "$park_cmd" >/dev/null 2>&1; then
+    echo "park: PARK_ON_BATTERY=$PARK_ON_BATTERY, $("$park_cmd" status 2>/dev/null | grep -E '^state:' | head -n1)"
   fi
   mon=$EDP_OUTPUT
   if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && hypr_env 2>/dev/null &&

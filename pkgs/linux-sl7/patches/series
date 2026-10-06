@@ -133,3 +133,7 @@
 0084-SL7-arm64-dts-qcom-x1e80100-romulus13-Disable-the-empty-pcie3-card-reader-slot.patch
 0085-wifi-ath12k-Set-DTIM-policy-to-stick-mode-for-station-i.patch
 0086-SL7-arm64-dts-qcom-x1e80100-romulus-Enable-the-Iris-video-codec.patch
+
+# 16. Runtime power, round 2: Hovold's deferred disabling of unused clocks and power domains, active only with clk_unused_defer on the command line
+0087-clk-Defer-disabling-of-unused-clocks-behind-clk_unused_defer.patch
+0088-pmdomain-core-Defer-disabling-of-unused-domains-behind-clk_unused_defer.patch

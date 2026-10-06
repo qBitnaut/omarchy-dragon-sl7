@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johan Hovold <johan+linaro@kernel.org>
+Date: Wed, 11 Sep 2024 10:49:45 +0200
+Subject: [PATCH] clk: defer disabling of unused clocks, behind clk_unused_defer
+
+Backport of commit 1e3e4a97ba7e6eab8747d503c4a1d621802f15e7 in
+jhovold/linux (not in mainline), "clk: defer disabling of unused clocks".
+
+Defer disabling of unused clocks for 30 seconds to allow modular clock
+providers and consumers to be probed.
+
+SL7 change: the deferral is opt-in. It is active only when "clk_unused_defer"
+is on the kernel command line (the "linux-sl7 (CLK-UNUSED test)" entry of
+omarchy-sl7-test-entry); without the flag the disabling stays in the
+late_initcall as before, so a boot that keeps clk_ignore_unused is unchanged.
+clk_unused_defer_requested() lets the genpd core (next patch) share the flag.
+The disabling body is kept as it was and only renamed, so its error return is
+unchanged on the immediate path.
+
+Signed-off-by: Johan Hovold <johan+linaro@kernel.org>
+---
+--- a/drivers/clk/clk.c
++++ b/drivers/clk/clk.c
+@@ -1442,7 +1442,7 @@
+ 	clk_core_unprepare_lock(core);
+ }
+ 
+-static void __init clk_unprepare_unused_subtree(struct clk_core *core)
++static void clk_unprepare_unused_subtree(struct clk_core *core)
+ {
+ 	struct clk_core *child;
+ 
+@@ -1467,7 +1467,7 @@
+ 	}
+ }
+ 
+-static void __init clk_disable_unused_subtree(struct clk_core *core)
++static void clk_disable_unused_subtree(struct clk_core *core)
+ {
+ 	struct clk_core *child;
+ 	unsigned long flags;
+@@ -1508,7 +1508,7 @@
+ 		clk_core_disable_unprepare(core->parent);
+ }
+ 
+-static bool clk_ignore_unused __initdata;
++static bool clk_ignore_unused;
+ static int __init clk_ignore_unused_setup(char *__unused)
+ {
+ 	clk_ignore_unused = true;
+@@ -1516,7 +1516,28 @@
+ }
+ __setup("clk_ignore_unused", clk_ignore_unused_setup);
+ 
+-static int __init clk_disable_unused(void)
++/*
++ * Opt-in (SL7): "clk_unused_defer" on the command line postpones the
++ * disabling of unused clocks (and of unused power domains, see
++ * drivers/pmdomain/core.c) by 30 seconds, so that modular clock providers and
++ * consumers (dispcc, gpucc, msm) can probe and claim their clocks first. Without
++ * the flag the disabling stays in the late_initcall, as before.
++ */
++static bool clk_unused_defer;
++static int __init clk_unused_defer_setup(char *__unused)
++{
++	clk_unused_defer = true;
++	return 1;
++}
++__setup("clk_unused_defer", clk_unused_defer_setup);
++
++bool clk_unused_defer_requested(void)
++{
++	return clk_unused_defer;
++}
++EXPORT_SYMBOL_GPL(clk_unused_defer_requested);
++
++static int clk_disable_unused_now(void)
+ {
+ 	struct clk_core *core;
+ 	int ret;
+@@ -1555,6 +1576,25 @@
+ 
+ 	return 0;
+ }
++
++static void clk_init_complete_work_function(struct work_struct *work)
++{
++	clk_disable_unused_now();
++}
++
++static DECLARE_DELAYED_WORK(clk_init_complete_work,
++			    clk_init_complete_work_function);
++
++static int __init clk_disable_unused(void)
++{
++	if (!clk_unused_defer)
++		return clk_disable_unused_now();
++
++	pr_info("clk: Deferring the disabling of unused clocks by 30 s\n");
++	schedule_delayed_work(&clk_init_complete_work, msecs_to_jiffies(30000));
++
++	return 0;
++}
+ late_initcall_sync(clk_disable_unused);
+ 
+ static int clk_core_determine_round_nolock(struct clk_core *core,
+--- a/include/linux/clk.h
++++ b/include/linux/clk.h
+@@ -245,6 +245,14 @@
+  */
+ void clk_restore_context(void);
+ 
++/**
++ * clk_unused_defer_requested - was "clk_unused_defer" on the command line?
++ *
++ * Shared with the genpd core, which defers the power-off of unused domains
++ * under the same flag.
++ */
++bool clk_unused_defer_requested(void);
++
+ #else /* !CONFIG_COMMON_CLK */
+ 
+ static inline int clk_notifier_register(struct clk *clk,
+@@ -317,6 +325,11 @@
+ 
+ static inline void clk_restore_context(void) {}
+ 
++static inline bool clk_unused_defer_requested(void)
++{
++	return false;
++}
++
+ #endif /* !CONFIG_COMMON_CLK */
+ 
+ #ifdef CONFIG_HAVE_CLK_PREPARE

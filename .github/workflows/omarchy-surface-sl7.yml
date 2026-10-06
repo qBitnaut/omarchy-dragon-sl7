@@ -29,9 +29,11 @@ jobs:
             neutralize-surface-keyboard restart-iptsd power-event \
             sl7-firmware sl7-doctor set-boot-order surface-laptop-7.sh omarchy-surface-sl7.install \
             omarchy-sl7-repo-ensure 10-omarchy-sl7-repo sl7-ir-probe sl7-ir-emitter-test \
-            sl7-usb-rpm
+            sl7-usb-rpm sl7-park omarchy-sl7-powermode omarchy-sl7-test-entry
           luac5.4 -p guard-pro-audio.lua
-          python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' sl7-vrr-rate
+          for f in sl7-vrr-rate sl7-proftop; do
+            python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
+          done
           if grep -rIn '[[:space:]]$' . ; then
             echo "trailing whitespace found" >&2
             exit 1
@@ -119,7 +121,9 @@ jobs:
             usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules \
             etc/omarchy-surface-sl7/usb-rpm.conf \
             usr/bin/sl7-usb-rpm \
-            usr/bin/sl7-vrr-rate; do
+            usr/bin/sl7-vrr-rate \
+            usr/bin/sl7-park \
+            usr/bin/sl7-proftop; do
             grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
           done
 
