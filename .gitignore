@@ -28,3 +28,5 @@ pkg/
 
 # makepkg-downloaded sources
 pkgs/*/*.tar.gz
+__pycache__/
+*.pyc

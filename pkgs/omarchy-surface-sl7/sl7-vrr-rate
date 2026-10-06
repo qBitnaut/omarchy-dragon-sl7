@@ -154,7 +154,9 @@ def run_vblank(args):
             crtc = 0
     if not 0 <= crtc < 32:
         die("--crtc must be 0..31")
-    vtype = (crtc << 1) & 0x3E  # _DRM_VBLANK_RELATIVE | HIGH_CRTC bits
+    # _DRM_VBLANK_RELATIVE (0x1): wait for the NEXT vblank. Without it the request
+    # is absolute "sequence 1", which is long past and returns at once.
+    vtype = 0x1 | ((crtc << 1) & 0x3E)  # RELATIVE | HIGH_CRTC bits
     fmt = "@IIll"  # union drm_wait_vblank: type, sequence, long, long
     req = ioc_rw(0x3A, struct.calcsize(fmt))
 
@@ -179,6 +181,9 @@ def run_vblank(args):
     iv = [(b - a) * 1000.0 for a, b in zip(stamps, stamps[1:])]
     span = stamps[-1] - stamps[0]
     hz = (len(stamps) - 1) / span
+    if hz > 1000:
+        die(f"implausible rate {hz:.0f} Hz: the vblank wait is returning immediately, "
+            "so this measures nothing (please report it)")
     out = {"method": "vblank", "device": dev, "connector": conn, "crtc": crtc,
            "seconds": round(span, 3), "vblanks": len(stamps),
            "effective_hz": round(hz, 3),
@@ -266,7 +271,7 @@ def run_hw(args):
         refuse(f"INTF_VSYNC_PERIOD_F0 reads {period:#x}: this is not a programmed eDP interface block")
     cnt_en = rd(INTF_FRAME_LINE_COUNT_EN)
     if cnt_en == 0:
-        refuse("INTF_FRAME_LINE_COUNT_EN is 0: the frame counter is not enabled, so it would not count")
+        refuse("INTF_FRAME_LINE_COUNT_EN is 0: the frame counter is not enabled, so it would not count; run without --hw to use the vblank method")
     avr_ctrl, avr_mode, avr_vtotal = rd(INTF_AVR_CONTROL), rd(INTF_AVR_MODE), rd(INTF_AVR_VTOTAL)
     ratio = avr_vtotal / period
 
