@@ -1,0 +1,522 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:02:00 -0500
+Subject: [PATCH] SL7 local: leds: qcom-flash: IR hardware strobe arm (hw_strobe_arm)
+
+IR emitter stage C hypothesis H2: the sensor strobe output (GPIO 1) enables
+the emitter path, Windows arms the PMIC for a hardware strobe (CHAN_STROBE =
+0x05: hardware, level-triggered, active high, strobe source bits 6:4 = 0) and
+leaves the safety timer at its reset value. Add the smallest thing that can
+test it, for IR LEDs with ir_test=1 on the 4ch module only: a sysfs attribute
+hw_strobe_arm on the LED device (write 1 to arm, 0 to disarm, read 0/1).
+
+Arm sequence, each step checked: led_sysfs_disable(); strobe off (CHAN_EN
+first); current budget (flash_current_ma against ir_max_ua times the channels,
+and at most 25000 uA per channel for this mode whatever ir_max_ua says);
+set_flash_current(); set_flash_timeout() 10 ms, timer enabled; MODULE_EN;
+CHAN_STROBE = 0x05 on every channel; CHAN_EN. qcom_flash_external_strobe_set()
+is not used (it stays refused for IR LEDs). Torch stays refused.
+
+Disarm: CHAN_EN first, then the software strobe configuration, current budget,
+MODULE_EN, led_sysfs_enable(). It runs from a delayed work queued before CHAN_EN
+is set (at most 1000 ms after the arm), from a write of 0, from flash_strobe=0
+and brightness 0, on remove, on shutdown (both wait for the work) and on system
+suspend. While armed the software strobe, flash_brightness and flash_timeout
+refuse with -EBUSY.
+
+Instrumentation: a snapshot before the arm, key registers at t0 and after a
+30 ms poll of STATUS1, STATUS2, STATUS3, INT_RT_STS and CHAN_EN with back-to-back
+reads (changes and the union of all values are logged afterwards, with the
+monotonic time of the arm and of the disarm), and a full snapshot after the
+disarm.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+diff --git a/drivers/leds/flash/leds-qcom-flash.c b/drivers/leds/flash/leds-qcom-flash.c
+index aa0604b0c642..53e69c8d3c3f 100644
+--- a/drivers/leds/flash/leds-qcom-flash.c
++++ b/drivers/leds/flash/leds-qcom-flash.c
+@@ -9,6 +9,11 @@
+ #include <linux/delay.h>
+ #include <linux/dev_printk.h>
+ #include <linux/ktime.h>
++#include <linux/mutex.h>
++#include <linux/pm.h>
++#include <linux/string.h>
++#include <linux/sysfs.h>
++#include <linux/workqueue.h>
+ #include <linux/leds.h>
+ #include <linux/led-class-flash.h>
+ #include <linux/module.h>
+@@ -117,6 +122,22 @@
+  */
+ #define SL7_IR_TIMER_N(ms)		((ms) / FLASH_TIMER_STEP_MS - 1)
+
++/*
++ * Hardware strobe arm (IR emitter stage C, hw_strobe_arm attribute). The sensor
++ * GPIO 1 strobe drives the PMIC strobe input; the channels are armed for a
++ * level-triggered, active-high hardware strobe (CHAN_STROBE = 0x05, strobe
++ * source bits 6:4 = 0, as Windows does) and switched off again by a delayed
++ * work after SL7_IR_HW_ARM_MAX_MS at the latest. Independent of ir_max_ua
++ * (which may be raised to 100 mA per channel for the software strobe), the
++ * hardware strobe never arms above SL7_IR_HW_CHAN_MAX_UA per channel, and the
++ * safety timer is always on (SL7_IR_HW_TIMER_MS).
++ */
++#define SL7_IR_HW_CHAN_MAX_UA		25000
++#define SL7_IR_HW_ARM_MAX_MS		1000
++#define SL7_IR_HW_TIMER_MS		10
++#define SL7_POLL_MS			30
++#define SL7_POLL_MAX_CHANGES		64
++
+ /*
+  * Per-channel current limit for IR LEDs, in microamps. The effective flash
+  * limit of an IR LED is ir_max_ua times its channel count (led-sources), at
+@@ -295,6 +316,8 @@ struct qcom_flash_data {
+ 	u8			chan_en_bits;
+ 	u8			revision;
+ 	u8			torch_clamp;
++	struct qcom_flash_led	*ir_led[4];	/* SL7 local: IR LEDs with hw_strobe_arm */
++	u8			ir_led_count;
+ };
+
+ struct qcom_flash_led {
+@@ -317,8 +340,17 @@ struct qcom_flash_led {
+ 	s64				sl7_snap_mono_us[SL7_SNAP_MOMENTS];
+ 	u16				sl7_s3_15;
+ 	s64				sl7_s3_15_us;
++	struct mutex			sl7_lock;	/* serialises hardware strobe arm and disarm */
++	struct delayed_work		sl7_hw_work;
++	bool				sl7_hw_armed;
++	bool				sl7_hw_sysfs_off;	/* led_sysfs_disable() is in force */
++	unsigned int			sl7_poll_n;
++	u32				sl7_poll_t[SL7_POLL_MAX_CHANGES];
++	u8				sl7_poll_v[SL7_POLL_MAX_CHANGES][5];
+ };
+
++static void sl7_ir_hw_disarm(struct qcom_flash_led *led, const char *why);
++
+ /*
+  * SL7 local: the flash current limit of an IR LED in uA, summed over its
+  * channels (ganged channels share the current equally): ir_max_ua per channel,
+@@ -712,6 +744,10 @@ static int qcom_flash_brightness_set(struct led_classdev_flash *fled_cdev, u32 b
+ {
+ 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
+
++	/* SL7 local: no change of the flash current while the hardware strobe is armed */
++	if (led->ir && READ_ONCE(led->sl7_hw_armed))
++		return -EBUSY;
++
+ 	/*
+ 	 * SL7 local: an IR LED refuses a flash current above ir_max_ua per
+ 	 * channel instead of clamping it silently, so the caller (sysfs write)
+@@ -733,6 +769,9 @@ static int qcom_flash_timeout_set(struct led_classdev_flash *fled_cdev, u32 time
+ {
+ 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
+
++	if (led->ir && READ_ONCE(led->sl7_hw_armed))
++		return -EBUSY;
++
+ 	led->flash_timeout_ms = timeout / USEC_PER_MSEC;
+ 	return 0;
+ }
+@@ -859,6 +898,14 @@ static int qcom_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool stat
+ 	if (!led->ir || !ir_test || led->flash_data->hw_type != QCOM_MVFLASH_4CH)
+ 		return qcom_flash_strobe_set_hw(led, state);
+
++	/* The software strobe never runs on top of an armed hardware strobe. */
++	if (READ_ONCE(led->sl7_hw_armed)) {
++		if (state)
++			return -EBUSY;
++		sl7_ir_hw_disarm(led, "flash_strobe=0");
++		return 0;
++	}
++
+ 	if (!state) {
+ 		t0 = ktime_get();
+ 		rc = qcom_flash_strobe_set_hw(led, false);
+@@ -896,6 +943,294 @@ static int qcom_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool stat
+ 	return 0;
+ }
+
++/*
++ * SL7 local: hardware strobe arm for the IR LED (ir_test=1, 4ch module).
++ *
++ * Arm sequence, in this order, every step checked:
++ *   1. led_sysfs_disable(), so the flash sysfs files refuse writes while armed
++ *   2. strobe off (CHAN_EN first, then the strobe configuration)
++ *   3. current budget: flash_current_ma against ir_max_ua times the channels,
++ *      and against SL7_IR_HW_CHAN_MAX_UA per channel
++ *   4. ITARGET / IRESOLUTION (set_flash_current), CHAN_TIMER 10 ms with the
++ *      timer enabled, MODULE_EN
++ *   5. CHAN_STROBE = 0x05 on every channel (hardware, level, active high,
++ *      strobe source bits 6:4 = 0), then CHAN_EN
++ * The delayed work is queued before step 5, so the disarm is already
++ * scheduled when the channels become able to light. qcom_flash_external_strobe_set()
++ * is not used (it is refused for IR LEDs).
++ */
++static u8 sl7_ir_chan_mask(const struct qcom_flash_led *led)
++{
++	u8 mask = 0;
++	int i;
++
++	for (i = 0; i < led->chan_count; i++)
++		mask |= BIT(led->chan_id[i]);
++
++	return mask;
++}
++
++/* CHAN_EN off first, then the strobe configuration back to the software one. */
++static int sl7_ir_chan_off(struct qcom_flash_led *led)
++{
++	struct qcom_flash_data *flash_data = led->flash_data;
++	int rc;
++
++	rc = regmap_field_update_bits(flash_data->r_fields[REG_CHAN_EN],
++				      sl7_ir_chan_mask(led), 0);
++	if (rc)
++		return rc;
++
++	return set_flash_strobe(led, SW_STROBE, false);
++}
++
++static void sl7_ir_hw_poll(struct qcom_flash_led *led, ktime_t t0)
++{
++	static const u8 regs[5] = { 0x06, 0x07, 0x09, 0x10, 0x4e };
++	struct qcom_flash_data *flash_data = led->flash_data;
++	u8 cur[5], prev[5] = { }, uni[5] = { };
++	unsigned int val, n = 0, changes = 0, errs = 0, i;
++	bool have_prev = false;
++	s64 us;
++
++	led->sl7_poll_n = 0;
++	do {
++		for (i = 0; i < ARRAY_SIZE(regs); i++) {
++			if (regmap_read(flash_data->regmap,
++					flash_data->reg_base + regs[i], &val)) {
++				val = 0xff;
++				errs++;
++			}
++			cur[i] = val;
++			uni[i] |= val;
++		}
++		us = ktime_to_us(ktime_sub(ktime_get(), t0));
++		n++;
++		if (!have_prev || memcmp(cur, prev, sizeof(cur))) {
++			changes++;
++			if (led->sl7_poll_n < SL7_POLL_MAX_CHANGES) {
++				led->sl7_poll_t[led->sl7_poll_n] = us;
++				memcpy(led->sl7_poll_v[led->sl7_poll_n], cur, sizeof(cur));
++				led->sl7_poll_n++;
++			}
++			memcpy(prev, cur, sizeof(cur));
++			have_prev = true;
++		}
++	} while (us < SL7_POLL_MS * USEC_PER_MSEC);
++
++	/* Logged only now, after the last read. */
++	dev_info(led->flash.led_cdev.dev,
++		 "SL7 IR HW-strobe poll: %u back-to-back reads in %lld us, %u changes (%u shown), %u read errors, union 06=%02x 07=%02x 09=%02x 10=%02x 4e=%02x\n",
++		 n, us, changes, led->sl7_poll_n, errs,
++		 uni[0], uni[1], uni[2], uni[3], uni[4]);
++	for (i = 0; i < led->sl7_poll_n; i++)
++		dev_info(led->flash.led_cdev.dev,
++			 "SL7 IR HW-strobe poll +%u us: 06=%02x 07=%02x 09=%02x 10=%02x 4e=%02x\n",
++			 led->sl7_poll_t[i], led->sl7_poll_v[i][0],
++			 led->sl7_poll_v[i][1], led->sl7_poll_v[i][2],
++			 led->sl7_poll_v[i][3], led->sl7_poll_v[i][4]);
++}
++
++static int sl7_ir_hw_arm(struct qcom_flash_led *led)
++{
++	struct qcom_flash_data *flash_data = led->flash_data;
++	struct device *dev = led->flash.led_cdev.dev;
++	u32 ma, chan_ua;
++	ktime_t t0;
++	s64 mono_us;
++	int rc;
++
++	if (!led->ir || !ir_test || flash_data->hw_type != QCOM_MVFLASH_4CH)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&led->sl7_lock);
++	if (led->sl7_hw_armed || led->enabled) {
++		rc = -EBUSY;
++		goto unlock;
++	}
++
++	/* Current budget: ir_max_ua times the channels, and 25 mA per channel for this mode. */
++	ma = led->flash_current_ma;
++	chan_ua = ma * UA_PER_MA / led->chan_count;
++	if (ma * UA_PER_MA > sl7_ir_limit_ua(led) || chan_ua > SL7_IR_HW_CHAN_MAX_UA) {
++		dev_warn(dev,
++			 "SL7: hardware strobe arm refused: %u uA total (%u uA per channel), limit %u uA total (ir_max_ua), %u uA per channel for the hardware strobe\n",
++			 ma * UA_PER_MA, chan_ua, sl7_ir_limit_ua(led),
++			 SL7_IR_HW_CHAN_MAX_UA);
++		rc = -EINVAL;
++		goto unlock;
++	}
++	if (!chan_ua) {
++		rc = -EINVAL;
++		goto unlock;
++	}
++
++	led_sysfs_disable(&led->flash.led_cdev);
++	led->sl7_hw_sysfs_off = true;
++
++	rc = sl7_ir_chan_off(led);
++	if (rc)
++		goto fail;
++
++	t0 = ktime_get();
++	sl7_ir_snap(led, 0, t0, "hw arm: idle before arm", true);
++
++	rc = update_allowed_flash_current(led, &ma, true);
++	if (rc < 0)
++		goto fail;
++
++	rc = set_flash_current(led, ma, FLASH_MODE);
++	if (rc)
++		goto fail;
++
++	rc = set_flash_timeout(led, SL7_IR_HW_TIMER_MS);
++	if (rc)
++		goto fail;
++
++	rc = set_flash_module_en(led, true);
++	if (rc)
++		goto fail;
++
++	/* Armed from here on: the disarm is queued before the channels are enabled. */
++	WRITE_ONCE(led->sl7_hw_armed, true);
++	schedule_delayed_work(&led->sl7_hw_work,
++			      msecs_to_jiffies(SL7_IR_HW_ARM_MAX_MS));
++
++	rc = set_flash_strobe(led, HW_STROBE, true);
++	if (rc)
++		goto fail;
++
++	t0 = ktime_get();
++	mono_us = ktime_to_us(t0);
++	sl7_ir_snap(led, 1, t0, "hw arm: t0, after CHAN_EN set", false);
++	sl7_ir_hw_poll(led, t0);
++	sl7_ir_snap(led, 2, t0, "hw arm: after the poll", true);
++	sl7_ir_snap_print(led, 0);
++	sl7_ir_snap_print(led, 1);
++	sl7_ir_snap_print(led, 2);
++	dev_info(dev,
++		 "SL7 IR hardware strobe ARMED: %u uA total, %u uA per channel x %u, timer %u ms, auto disarm in %u ms, t_mono %lld.%06lld\n",
++		 ma * UA_PER_MA, chan_ua, led->chan_count, SL7_IR_HW_TIMER_MS,
++		 SL7_IR_HW_ARM_MAX_MS, SL7_SEC(mono_us), SL7_USEC(mono_us));
++	mutex_unlock(&led->sl7_lock);
++	return 0;
++
++fail:
++	dev_err(dev, "SL7: hardware strobe arm failed (%d), disarming\n", rc);
++	mutex_unlock(&led->sl7_lock);
++	sl7_ir_hw_disarm(led, "arm failed");
++	return rc;
++
++unlock:
++	mutex_unlock(&led->sl7_lock);
++	return rc;
++}
++
++/* Safe to call at any time and from any path: does nothing unless armed. */
++static void sl7_ir_hw_disarm(struct qcom_flash_led *led, const char *why)
++{
++	struct device *dev = led->flash.led_cdev.dev;
++	u32 ma = 0;
++	ktime_t t0;
++	s64 mono_us;
++	int rc;
++
++	mutex_lock(&led->sl7_lock);
++	if (!led->sl7_hw_armed && !led->sl7_hw_sysfs_off) {
++		mutex_unlock(&led->sl7_lock);
++		return;
++	}
++
++	t0 = ktime_get();
++	mono_us = ktime_to_us(t0);
++	cancel_delayed_work(&led->sl7_hw_work);
++
++	/* Channels off first (still on the hardware strobe source), then the rest. */
++	rc = sl7_ir_chan_off(led);
++	if (rc)
++		dev_err(dev, "SL7: hardware strobe disarm: channel off failed (%d)\n", rc);
++	rc = update_allowed_flash_current(led, &ma, false);
++	if (rc < 0)
++		dev_err(dev, "SL7: hardware strobe disarm: current budget release failed (%d)\n", rc);
++	rc = set_flash_module_en(led, false);
++	if (rc)
++		dev_err(dev, "SL7: hardware strobe disarm: module off failed (%d)\n", rc);
++
++	WRITE_ONCE(led->sl7_hw_armed, false);
++	if (led->sl7_hw_sysfs_off) {
++		led->sl7_hw_sysfs_off = false;
++		led_sysfs_enable(&led->flash.led_cdev);
++	}
++
++	sl7_ir_snap(led, 3, t0, "hw disarm: after channels off", true);
++	sl7_ir_snap_print(led, 3);
++	dev_info(dev, "SL7 IR hardware strobe DISARMED (%s), t_mono %lld.%06lld\n",
++		 why, SL7_SEC(mono_us), SL7_USEC(mono_us));
++	mutex_unlock(&led->sl7_lock);
++}
++
++static void sl7_ir_hw_work(struct work_struct *work)
++{
++	struct qcom_flash_led *led = container_of(to_delayed_work(work),
++						  struct qcom_flash_led,
++						  sl7_hw_work);
++
++	sl7_ir_hw_disarm(led, "auto disarm after 1000 ms");
++}
++
++static ssize_t hw_strobe_arm_show(struct device *dev,
++				  struct device_attribute *attr, char *buf)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	struct qcom_flash_led *led = flcdev_to_qcom_fled(lcdev_to_flcdev(led_cdev));
++
++	return sysfs_emit(buf, "%u\n", READ_ONCE(led->sl7_hw_armed));
++}
++
++static ssize_t hw_strobe_arm_store(struct device *dev,
++				   struct device_attribute *attr,
++				   const char *buf, size_t count)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	struct qcom_flash_led *led = flcdev_to_qcom_fled(lcdev_to_flcdev(led_cdev));
++	bool arm;
++	int rc;
++
++	rc = kstrtobool(buf, &arm);
++	if (rc)
++		return rc;
++
++	if (arm) {
++		rc = sl7_ir_hw_arm(led);
++		return rc ? rc : count;
++	}
++
++	sl7_ir_hw_disarm(led, "sysfs");
++	return count;
++}
++static DEVICE_ATTR_RW(hw_strobe_arm);
++
++static struct attribute *sl7_ir_attrs[] = {
++	&dev_attr_hw_strobe_arm.attr,
++	NULL,
++};
++
++static const struct attribute_group sl7_ir_group = {
++	.attrs = sl7_ir_attrs,
++};
++
++/* Disarm every IR LED; used on remove, shutdown and suspend. */
++static void sl7_ir_hw_disarm_all(struct qcom_flash_data *flash_data, bool sync, const char *why)
++{
++	int i;
++
++	for (i = 0; i < flash_data->ir_led_count; i++) {
++		if (sync)
++			cancel_delayed_work_sync(&flash_data->ir_led[i]->sl7_hw_work);
++		sl7_ir_hw_disarm(flash_data->ir_led[i], why);
++	}
++}
++
+ static int qcom_flash_strobe_get(struct led_classdev_flash *fled_cdev, bool *state)
+ {
+ 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
+@@ -1005,6 +1340,9 @@ static int qcom_flash_led_brightness_set(struct led_classdev *led_cdev,
+ 			return -EPERM;
+ 		}
+
++		/* SL7 local: brightness 0 also ends an armed hardware strobe */
++		sl7_ir_hw_disarm(led, "brightness 0");
++
+ 		rc = set_flash_strobe(led, SW_STROBE, false);
+ 		if (rc)
+ 			return rc;
+@@ -1175,6 +1513,11 @@ static int qcom_flash_register_led_device(struct device *dev,
+ 	/* SL7 local: color = <LED_COLOR_ID_IR> marks the IR emitter */
+ 	led->ir = !fwnode_property_read_u32(node, "color", &color) &&
+ 		  color == LED_COLOR_ID_IR;
++	if (led->ir) {
++		/* before the LED registers: the class may call the ops at once */
++		mutex_init(&led->sl7_lock);
++		INIT_DELAYED_WORK(&led->sl7_hw_work, sl7_ir_hw_work);
++	}
+
+ 	count = fwnode_property_count_u32(node, "led-sources");
+ 	if (count <= 0) {
+@@ -1303,9 +1646,22 @@ static int qcom_flash_register_led_device(struct device *dev,
+ 		return rc;
+ 	}
+
+-	/* SL7 local: no v4l2-flash sub-device (torch, external strobe) for IR */
+-	if (led->ir)
++	/*
++	 * SL7 local: no v4l2-flash sub-device (torch, external strobe) for IR.
++	 * The hardware strobe arm attribute goes on the LED device after the
++	 * flash class created its own groups (the array of those is full).
++	 */
++	if (led->ir) {
++		if (ir_test && led->flash_data->hw_type == QCOM_MVFLASH_4CH &&
++		    led->flash_data->ir_led_count < ARRAY_SIZE(led->flash_data->ir_led)) {
++			rc = devm_device_add_group(led->flash.led_cdev.dev,
++						   &sl7_ir_group);
++			if (rc)
++				return rc;
++			led->flash_data->ir_led[led->flash_data->ir_led_count++] = led;
++		}
+ 		return 0;
++	}
+
+ 	return qcom_flash_v4l2_init(dev, led, node);
+ }
+@@ -1460,6 +1816,7 @@ static void qcom_flash_led_remove(struct platform_device *pdev)
+ 	struct qcom_flash_data *flash_data = platform_get_drvdata(pdev);
+
+ 	/* SL7 local: nothing stays armed after the driver is gone */
++	sl7_ir_hw_disarm_all(flash_data, true, "remove");
+ 	if (qcom_flash_all_off(flash_data))
+ 		dev_err(&pdev->dev, "SL7: failed to switch the flash channels off\n");
+
+@@ -1480,10 +1837,25 @@ static void qcom_flash_led_shutdown(struct platform_device *pdev)
+ 	struct qcom_flash_data *flash_data = platform_get_drvdata(pdev);
+
+ 	/* SL7 local: reboot, kexec and poweroff leave every channel off */
+-	if (flash_data)
++	if (flash_data) {
++		sl7_ir_hw_disarm_all(flash_data, true, "shutdown");
+ 		qcom_flash_all_off(flash_data);
++	}
+ }
+
++/* SL7 local: a hardware strobe never stays armed across suspend. */
++static int qcom_flash_led_suspend(struct device *dev)
++{
++	struct qcom_flash_data *flash_data = dev_get_drvdata(dev);
++
++	if (flash_data)
++		sl7_ir_hw_disarm_all(flash_data, true, "suspend");
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(qcom_flash_led_pm_ops, qcom_flash_led_suspend, NULL);
++
+ static const struct of_device_id qcom_flash_led_match_table[] = {
+ 	{ .compatible = "qcom,spmi-flash-led" },
+ 	{ }
+@@ -1494,6 +1866,7 @@ static struct platform_driver qcom_flash_led_driver = {
+ 	.driver = {
+ 		.name = "leds-qcom-flash",
+ 		.of_match_table = qcom_flash_led_match_table,
++		.pm = pm_sleep_ptr(&qcom_flash_led_pm_ops),
+ 	},
+ 	.probe = qcom_flash_led_probe,
+ 	.remove = qcom_flash_led_remove,

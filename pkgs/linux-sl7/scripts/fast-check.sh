@@ -36,6 +36,7 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/gpu/drm/msm/ \
         drivers/media/platform/qcom/camss/ \
         drivers/media/i2c/vd55g.o \
+        drivers/leds/flash/leds-qcom-flash.o \
         drivers/media/i2c/ov02c10.o \
         drivers/phy/qualcomm/ \
         drivers/i2c/busses/i2c-qcom-cci.o \

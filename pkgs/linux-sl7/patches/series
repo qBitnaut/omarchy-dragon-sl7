@@ -148,3 +148,9 @@
 0091-SL7-leds-qcom-flash-ir_max_ua-limit-for-IR-emitter-LEDs.patch
 0092-SL7-arm64-dts-qcom-x1e80100-romulus13-Ganged-IR-flash-LED.patch
 0093-SL7-leds-qcom-flash-IR-strobe-register-instrumentation.patch
+
+# 20. IR emitter stage C: vd55g.illuminator opt-in for st,leds (GPIO 1 strobe), more strobe instrumentation, PM8550 hardware strobe arm (hw_strobe_arm, 25 mA per channel, 1 s), DT st,leds and ir:flash-23 (SL7 local)
+0094-SL7-media-i2c-vd55g-Honour-st-leds-only-with-illuminator-1.patch
+0095-SL7-leds-qcom-flash-More-strobe-instrumentation.patch
+0096-SL7-leds-qcom-flash-IR-hardware-strobe-arm.patch
+0097-SL7-arm64-dts-qcom-x1e80100-romulus13-IR-strobe-GPIO-and-ir-flash-23.patch

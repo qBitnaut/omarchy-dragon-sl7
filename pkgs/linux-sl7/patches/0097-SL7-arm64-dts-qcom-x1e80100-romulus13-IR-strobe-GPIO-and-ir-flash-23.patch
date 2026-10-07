@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:03:00 -0500
+Subject: [PATCH] SL7 local: arm64: dts: qcom: x1e80100-romulus13: IR strobe GPIO and ir:flash-23
+
+Stage C device tree changes:
+
+ - camera@10 (VD55G0) gets st,leds = <1>: sensor GPIO 1 is the strobe output
+   (Windows writes 0x0468 = 0x02). The vd55g driver ignores it unless its
+   module parameter illuminator=1, which only the IR test boot sets (0094). No
+   leds link and no led-names: the driver never drives the PMIC.
+ - a second ganged IR LED, ir:flash-23 (flash channels 2 and 3, Windows'
+   "LED2"), for the electrical decode check T0b: it has the same limits and
+   gates as ir:flash-14 (100 mA per channel at most, 10 ms hardware timer,
+   color IR so torch is refused, binds only with ir_test=1), and the channels
+   are disjoint from ir:flash-14. Nothing is expected to be connected to it; a
+   software strobe should report both channels as open circuit (STATUS1 0x28),
+   which cross-checks how the 0x82 of channels 1 and 4 is read.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+index ee13b596ba40..0ff200622136 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+@@ -82,17 +82,20 @@ &cci0_i2c0 {
+ 	clock-frequency = <400000>;
+
+ 	/*
+-	 * IR camera, ST VD55G0 (ACPI CAMI, SMO55F0 / MSHW0472). Probe and
+-	 * stream only: the illuminator is not connected. There is no `st,leds`
+-	 * (the driver then keeps every sensor GPIO off) and no `leds = <...>`
+-	 * link to a flash LED.
++	 * IR camera, ST VD55G0 (ACPI CAMI, SMO55F0 / MSHW0472). `st,leds = <1>`
++	 * names sensor GPIO 1 as the strobe output (Windows writes 0x0468 = 0x02),
++	 * but the vd55g driver honours it only with its module parameter
++	 * illuminator=1, which the omarchy-surface-sl7 modprobe rule sets on the
++	 * "linux-sl7 (IR test)" boot entry alone (patch "vd55g: illuminator").
++	 * On every other boot the property is ignored: no GPIO is a strobe output
++	 * and there is no led_mode control. There is no `leds = <...>` link to a
++	 * flash LED and no led-names: the driver never drives the PMIC.
+ 	 *
+-	 * The illuminator is the PM8550 flash (QCOM0C27, 700 mA) but its
+-	 * channel is probably 1 and 4 together. The ganged test LED under
+-	 * &pm8550_flash below is test-only and binds to nothing from this node.
+-	 * Do not add a `leds = <...>` link until the channel has been found on
+-	 * the device
+-	 * (see the Phase B notes). Never drive it as a continuous torch.
++	 * The illuminator is the PM8550 flash (QCOM0C27, 700 mA), probably
++	 * channels 1 and 4 together. The ganged test LED under &pm8550_flash
++	 * below is test-only and binds to nothing from this node. Do not add a
++	 * `leds = <...>` link until stage C has settled the wiring. Never drive
++	 * it as a continuous torch.
+ 	 *
+ 	 * The master clock is unknown: no SL7 resource file names one. MCLK0
+ 	 * (gpio96) at 19.2 MHz is the first guess; the vd55g module
+@@ -117,6 +120,9 @@ camera@10 {
+
+ 		orientation = <0>; /* front facing */
+
++		/* GPIO 1 is the strobe output; ignored unless vd55g.illuminator=1 */
++		st,leds = <1>;
++
+ 		vcore-supply = <&vreg_l2m_1p2>;
+ 		vddio-supply = <&vreg_l4m_1p8>;
+ 		vana-supply = <&vreg_l6m_1p8>;
+@@ -210,6 +216,22 @@ led-0 {
+ 		flash-max-microamp = <200000>;
+ 		flash-max-timeout-us = <10000>;
+ 	};
++
++	/*
++	 * Stage C electrical decode check (T0b): channels 2 and 3 ganged, the
++	 * other pair of the module (Windows' "LED2"). Same limits and gates as
++	 * ir:flash-14, IR test boot only; nothing is expected to be connected
++	 * to them, a software strobe should report both as open circuit.
++	 */
++	led-1 {
++		function = LED_FUNCTION_FLASH;
++		color = <LED_COLOR_ID_IR>;
++		function-enumerator = <23>;
++		led-sources = <2>, <3>;
++		led-max-microamp = <10000>;
++		flash-max-microamp = <200000>;
++		flash-max-timeout-us = <10000>;
++	};
+ };
+
+ &spi10 {

@@ -80,6 +80,10 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0091 | SL7 local: leds-qcom-flash `ir_max_ua` module parameter (flash current limit per channel for IR LEDs, default 25000 uA, run-time writable 12500 to 100000, hard cap 100 mA per channel in code); an IR LED refuses a larger flash_brightness with -EINVAL; 0080 timer and torch rules unchanged | ours; IR plan stage B | not submitted (SL7 specific) |
 | 0092 | SL7 local: romulus13 replaces the four IR discovery LEDs of 0081 by one ganged IR LED on flash channels 1 and 4 (`ir:flash-14`, 200 mA total = 100 mA per channel at most, 10 ms) | ours; EMITTER-LOCATE.md section 7 | not submitted (SL7 specific) |
 | 0093 | SL7 local: leds-qcom-flash read-only register instrumentation for IR strobes (`ir_test=1` only): 23 flash registers read at idle, arm, +3 ms, +15 ms and after strobe off, logged as "SL7 IR strobe snapshot" lines afterwards; pulse, current and timer unchanged | ours; IR plan stage B | not submitted (debug only) |
+| 0094 | SL7 local: vd55g module parameter `illuminator` (read-only, default 0): `st,leds` and the `led_mode` control are honoured only with `illuminator=1` (the IR test boot, via the omarchy-surface-sl7 modprobe rule), so a normal boot never drives sensor GPIO 1 | ours; IR plan stage C | not submitted (SL7 specific) |
+| 0095 | SL7 local: leds-qcom-flash strobe instrumentation: registers 0x4f, 0x55, 0x67, 0x68, a +1 ms moment (key registers at t0 and +1 ms), STATUS3 read on its own at +15 ms, absolute-time waits, and the monotonic time of every snapshot | ours; IR plan stage C | not submitted (debug only) |
+| 0096 | SL7 local: leds-qcom-flash IR hardware strobe arm: `hw_strobe_arm` attribute on the IR LEDs (`ir_test=1`, 4ch): CHAN_STROBE 0x05 (hardware, level, active high, source bits 6:4 = 0), 10 ms timer, at most 25 mA per channel whatever `ir_max_ua` says, auto disarm after 1 s, disarm on remove, shutdown and suspend, 30 ms back-to-back status poll logged afterwards. Torch still refused | ours; EMITTER-LOCATE.md section 7 | not submitted (SL7 specific) |
+| 0097 | SL7 local: romulus13 `st,leds = <1>` on the IR sensor (GPIO 1 strobe, gated by 0094) and a second ganged IR LED `ir:flash-23` (channels 2 and 3, same limits) for the T0b decode check | ours | not submitted (SL7 specific) |
 
 Notes on the DT patches:
 
@@ -669,6 +673,42 @@ IRESOLUTION, CHAN_STROBE, CHAN_EN and 0x50-0x53 at five moments (idle, right aft
 +3 ms, +15 ms after the 10 ms hardware timer, after strobe off) and logs them afterwards, so
 printk does not skew the timing. Read-only; `flash_strobe=1` returns about 15 ms later, the pulse
 itself is still bounded by the hardware timer.
+
+### IR emitter bring-up, stage C (7.2.8-21)
+
+**Patches 0094 to 0097.** SL7-local, not for upstream. A software strobe of the ganged LED gave
+STATUS1 `0x82` (CH1 and CH4 open circuit), INT_RT_STS `0x49` (fault and ramp-down, ramp-up never) and
+no current. Hypothesis H2: sensor GPIO 1 (strobe output; Windows writes `0x0468 = 0x02`) enables the
+emitter path, and Windows arms the PMIC for a hardware strobe (`CHAN_STROBE = 0x05`).
+
+- **0094 / 0097.** The romulus13 camera node gets `st,leds = <1>`, but vd55g ignores it (one log
+  line) unless its read-only module parameter `illuminator` is 1, which only the omarchy-surface-sl7
+  39 modprobe rule sets, and only when `sl7.ir_test=1` is on the command line. Without it the driver
+  is as before: every sensor GPIO an input, no `led_mode` control. The GPIO configuration latches
+  when the stream starts (`vd55g_update_gpios()` in `vd55g_enable_streams()`), so `led_mode` has to
+  be set **before** stream-on; the test tool does that. `ir:flash-23` (channels 2 and 3) has the
+  same limits and gates as `ir:flash-14`. There is still no `leds` link and no `led-names`: the
+  driver never drives the PMIC.
+- **0096.** `hw_strobe_arm` (write 1 or 0, read 0 or 1) on the IR LEDs, in this order:
+  `led_sysfs_disable()`, strobe off, current budget (the flash current against `ir_max_ua` times
+  the channels and against 25000 uA per channel for this mode, enforced in the driver whatever
+  `ir_max_ua` is raised to), ITARGET, CHAN_TIMER 10 ms with the timer enabled, MODULE_EN,
+  CHAN_STROBE 0x05 on both channels, CHAN_EN. A delayed work that disarms is queued before
+  CHAN_EN; it fires 1000 ms after the arm at the latest. Disarm (CHAN_EN first) also runs from a
+  write of 0, `flash_strobe=0`, remove, shutdown and suspend. While armed the software strobe,
+  `flash_brightness` and `flash_timeout` refuse (-EBUSY). `qcom_flash_external_strobe_set()` is
+  not used; torch stays refused. After the arm the driver polls STATUS1, STATUS2, STATUS3,
+  INT_RT_STS and CHAN_EN back to back for 30 ms and logs the changes, the union of the values
+  and the monotonic times of the arm and the disarm ("SL7 IR HW-strobe poll", "SL7 IR hardware
+  strobe ARMED / DISARMED").
+- **0095.** Snapshots now also read 0x4f, 0x55, 0x67 and 0x68; the t0 and +1 ms moments read only
+  the key registers so the +1 ms read lands on time; STATUS3 is read on its own at +15 ms; waits
+  aim at absolute times after t0; each line carries its start offset and the monotonic time
+  (`t_mono`, the clock of V4L2 frame timestamps).
+
+Tool: omarchy-surface-sl7 39, `sl7-ir-emitter-test --stage c0a|c0b|c1-sw|c1-hw|t0b` and the Stage C
+section of `sl7-ir-lab` (see that README, section 11c). Checked as `git apply --check` against the
+series on v7.2 only; CI compiles the driver (now in `fast-check.sh`) and runs dtbs_check. Never run.
 
 ## USB-C reverse plug (7.2.8-18): fixed PHY orientation, on by default
 

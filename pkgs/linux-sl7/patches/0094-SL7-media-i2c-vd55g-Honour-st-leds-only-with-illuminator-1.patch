@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 15:00:00 -0500
+Subject: [PATCH] SL7 local: media: i2c: vd55g: Honour st,leds only with vd55g.illuminator=1
+
+The romulus13 device tree now names sensor GPIO 1 as the strobe output
+(st,leds = <1>, the pin Windows writes 0x0468 = 0x02 on), so that the IR
+emitter stage C can test whether the strobe signal enables the emitter path.
+Patch 0041 made the property the only way to get a strobe GPIO and the
+led_mode control, which would now be on for every boot. Make it opt-in a
+second time: a read-only module parameter illuminator (default 0). Without it
+st,leds is read and ignored (one log line) and the driver behaves exactly as
+without the property: every GPIO an input, no flash LED mode control.
+
+The omarchy-surface-sl7 modprobe rule sets illuminator=1 on the "linux-sl7
+(IR test)" boot entry (sl7.ir_test=1 on the command line) and nowhere else, so
+a normal boot never drives GPIO 1.
+
+The GPIO configuration is latched when the stream starts
+(vd55g_update_gpios() in vd55g_enable_streams()), so user space must set
+led_mode before the stream is started; a change while streaming is written at
+once. Documented in the comment above the parameter.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
+index 761e6d1a86d2..73ccf6a165d1 100644
+--- a/drivers/media/i2c/vd55g.c
++++ b/drivers/media/i2c/vd55g.c
+@@ -2001,6 +2001,24 @@ static int vd55g_parse_dt_gpios_array(struct vd55g *sensor, char *prop_name,
+ 	return 0;
+ }
+
++/*
++ * SL7 local: the infrared illuminator strobe is opt-in. The DT of the Surface
++ * Laptop 7 carries 'st,leds = <1>' (sensor GPIO 1 is the strobe output), but
++ * the driver honours it only with illuminator=1, which the omarchy-surface-sl7
++ * modprobe rule sets on the "linux-sl7 (IR test)" boot entry alone. Without it
++ * the property is ignored: no GPIO is a strobe output and the flash LED mode
++ * control is not created, exactly as without the property (patch 0041).
++ *
++ * The GPIO configuration is latched at stream start (vd55g_update_gpios() in
++ * vd55g_enable_streams()), so set the led_mode control before the stream is
++ * started. A change while streaming is written at once, but start-up
++ * ordering is what the IR emitter test relies on.
++ */
++static bool illuminator;
++module_param(illuminator, bool, 0444);
++MODULE_PARM_DESC(illuminator,
++		 "SL7 local: honour the st,leds strobe GPIO and expose the led_mode control (default off; set only by the sl7.ir_test=1 modprobe gate)");
++
+ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
+ {
+ 	u32 led_gpios[VD55G_NB_GPIOS];
+@@ -2019,6 +2037,15 @@ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
+ 	if (ret)
+ 		return ret;
+
++	if (nb_gpios_leds && !illuminator) {
++		dev_info(sensor->dev,
++			 "st,leds ignored: illuminator=0 (IR test boot only)\n");
++		nb_gpios_leds = 0;
++	} else if (nb_gpios_leds) {
++		dev_warn(sensor->dev,
++			 "illuminator=1: strobe GPIO output and led_mode control enabled\n");
++	}
++
+ 	for (i = 0; i < nb_gpios_leds; i++) {
+ 		sensor->gpios[led_gpios[i]] = VD55G_GPIO_MODE_STROBE;
+ 		set_bit(led_gpios[i], &sensor->ext_leds_mask);
