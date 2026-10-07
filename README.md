@@ -51,7 +51,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Bluetooth | Partial | Works with the factory address restored (it does not work at all without it); less tested than Wi-Fi. |
 | Audio | Partial | Speakers and microphones work with the kernel volume caps. The Pro Audio profile is deliberately blocked to protect the speakers. Headphone jack quality is unverified. |
 | Battery percentage and charging | Works | `qcom_battmgr` patch for capacity; Omarchy's battery scripts are patched to see the Qualcomm gauge. |
-| USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s). USB4 and Thunderbolt bandwidth is not available yet. |
+| USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s), in either plug orientation (linux-sl7 7.2.8-18 or later), with DisplayPort alt mode and docks. USB4 and Thunderbolt bandwidth is not available yet. |
 | Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume. See [power results](#power-and-performance-results-so-far) for the drain. |
 | Front webcam | Partial | OV02C10 through libcamera's software ISP. No tuning yet, so expect poor colour. |
 | IR camera | Partial | Raw capture works (ST VD55G0, 644x604 greyscale) through `sl7-ir-bridge`. |
