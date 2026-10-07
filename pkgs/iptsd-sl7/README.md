@@ -184,6 +184,18 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
   state to the journal. To capture: set `DragDebug = true` in
   `/etc/iptsd.d/94-local.conf`, `sudo systemctl restart 'iptsd@*.service'`, then
   run `journalctl -f -o short-precise -u 'iptsd@*' | grep drag` next to `sudo libinput debug-events` and compare the clock times.
+- `0008-daemon-drag-keep-while-button-held.patch` (applied in `prepare()`, after 0007): holding
+  the physical click with one finger and dragging with another, lifting the moving finger to
+  reposition (selection at the screen edge) ended the selection: the "drag contact lifted
+  while other contacts remain" rule released BTN_LEFT although the firmware button bit was
+  still held. While the bit is held, a lifted drag contact now never ends the drag or
+  releases BTN_LEFT. The drag stays latched and tracking moves to the newest contact (a newly
+  placed finger, else the remaining one; none left: it waits for one), so the pointer
+  continues from the new finger without a jump. A drag waiting for the finger
+  (`DragRelatchMs`) that sees the bit pressed again keeps going too. When the bit is released
+  the usual rules apply again (lift: wait `DragRelatchMs`, still: park, then release). With
+  the bit low (tap and drag, parked drag) nothing changes. `DragDebug` logs `drag-keep`
+  (contact lifted but firmware button still held) and `drag-keep-handoff`.
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset

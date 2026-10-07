@@ -1,0 +1,148 @@
+daemon: Never end a drag because a finger lifted while the click is held
+
+Chris: holding the physical click with one finger and dragging with another,
+lifting the moving finger to reposition (the selection reaches the screen edge)
+ended the selection. DragDebug log from pkgrel 14:
+
+  fw-bit-down at 3018 ms, BTN_LEFT-down, latch at 3185 ms (2 contacts),
+  contacts 2 -> 1 at 3817 ms, drag-end "drag contact lifted while other contacts
+  remain", BTN_LEFT-up at 3817 ms, fw-bit-up only at 5066 ms.
+
+The firmware button bit was held for 1.2 s more, but the latch treated the
+lifted drag contact as the end of the drag whenever another contact remained
+(the resting click finger), and released BTN_LEFT.
+
+While the firmware button bit is held, a lifted drag contact now never ends the
+drag or releases BTN_LEFT:
+
+ - The drag stays latched. Tracking moves to the newest contact (a newly placed
+   finger, else the remaining one); with no contact left it waits for one.
+   Contacts are passed through unchanged, so pointer motion continues from the
+   new finger without a jump.
+ - A drag that was waiting for the finger (DragRelatchMs) and sees the bit
+   pressed again keeps going instead of timing out.
+ - Once the bit is released the existing rules apply again: the drag contact
+   lifted -> wait DragRelatchMs / release, or the stillness timer -> park ->
+   release. Without a physical click (bit low: tap and drag, parked drag) nothing
+   changes.
+
+DragDebug logs the new path: "drag-keep" (contact lifted but firmware button
+still held) once per lift, and "drag-keep-handoff" when tracking moved to
+another contact.
+
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -209,6 +209,10 @@ private:
+ 	// to move again, or for DragRelatchMs to pass.
+ 	bool m_drag_parked = false;
+ 
++	// Whether the drag contact is gone while the firmware button bit is still held: the drag
++	// is kept and follows the next contact (the physical click holds it, not the finger).
++	bool m_drag_keeping = false;
++
+ 	// Since when the drag is parked.
+ 	std::chrono::steady_clock::time_point m_drag_park_since {};
+ 
+@@ -1059,12 +1063,27 @@ private:
+ 			return;
+ 		}
+ 
++		// The physical click is held again while the drag waits for the finger: keep the
++		// drag, the held button decides how long it lasts.
++		if (m_drag_waiting && m_fw_button) {
++			m_drag_waiting = false;
++			m_drag_parked = false;
++			this->drag_log("drag-keep", "firmware button pressed while the drag was waiting");
++		}
++
+ 		if (m_drag_waiting) {
+ 			this->track_drag_wait(now);
+ 			return;
+ 		}
+ 
+ 		if (!this->follow_drag_contact()) {
++			// The firmware button is still held: a lifted finger never ends the drag. Hand it
++			// to the remaining or a newly placed contact, the pointer continues from there.
++			if (m_fw_button) {
++				this->keep_drag(now);
++				return;
++			}
++
+ 			// The drag contact lifted. After a real drag, and with no other contact left,
+ 			// wait for the finger to come back (the pad edge), else release.
+ 			if (m_drag_relatch_ms > 0 && m_drag_traveled && m_positions.empty()) {
+@@ -1083,6 +1102,8 @@ private:
+ 			return;
+ 		}
+ 
++		m_drag_keeping = false;
++
+ 		if (!m_drag_traveled && (m_drag_pos - m_drag_origin).norm() >= m_drag_start_mm)
+ 			m_drag_traveled = true;
+ 
+@@ -1159,6 +1180,7 @@ private:
+ 		m_drag_pos = m_positions.at(index);
+ 		m_drag_origin = m_drag_pos;
+ 		m_drag_traveled = traveled;
++		m_drag_keeping = false;
+ 		m_drag_step_mm = 0;
+ 		m_drag_still_anchor = m_positions;
+ 		m_drag_still_since = std::chrono::steady_clock::now();
+@@ -1257,6 +1279,49 @@ private:
+ 		this->drag_wait_expired(now);
+ 	}
+ 
++	/*!
++	 * The drag contact is gone, but the firmware button bit is still held: keep the drag.
++	 * Tracking moves to the newest contact (a newly placed finger, else the remaining one).
++	 * With no contact left, the drag stays latched until one lands or the bit is released.
++	 */
++	void keep_drag(const std::chrono::steady_clock::time_point now)
++	{
++		m_drag_parked = false;
++
++		if (!m_drag_keeping) {
++			m_drag_keeping = true;
++			this->drag_log("drag-keep", "contact lifted but firmware button still held");
++		}
++
++		auto best = m_positions.cend();
++		std::chrono::steady_clock::time_point newest {};
++
++		for (auto it = m_positions.cbegin(); it != m_positions.cend(); ++it) {
++			// Held contacts are the ones that vanished.
++			if (m_ghosts.count(it->first) != 0)
++				continue;
++
++			const auto seen = m_first_seen.find(it->first);
++			const auto since = seen != m_first_seen.cend() ? seen->second : now;
++
++			if (best == m_positions.cend() || since >= newest) {
++				best = it;
++				newest = since;
++			}
++		}
++
++		if (best == m_positions.cend())
++			return;
++
++		m_drag_index = best->first;
++		m_drag_pos = best->second;
++		m_drag_step_mm = 0;
++		m_drag_still_anchor = m_positions;
++		m_drag_still_since = now;
++		m_drag_keeping = false;
++		this->drag_log("drag-keep-handoff", "drag continues on the remaining or a new contact");
++	}
++
+ 	/*!
+ 	 * Ends the drag if it waited DragRelatchMs for the finger to come back.
+ 	 */
+@@ -1317,6 +1382,7 @@ private:
+ 		m_drag_latched = false;
+ 		m_drag_waiting = false;
+ 		m_drag_parked = false;
++		m_drag_keeping = false;
+ 		m_drag_blocked = false;
+ 		m_button_pending = false;
+ 		m_button_anchor.clear();
