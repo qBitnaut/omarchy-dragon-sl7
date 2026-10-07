@@ -26,7 +26,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
-| 8d | optional kernel test boot entries, PSR (known broken), the IR emitter test boot (`ir-test`), `clk-unused` (experimental) and `usbc-flip` (reverse-plug USB3 test), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8d | optional kernel test boot entries, PSR (known broken), the IR emitter test boot (`ir-test`), and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | IR emitter load gate and the disabled Stage B channel test tool (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
@@ -514,7 +514,7 @@ must not be in the normal command line. The default entry, `default_entry` and `
 never touched. All are disabled by default.
 
 ```
-sudo omarchy-sl7-test-entry enable psr|ir-test|clk-unused|usbc-flip|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
+sudo omarchy-sl7-test-entry enable psr|ir-test|clk-unused|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
 sudo omarchy-sl7-test-entry disable NAME                      # remove it
 omarchy-sl7-test-entry list                                   # presets, state, and what is in limine.conf
 sudo omarchy-sl7-test-entry cleanup                           # remove every test entry and its state
@@ -523,16 +523,16 @@ omarchy-sl7-test-entry status [NAME]
 
 Presets: `psr` = `msm.psr_enabled=1`, `ir-test` = `sl7.ir_test=1 panic=5`
 (entry "linux-sl7 (IR test)", fixed parameters, section 11c), `clk-unused` = `-clk_ignore_unused
--pd_ignore_unused clk_unused_defer` (a leading `-` removes the word from the entry's cmdline, see below), `usbc-flip` =
-`ps883x.fixed_phy_orientation=1` (linux-sl7 7.2.8-17 or later, patch 0090: the retimer does the Type-C
-flip and the QMP PHY stays normal; for USB3 on a reverse plug, DisplayPort alt mode in reverse is
-unvalidated, never run on hardware by the author).
+-pd_ignore_unused clk_unused_defer` (a leading `-` removes the word from the entry's cmdline, see below).
 Any other NAME needs PARAMS.
 `omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset). The old r6
 `psr-entry.enabled` state file, hook and block are removed on upgrade (`cleanup --legacy`);
 PSR is not carried over. The former `vrr` preset is gone: VRR is on by default now, and an old
 "linux-sl7 (VRR test)" entry is removed on upgrade (`cleanup --legacy`, with a copy of `limine.conf`
-in `/etc/omarchy-surface-sl7/limine.conf.pre-vrr-entry-removal`). `enable vrr` only prints that.
+in `/etc/omarchy-surface-sl7/limine.conf.pre-vrr-entry-removal`). `enable vrr` only prints that. The former `usbc-flip` preset is gone the same way: linux-sl7
+7.2.8-18 makes the USB-C reverse-plug fix (patch 0090) the default, and an old "linux-sl7 (USBC-FLIP
+test)" entry is removed on upgrade (`cleanup --legacy`, copy of `limine.conf` in
+`/etc/omarchy-surface-sl7/limine.conf.pre-usbc-flip-entry-removal`). `enable usbc-flip` only prints that.
 
 How it works: limine-entry-tool has no per-entry command line variants, and it rewrites
 `limine.conf` on every UKI rebuild. So `omarchy-sl7-test-entry` copies the live linux-sl7 entry
