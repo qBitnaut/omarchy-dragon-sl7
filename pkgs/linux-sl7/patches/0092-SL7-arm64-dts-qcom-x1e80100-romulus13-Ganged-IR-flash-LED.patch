@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 10:01:00 -0500
+Subject: [PATCH] SL7 local: arm64: dts: qcom: x1e80100-romulus13: Ganged IR flash LED (channels 1 and 4)
+
+SL7 local: arm64: dts: qcom: x1e80100-romulus13: Ganged IR flash LED (channels 1 and 4)
+
+SL7 local: arm64: dts: qcom: x1e80100-romulus13: Ganged IR flash LED (channels 1 and 4)
+
+Replace the four single-channel IR discovery LEDs of 0081 by one LED node
+taking PM8550 flash channels 1 and 4 together (led-sources = <1>, <4>). The
+Windows driver qcpmic8380.sys drives its "LED1" as CH1 + CH4 ganged at
+350 mA per channel (EMITTER-LOCATE.md, section 7), and the 12.5 mA
+single-channel discovery test showed nothing on a phone camera. The
+discovery LEDs are retired, not kept: two nodes owning channels 1 and 4
+would share the CHAN_EN and module-enable state of the driver. The node is
+named ir:flash-14.
+
+Limits: flash-max-microamp 200000 (100 mA on each of the two channels, the
+hard cap of the 0091 driver limit), flash-max-timeout-us 10000 (10 ms
+hardware safety timer), color = <LED_COLOR_ID_IR> so the SL7 safety lockout
+(no torch, bind gate ir_test=1, 700 mA total, safety timer always on) and
+the ir_max_ua limit of 0091 (default 25 mA per channel) apply. Torch is
+refused in code, led-max-microamp 10000 is the binding minimum (5 mA per
+channel). The node is in every DTB but binds only on the IR test boot.
+No camera node refers to it.
+
+Rationale: IR emitter bring-up, stage B.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+@@ -88,9 +88,10 @@ &cci0_i2c0 {
+ 	 * link to a flash LED.
+ 	 *
+ 	 * The illuminator is the PM8550 flash (QCOM0C27, 700 mA) but its
+-	 * channel is unknown. The four discovery LEDs under &pm8550_flash
+-	 * below are test-only and bind to nothing from this node. Do not add a
+-	 * `leds = <...>` link until the channel has been found on the device
++	 * channel is probably 1 and 4 together. The ganged test LED under
++	 * &pm8550_flash below is test-only and binds to nothing from this node.
++	 * Do not add a `leds = <...>` link until the channel has been found on
++	 * the device
+ 	 * (see the Phase B notes). Never drive it as a continuous torch.
+ 	 *
+ 	 * The master clock is unknown: no SL7 resource file names one. MCLK0
+@@ -176,18 +177,26 @@ &pcie3_phy {
+  * SpiSerialBusV2 40 MHz mode 0, IRQ GPIO51, reset GPIO48, VDD enable GPIO64.
+  */
+ /*
+- * IR illuminator DISCOVERY ONLY (SL7 local, IR emitter plan stage A/B).
++ * IR illuminator, ganged LED (SL7 local, IR emitter plan stage B).
+  *
+- * One LED per PM8550 flash channel, because Windows' channel is unknown. Each
+- * is limited to the binding minimums: 12.5 mA flash, a 10 ms hardware safety
+- * timer, and a 5 mA torch clamp (torch itself is refused in code for any LED
+- * with color = IR). Replace these four nodes by one after Stage B.
++ * Windows' qcpmic8380.sys drives "LED1" as flash channels 1 and 4 together
++ * (EMITTER-LOCATE.md, section 7), so one LED node takes both: led-sources =
++ * <1 4>, the driver splits the current equally over the two channels. It
++ * replaces the four single-channel discovery LEDs, which overlapped it
++ * (channels 1 and 4 would have had two owners) and showed nothing at 12.5 mA.
++ *
++ * The device tree allows at most 100 mA per channel (flash-max-microamp
++ * 200000 for two channels, the driver's hard cap) and a 10 ms hardware safety
++ * timer (flash-max-timeout-us). The driver additionally limits the current
++ * to its ir_max_ua module parameter per channel (default 25 mA). Torch is
++ * refused in code for any LED with color = IR (led-max-microamp is only the
++ * schema minimum, 5 mA per channel). The LED is named ir:flash-14.
+  *
+  * The node is in the DTB of every boot entry, but it can not bind outside the
+  * IR test entry: leds-qcom-flash is not loaded (modprobe gate: needs
+  * sl7.ir_test=1 on the kernel command line) and, if it were loaded anyway,
+  * its probe refuses IR LED nodes unless its module parameter ir_test=1
+- * (set only by that gate). No camera node refers to these LEDs.
++ * (set only by that gate). No camera node refers to this LED.
+  */
+ &pm8550_flash {
+ 	status = "okay";
+@@ -195,40 +204,10 @@ &pm8550_flash {
+ 	led-0 {
+ 		function = LED_FUNCTION_FLASH;
+ 		color = <LED_COLOR_ID_IR>;
+-		function-enumerator = <1>;
+-		led-sources = <1>;
+-		led-max-microamp = <5000>;
+-		flash-max-microamp = <12500>;
+-		flash-max-timeout-us = <10000>;
+-	};
+-
+-	led-1 {
+-		function = LED_FUNCTION_FLASH;
+-		color = <LED_COLOR_ID_IR>;
+-		function-enumerator = <2>;
+-		led-sources = <2>;
+-		led-max-microamp = <5000>;
+-		flash-max-microamp = <12500>;
+-		flash-max-timeout-us = <10000>;
+-	};
+-
+-	led-2 {
+-		function = LED_FUNCTION_FLASH;
+-		color = <LED_COLOR_ID_IR>;
+-		function-enumerator = <3>;
+-		led-sources = <3>;
+-		led-max-microamp = <5000>;
+-		flash-max-microamp = <12500>;
+-		flash-max-timeout-us = <10000>;
+-	};
+-
+-	led-3 {
+-		function = LED_FUNCTION_FLASH;
+-		color = <LED_COLOR_ID_IR>;
+-		function-enumerator = <4>;
+-		led-sources = <4>;
+-		led-max-microamp = <5000>;
+-		flash-max-microamp = <12500>;
++		function-enumerator = <14>;
++		led-sources = <1>, <4>;
++		led-max-microamp = <10000>;
++		flash-max-microamp = <200000>;
+ 		flash-max-timeout-us = <10000>;
+ 	};
+ };

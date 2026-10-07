@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 10:00:00 -0500
+Subject: [PATCH] SL7 local: leds: qcom-flash: ir_max_ua limit for IR emitter LEDs
+
+SL7 local: leds: qcom-flash: ir_max_ua limit for IR emitter LEDs
+
+SL7 local: leds: qcom-flash: ir_max_ua limit for IR emitter LEDs
+
+Stage B of the IR emitter plan drives the illuminator at more than the
+12.5 mA of the discovery test, in steps of 12.5, 25, 50 and at most 100 mA
+per channel. This adds a per-channel current limit in code on top of the
+0080 safety layer, for LED nodes with color = <LED_COLOR_ID_IR> only:
+
+ - Module parameter ir_max_ua, the flash current limit per channel in
+   microamps. Default 25000. The limit of an LED is ir_max_ua times its
+   number of led-sources (ganged channels share the current equally).
+ - A hard cap of 100000 uA per channel (SL7_IR_CHAN_HARD_MAX_UA) enforced in
+   the driver whatever the parameter, the device tree or user space say:
+   the flash-max-microamp of the device tree is clamped to it at probe, the
+   parameter is clamped to it where it is used, and the parameter setter
+   (the parameter is writable at run time, mode 0644, so the test tool can
+   step it without a reboot) refuses values above it or below the 12.5 mA
+   hardware step with -EINVAL. A load-time value outside the range fails the
+   module load.
+ - The flash_brightness op refuses (-EINVAL, warning in the log) a current
+   above the limit instead of clamping silently, so a sysfs write above
+   the limit visibly fails. set_flash_current() clamps once more as the
+   last line of defence.
+ - The safety timer semantics of 0080 are unchanged: the timer is never
+   disabled, the encoding is n = timeout / 10 - 1, the code ceiling is
+   100 ms, torch is refused, the 700 mA total ceiling stays.
+ - Probe logs the limits of each IR LED (channels, DT maximum, hard cap,
+   run-time limit, timeout).
+
+Other LEDs behave as before.
+
+Rationale: SL7 local safety layer for the IR emitter bring-up (see
+research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md, stage B). Not for
+upstream as it stands.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+--- a/drivers/leds/flash/leds-qcom-flash.c
++++ b/drivers/leds/flash/leds-qcom-flash.c
+@@ -113,6 +113,42 @@
+  */
+ #define SL7_IR_TIMER_N(ms)		((ms) / FLASH_TIMER_STEP_MS - 1)
+ 
++/*
++ * Per-channel current limit for IR LEDs, in microamps. The effective flash
++ * limit of an IR LED is ir_max_ua times its channel count (led-sources), at
++ * most SL7_IR_CHAN_HARD_MAX_UA per channel whatever this parameter, the device
++ * tree or user space say. Writable so the test tool can step it, but only
++ * inside [12500, hard cap] (12.5 mA is the hardware current step): the setter
++ * refuses anything else, a load-time value outside it fails the module load,
++ * and the limit is clamped again where it is used.
++ */
++#define SL7_IR_CHAN_HARD_MAX_UA		100000
++#define SL7_IR_CHAN_DEFAULT_MAX_UA	25000
++
++static unsigned int ir_max_ua = SL7_IR_CHAN_DEFAULT_MAX_UA;
++
++static int ir_max_ua_set(const char *val, const struct kernel_param *kp)
++{
++	unsigned int v;
++	int rc;
++
++	rc = kstrtouint(val, 0, &v);
++	if (rc)
++		return rc;
++	if (v < FLASH_IRES_UA || v > SL7_IR_CHAN_HARD_MAX_UA)
++		return -EINVAL;
++
++	return param_set_uint(val, kp);
++}
++
++static const struct kernel_param_ops ir_max_ua_ops = {
++	.set = ir_max_ua_set,
++	.get = param_get_uint,
++};
++module_param_cb(ir_max_ua, &ir_max_ua_ops, &ir_max_ua, 0644);
++MODULE_PARM_DESC(ir_max_ua,
++		 "SL7 local: flash current limit per channel for IR emitter LEDs in uA (12500 to 100000, default 25000; 100000 is a hard cap enforced in code)");
++
+ static bool ir_test;
+ module_param(ir_test, bool, 0400);
+ MODULE_PARM_DESC(ir_test,
+@@ -237,6 +273,19 @@ struct qcom_flash_led {
+ 	bool				ir;	/* SL7 local: IR emitter, see SL7_IR_* */
+ };
+ 
++/*
++ * SL7 local: the flash current limit of an IR LED in uA, summed over its
++ * channels (ganged channels share the current equally): ir_max_ua per channel,
++ * clamped to the per-channel hard cap here, whatever the parameter holds.
++ */
++static u32 sl7_ir_limit_ua(const struct qcom_flash_led *led)
++{
++	u32 per_chan = clamp_t(u32, READ_ONCE(ir_max_ua), FLASH_IRES_UA,
++			       SL7_IR_CHAN_HARD_MAX_UA);
++
++	return per_chan * led->chan_count;
++}
++
+ static int set_flash_module_en(struct qcom_flash_led *led, bool en)
+ {
+ 	struct qcom_flash_data *flash_data = led->flash_data;
+@@ -395,6 +444,8 @@ static int set_flash_current(struct qcom_flash_led *led, u32 current_ma, enum le
+ 			return -EPERM;
+ 		current_ma = min_t(u32, current_ma,
+ 				   SL7_IR_FLASH_MAX_UA / UA_PER_MA);
++		current_ma = min_t(u32, current_ma,
++				   sl7_ir_limit_ua(led) / UA_PER_MA);
+ 	}
+ 
+ 	/*
+@@ -615,6 +666,19 @@ static int qcom_flash_brightness_set(struct led_classdev_flash *fled_cdev, u32 b
+ {
+ 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
+ 
++	/*
++	 * SL7 local: an IR LED refuses a flash current above ir_max_ua per
++	 * channel instead of clamping it silently, so the caller (sysfs write)
++	 * sees the error and never believes it got more than it got.
++	 */
++	if (led->ir && brightness > sl7_ir_limit_ua(led)) {
++		dev_warn(led->flash.led_cdev.dev,
++			 "SL7: flash current %u uA refused, limit %u uA (ir_max_ua %u uA per channel, %u channel(s))\n",
++			 brightness, sl7_ir_limit_ua(led), READ_ONCE(ir_max_ua),
++			 led->chan_count);
++		return -EINVAL;
++	}
++
+ 	led->flash_current_ma = min_t(u32, led->max_flash_current_ma, brightness / UA_PER_MA);
+ 	return 0;
+ }
+@@ -1003,8 +1067,11 @@ static int qcom_flash_register_led_device(struct device *dev,
+ 
+ 		current_ua = min_t(u32, current_ua, FLASH_CURRENT_MAX_UA * led->chan_count);
+ 		current_ua = min_t(u32, current_ua, FLASH_TOTAL_CURRENT_MAX_UA);
+-		if (led->ir)
++		if (led->ir) {
+ 			current_ua = min_t(u32, current_ua, SL7_IR_FLASH_MAX_UA);
++			current_ua = min_t(u32, current_ua,
++					   SL7_IR_CHAN_HARD_MAX_UA * led->chan_count);
++		}
+ 
+ 		/* Initialize flash class LED device brightness settings */
+ 		brightness = &flash->brightness;
+@@ -1036,6 +1103,13 @@ static int qcom_flash_register_led_device(struct device *dev,
+ 
+ 		led->max_timeout_ms = led->flash_timeout_ms = timeout_us / USEC_PER_MSEC;
+ 
++		if (led->ir)
++			dev_info(dev, "SL7 IR LED %pfwP: %u channel(s), max %u uA (DT, hard cap %u), run-time limit %u uA (ir_max_ua %u per channel), timeout max %u ms\n",
++				 node, led->chan_count, current_ua,
++				 SL7_IR_CHAN_HARD_MAX_UA * led->chan_count,
++				 sl7_ir_limit_ua(led), READ_ONCE(ir_max_ua),
++				 led->max_timeout_ms);
++
+ 		flash->ops = &qcom_flash_ops;
+ 	}
+ 

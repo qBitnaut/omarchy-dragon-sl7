@@ -77,6 +77,8 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0087-0088 | clk and genpd: defer disabling of unused clocks and power domains by 30 s, **only with `clk_unused_defer` on the command line** (used by `omarchy-sl7-test-entry enable clk-unused`) | jhovold/linux `1e3e4a97ba7e`, `b3f09e07cfbb` (Johan Hovold, Sep 2024) plus our opt-in gate | not mainline; Hovold's WIP, drop when mainline has an equivalent |
 | 0089 | SL7 local: drm/msm/dpu computes the core clock per layer mixer when the CRTC uses several mixers (3D merge): mode clock divided by the mixer count, planes wider than a mixer split in two pipes, plane clocks read from the checked state | ours; companion of `f5d079564c44` (Jessica Zhang, mode filter only) | not submitted (discuss with Dmitry Baryshkov and Jessica Zhang first) |
 | 0090 | SL7 local: ps883x module parameter `fixed_phy_orientation` (on by default since 7.2.8-18; `ps883x.fixed_phy_orientation=0` disables it): the downstream QMP PHY is always told TYPEC_ORIENTATION_NORMAL while the retimer state and REG0 ORIENTATION_REVERSED bit follow the real plug | ours | not submitted (SL7 specific, firmware-dependent) |
+| 0091 | SL7 local: leds-qcom-flash `ir_max_ua` module parameter (flash current limit per channel for IR LEDs, default 25000 uA, run-time writable 12500 to 100000, hard cap 100 mA per channel in code); an IR LED refuses a larger flash_brightness with -EINVAL; 0080 timer and torch rules unchanged | ours; IR plan stage B | not submitted (SL7 specific) |
+| 0092 | SL7 local: romulus13 replaces the four IR discovery LEDs of 0081 by one ganged IR LED on flash channels 1 and 4 (`ir:flash-14`, 200 mA total = 100 mA per channel at most, 10 ms) | ours; EMITTER-LOCATE.md section 7 | not submitted (SL7 specific) |
 
 Notes on the DT patches:
 
@@ -633,6 +635,30 @@ once measured). The probe and remove register snapshots now name every register 
 
 Nothing fires the emitter. Requires omarchy-surface-sl7 22 or later for the load gate. Plan:
 `Research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md`.
+
+### IR emitter bring-up, stage B (7.2.8-19)
+
+**Patches 0091 and 0092.** SL7-local, not for upstream. The 12.5 mA single-channel discovery test
+(stage A, 0081) showed nothing on a phone camera. The Windows driver qcpmic8380.sys drives its
+"LED1" as flash channels 1 and 4 ganged (350 mA per channel), so 0092 replaces the four discovery
+LEDs by one node, `ir:flash-14` (`led-sources = <1>, <4>`; the driver splits the current equally).
+The discovery LEDs are retired because they overlapped the ganged node (two owners of channels 1 and
+4). 0091 adds the limit:
+
+- Module parameter `ir_max_ua`, the flash current limit per channel in uA, default 25000. An IR
+  LED's limit is `ir_max_ua` times its channels (50 mA total for the ganged LED by default).
+- Hard cap 100000 uA per channel in the driver, whatever the parameter, the DT or user space say:
+  `flash-max-microamp` is clamped to it at probe, the parameter setter refuses values above it or
+  below 12500 (the hardware step) with -EINVAL, the use site clamps again. The parameter is writable
+  at run time (mode 0644) so `sl7-ir-emitter-test` can step 12.5 / 25 / 50 / 100 mA per channel
+  without a reboot; a flash_brightness write above the limit fails with -EINVAL (and a warning in
+  the log) instead of being clamped silently.
+- Unchanged from 0080: torch refused, safety timer never disabled (n = timeout / 10 - 1), code
+  ceiling 100 ms, DT timeout 10 ms, bind gate `ir_test=1`, 700 mA total ceiling. Pulse charge at
+  the hard cap: 2 x 100 mA x 10 ms = 2 mC.
+
+Checked as `git apply --check` against the series on v7.2 only; CI compiles the driver and runs
+dtbs_check. Never run. Needs omarchy-surface-sl7 36 or later for the test tool.
 
 ## USB-C reverse plug (7.2.8-18): fixed PHY orientation, on by default
 
