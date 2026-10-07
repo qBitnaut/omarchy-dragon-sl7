@@ -4,7 +4,7 @@
 # Surface Laptop 7, one controller at a time.
 #
 #   sl7-usb-rpm status
-#   sl7-usb-rpm enable <controller> [--record]
+#   sl7-usb-rpm enable <controller> [--record [--force]]
 #   sl7-usb-rpm disable <controller> [--forget]
 #   sl7-usb-rpm enable-all-tested
 #
@@ -22,6 +22,14 @@
 # empty, so the rule does nothing until you opt in. `disable` writes `on` again
 # (the rollback); `--forget` also removes the controller from the list.
 #
+# The two USB-C controllers (a600000, a800000) are different: on SL7 7.2.8-17
+# runtime PM enabled after boot works, but applying it from boot left both USB-C
+# ports unable to enumerate (and one boot logged "xHCI host controller not
+# responding, assume dead"). So `enable <usb-c> --record` is refused unless
+# `--force` is also given (that sets USB_RPM_FORCE_TYPEC=1 in the conf), and at
+# boot a listed USB-C controller is skipped, with a log message, unless that
+# variable is 1. Plain `enable` (until reboot) is always allowed.
+#
 # WARNING: a Dell Latitude 7455 (same SoC family) shut itself down with runtime PM
 # enabled on all four of its controllers and was fine with three
 # (lore 20260221105245.19328-1-daniel@quora.org; Linaro arm64-laptops issue 14).
@@ -33,6 +41,7 @@ set -euo pipefail
 CONF=${SL7_USB_RPM_CONF:-/etc/omarchy-surface-sl7/usb-rpm.conf}
 SYS=${SL7_USB_RPM_SYSFS:-/sys}
 CONTROLLERS=(a400000.usb a600000.usb a800000.usb)
+TYPEC=(a600000.usb a800000.usb)
 DEFAULT_DELAY_MS=2000
 
 die() {
@@ -89,13 +98,41 @@ is_tested() {
   [[ " $(tested_list) " == *" $1 "* ]]
 }
 
-# conf_set_tested "list": rewrite the USB_RPM_TESTED_OK line in place.
-conf_set_tested() {
-  local line="USB_RPM_TESTED_OK=\"$1\"" tmp
+is_typec() {
+  local t
+  for t in "${TYPEC[@]}"; do
+    [[ $t == "$1" ]] && return 0
+  done
+  return 1
+}
+
+typec_forced() {
+  [[ $(conf_get USB_RPM_FORCE_TYPEC) == 1 ]]
+}
+
+# boot_list: tested_list minus USB-C controllers unless USB_RPM_FORCE_TYPEC=1.
+# Skipped ones are logged (stderr, and the journal via logger).
+boot_list() {
+  local n out=() msg
+  for n in $(tested_list); do
+    if is_typec "$n" && ! typec_forced; then
+      msg="skipping $n at boot: USB-C runtime PM from boot is not allowed without USB_RPM_FORCE_TYPEC=1 in $CONF"
+      echo "sl7-usb-rpm: $msg" >&2
+      logger -t sl7-usb-rpm "$msg" 2>/dev/null || true
+      continue
+    fi
+    out+=("$n")
+  done
+  echo "${out[*]:-}"
+}
+
+# conf_set KEY VALUE: rewrite the KEY line in place (append if missing).
+conf_set() {
+  local line="$1=\"$2\"" tmp
   [[ -f $CONF ]] || die "$CONF is missing (reinstall omarchy-surface-sl7)"
   tmp=$(mktemp)
-  if grep -qE '^USB_RPM_TESTED_OK=' "$CONF"; then
-    awk -v l="$line" '/^USB_RPM_TESTED_OK=/ { print l; next } { print }' "$CONF" > "$tmp"
+  if grep -qE "^$1=" "$CONF"; then
+    awk -v k="$1=" -v l="$line" 'index($0, k) == 1 { print l; next } { print }' "$CONF" > "$tmp"
   else
     { cat "$CONF"; echo "$line"; } > "$tmp"
   fi
@@ -113,7 +150,7 @@ record() {
     fi
   done
   c=${list[*]:-}
-  conf_set_tested "$c"
+  conf_set USB_RPM_TESTED_OK "$c"
 }
 
 # Sysfs directory of the controller, and its xHCI children.
@@ -202,7 +239,7 @@ cmd_status() {
 }
 
 cmd_enable() {
-  local n rec=no
+  local n rec=no force=no
   need_root enable "$@"
   [[ $# -ge 1 ]] || usage
   n=$(norm "$1")
@@ -210,15 +247,24 @@ cmd_enable() {
   while [[ $# -gt 0 ]]; do
     case $1 in
       --record) rec=yes ;;
+      --force) force=yes ;;
       *) usage ;;
     esac
     shift
   done
+  [[ $force == no || $rec == yes ]] || die "--force only applies together with --record"
+  if [[ $rec == yes && $force == no ]] && is_typec "$n"; then
+    die "refusing to record $n: applying USB-C runtime PM from boot left both USB-C ports unable to enumerate on SL7 7.2.8-17 (xHCI 'HC died' seen once). Plain 'enable $n' (until reboot) works. To record it anyway: sudo sl7-usb-rpm enable $n --record --force"
+  fi
   warn_enable
   sync
   apply_one "$n" auto
   if [[ $rec == yes ]]; then
     record "$n" add
+    if is_typec "$n"; then
+      conf_set USB_RPM_FORCE_TYPEC 1
+      echo "sl7-usb-rpm: WARNING: $n is a USB-C controller; USB_RPM_FORCE_TYPEC=1 set. If the USB-C ports stop enumerating after reboot: sudo sl7-usb-rpm disable $n --forget" >&2
+    fi
     echo "$n recorded as tested OK in $CONF"
   else
     echo "$n enabled until reboot. After testing: sudo sl7-usb-rpm enable $n --record"
@@ -241,6 +287,10 @@ cmd_disable() {
   apply_one "$n" on
   if [[ $forget == yes ]]; then
     record "$n" remove
+    # No USB-C controller left listed: drop the force flag too.
+    if is_typec "$n" && ! is_tested a600000.usb && ! is_tested a800000.usb; then
+      conf_set USB_RPM_FORCE_TYPEC 0
+    fi
     echo "$n removed from the tested list in $CONF"
   fi
 }
@@ -248,7 +298,7 @@ cmd_disable() {
 cmd_enable_all_tested() {
   local list n count=0
   need_root enable-all-tested
-  list=$(tested_list)
+  list=$(boot_list)
   if [[ -z $list ]]; then
     echo "sl7-usb-rpm: no controller is listed as tested OK in $CONF; nothing to do."
     return 0
@@ -268,7 +318,7 @@ cmd_enable_all_tested() {
 # so the default (empty list) never touches a device.
 cmd_udev_env() {
   local path=$1 n
-  for n in $(tested_list); do
+  for n in $(boot_list); do
     if [[ /$path/ == */"$n"/* ]]; then
       echo "SL7_USB_RPM=auto"
       echo "SL7_USB_RPM_DELAY_MS=$(delay_ms)"

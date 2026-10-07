@@ -258,6 +258,7 @@ DP/DM/SS lines). The estimated gain is 50 to 200 mW for all three; not measured 
 ```
 sl7-usb-rpm status
 sudo sl7-usb-rpm enable a400000 [--record]    # runtime only, until reboot
+sudo sl7-usb-rpm enable a600000 --record --force  # USB-C from boot: see the finding below
 sudo sl7-usb-rpm disable a400000 [--forget]   # write power/control=on again
 sudo sl7-usb-rpm enable-all-tested            # what the udev rule does at boot
 ```
@@ -275,6 +276,10 @@ Controllers: `a400000.usb` is `usb_mp`, the USB-A port behind the PTN3222 repeat
   devices (`add` and `bind`; `bind` comes after the probe that forbids runtime PM) and sets the
   attributes only when that prints a match. The shipped list is empty, so the rule does nothing
   until you opt in.
+- `--record` is refused for the USB-C controllers (`a600000`, `a800000`) unless `--force` is also
+  given; `--force --record` sets `USB_RPM_FORCE_TYPEC=1` in `usb-rpm.conf`. At boot (the udev rule
+  and `enable-all-tested`) a listed USB-C controller is skipped, with a message in the journal,
+  unless that variable is 1. Plain `enable` (until reboot) is always allowed.
 - `disable` writes `on` (the rollback). `--forget` also drops it from the list. To turn it all off,
   empty `USB_RPM_TESTED_OK` and reboot.
 
@@ -285,6 +290,14 @@ at once to try. Save your work, enable one controller, use it (plug and unplug, 
 monitor, charging and USB-C role swaps, wake from suspend by a USB keyboard), then `--record` it
 and go on to the next. The SL7 has three dwc3 controllers in use (the fourth, `usb30_tert`, is
 unused), which is not the 7455 layout, so nothing here says that all three are safe.
+
+**Finding: USB-C from boot (SL7, kernel 7.2.8-17).** Runtime PM on a USB-C controller enabled at
+runtime after boot works: wake on plug, idle and re-suspend were all verified on `a600000`. But
+recording it so it applied from boot left both USB-C ports unable to enumerate, and one boot logged
+`xHCI host controller not responding, assume dead` / `HC died` on `xhci-hcd.4.auto`. Forgetting it
+(`sudo sl7-usb-rpm disable a600000 --forget`) and waking the controller restored both ports. USB-A
+(`a400000`) from boot is fine. Hence the `--force` guard above: use plain `enable` for USB-C, or
+accept that a forced record may leave the USB-C ports dead until you forget it.
 
 Measuring one controller with `sl7-powermeter` (SYS rail, battery, same Wi-Fi, backlight pinned at
 30%, nothing plugged into the ports being tested):
