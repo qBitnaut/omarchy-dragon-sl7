@@ -147,3 +147,4 @@
 # 19. IR emitter stage B: ir_max_ua per-channel limit (default 25 mA, hard cap 100 mA) and one ganged IR LED on flash channels 1 and 4 replacing the four discovery LEDs (SL7 local)
 0091-SL7-leds-qcom-flash-ir_max_ua-limit-for-IR-emitter-LEDs.patch
 0092-SL7-arm64-dts-qcom-x1e80100-romulus13-Ganged-IR-flash-LED.patch
+0093-SL7-leds-qcom-flash-IR-strobe-register-instrumentation.patch

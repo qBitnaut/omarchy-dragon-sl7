@@ -1,0 +1,212 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 14:00:00 -0500
+Subject: [PATCH] SL7 local: leds: qcom-flash: IR strobe register instrumentation
+
+SL7 local: leds: qcom-flash: IR strobe register instrumentation
+
+SL7 local: leds: qcom-flash: IR strobe register instrumentation
+
+Read-only instrumentation of the strobe path of the IR emitter LED, to see
+what the PMIC does between CHAN_EN being set and the pulse ending (the 50 mA
+per channel repeat of the IR bring-up). For an IR LED with ir_test=1 on the
+4ch module, qcom_flash_strobe_set() now wraps the unchanged strobe sequence
+(renamed qcom_flash_strobe_set_hw()) and reads, with regmap_read on the
+flash regmap, 23 registers (offsets from the flash base 0xee00: 0x06-0x09,
+0x0c-0x0f, 0x10 INT_RT_STS, 0x18 INT_LATCHED_STS, 0x3e and 0x41 CHAN_TIMER,
+0x42 and 0x45 ITARGET, 0x46 MODULE_EN, 0x49 IRESOLUTION, 0x4a and 0x4d
+CHAN_STROBE, 0x4e CHAN_EN, 0x50-0x53) at five moments:
+
+ 1. idle, before the arm sequence writes anything,
+ 2. t0, right after the arming call returned (CHAN_EN is its last write),
+ 3. t0 + 3 ms (usleep_range),
+ 4. t0 + 15 ms, after the 10 ms hardware safety timer,
+ 5. after the strobe was switched off.
+
+The values are buffered in the LED structure and logged afterwards, one
+dev_info line per moment (never during the sequence), each with the time the
+read took after its reference.
+
+No pulse width, current, timer or clamp behaviour changes: the hardware
+safety timer stays on and ends the pulse by itself. The strobe call does
+return about 15 ms later than before (the two sleeps), but that delays only
+the sysfs write returning, not the pulse, which the hardware timer bounds.
+Nothing here adds current or pulse capability. Inactive unless the LED is an
+IR LED and ir_test=1 (the only way an IR LED binds at all).
+
+The remove snapshot ("remove, after all-off") of 0080 is unchanged.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+--- a/drivers/leds/flash/leds-qcom-flash.c
++++ b/drivers/leds/flash/leds-qcom-flash.c
+@@ -3,9 +3,12 @@
+  * Copyright (c) 2022, 2024-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+  */
+ 
++#include <linux/array_size.h>
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
++#include <linux/delay.h>
+ #include <linux/dev_printk.h>
++#include <linux/ktime.h>
+ #include <linux/leds.h>
+ #include <linux/led-class-flash.h>
+ #include <linux/module.h>
+@@ -13,6 +16,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/property.h>
+ #include <linux/regmap.h>
++#include <linux/sprintf.h>
+ #include <dt-bindings/leds/common.h>
+ #include <media/v4l2-flash-led-class.h>
+ 
+@@ -149,6 +153,36 @@ module_param_cb(ir_max_ua, &ir_max_ua_ops, &ir_max_ua, 0644);
+ MODULE_PARM_DESC(ir_max_ua,
+ 		 "SL7 local: flash current limit per channel for IR emitter LEDs in uA (12500 to 100000, default 25000; 100000 is a hard cap enforced in code)");
+ 
++/*
++ * Strobe instrumentation of the IR LED (ir_test=1 only, read-only): the flash
++ * registers at five moments of one strobe, buffered and logged afterwards.
++ */
++#define SL7_SNAP_MOMENTS		5
++#define SL7_SNAP_NREGS			ARRAY_SIZE(sl7_snap_regs)
++#define SL7_SNAP_FAILED			0xffff
++
++static const u8 sl7_snap_regs[] = {
++	0x06, 0x07, 0x08, 0x09,		/* STATUS1-3 and the one after */
++	0x0c, 0x0d, 0x0e, 0x0f,
++	0x10,				/* INT_RT_STS */
++	0x18,				/* INT_LATCHED_STS */
++	0x3e, 0x41,			/* CHAN_TIMER ch1, ch4 */
++	0x42, 0x45,			/* ITARGET ch1, ch4 */
++	0x46,				/* MODULE_EN */
++	0x49,				/* IRESOLUTION */
++	0x4a, 0x4d,			/* CHAN_STROBE ch1, ch4 */
++	0x4e,				/* CHAN_EN */
++	0x50, 0x51, 0x52, 0x53,
++};
++
++static const char * const sl7_snap_names[SL7_SNAP_MOMENTS] = {
++	"idle before arm",
++	"t0, after CHAN_EN set",
++	"t0+3ms",
++	"t0+15ms",
++	"after strobe off",
++};
++
+ static bool ir_test;
+ module_param(ir_test, bool, 0400);
+ MODULE_PARM_DESC(ir_test,
+@@ -271,6 +305,8 @@ struct qcom_flash_led {
+ 	u8				chan_count;
+ 	bool				enabled;
+ 	bool				ir;	/* SL7 local: IR emitter, see SL7_IR_* */
++	u16				sl7_snap[SL7_SNAP_MOMENTS][SL7_SNAP_NREGS];
++	s64				sl7_snap_us[SL7_SNAP_MOMENTS];
+ };
+ 
+ /*
+@@ -691,9 +727,8 @@ static int qcom_flash_timeout_set(struct led_classdev_flash *fled_cdev, u32 time
+ 	return 0;
+ }
+ 
+-static int qcom_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool state)
++static int qcom_flash_strobe_set_hw(struct qcom_flash_led *led, bool state)
+ {
+-	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
+ 	int rc;
+ 
+ 	rc = set_flash_strobe(led, SW_STROBE, false);
+@@ -719,6 +754,90 @@ static int qcom_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool stat
+ 	return set_flash_strobe(led, SW_STROBE, state);
+ }
+ 
++/* SL7 local: read-only register reads for the strobe instrumentation */
++static void sl7_ir_snap(struct qcom_flash_led *led, int moment, ktime_t t0)
++{
++	struct qcom_flash_data *flash_data = led->flash_data;
++	unsigned int val;
++	int i;
++
++	for (i = 0; i < SL7_SNAP_NREGS; i++) {
++		if (regmap_read(flash_data->regmap,
++				flash_data->reg_base + sl7_snap_regs[i], &val))
++			val = SL7_SNAP_FAILED;
++		led->sl7_snap[moment][i] = val;
++	}
++	led->sl7_snap_us[moment] = ktime_to_us(ktime_sub(ktime_get(), t0));
++}
++
++/* One dev_info line for a buffered moment, printed after the strobe moment. */
++static void sl7_ir_snap_print(struct qcom_flash_led *led, int moment)
++{
++	char buf[SL7_SNAP_NREGS * 8 + 1];
++	int i, len = 0;
++
++	for (i = 0; i < SL7_SNAP_NREGS; i++) {
++		if (led->sl7_snap[moment][i] == SL7_SNAP_FAILED)
++			len += scnprintf(buf + len, sizeof(buf) - len,
++					 " %02x=--", sl7_snap_regs[i]);
++		else
++			len += scnprintf(buf + len, sizeof(buf) - len,
++					 " %02x=%02x", sl7_snap_regs[i],
++					 led->sl7_snap[moment][i]);
++	}
++
++	dev_info(led->flash.led_cdev.dev,
++		 "SL7 IR strobe snapshot (%s, read done %lld us after its reference, offsets from %#x):%s\n",
++		 sl7_snap_names[moment], led->sl7_snap_us[moment],
++		 led->flash_data->reg_base, buf);
++}
++
++static int qcom_flash_strobe_set(struct led_classdev_flash *fled_cdev, bool state)
++{
++	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);
++	ktime_t t0;
++	int rc, i;
++
++	/*
++	 * SL7 local: strobe instrumentation, IR LED with ir_test=1 on the 4ch
++	 * module only. Read-only: nothing here changes a pulse, current or
++	 * timer. The channel is armed (hardware safety timer on, 10 ms) before
++	 * the delays below, which end the pulse on their own, so the sleeps
++	 * only delay the return of this call, never the pulse. The values are
++	 * logged after the last read, never in between. References: t0 is the
++	 * return of the arming call for the first three moments, the start of
++	 * the disarm call for the last.
++	 */
++	if (!led->ir || !ir_test || led->flash_data->hw_type != QCOM_MVFLASH_4CH)
++		return qcom_flash_strobe_set_hw(led, state);
++
++	if (!state) {
++		t0 = ktime_get();
++		rc = qcom_flash_strobe_set_hw(led, false);
++		sl7_ir_snap(led, 4, t0);
++		sl7_ir_snap_print(led, 4);
++		return rc;
++	}
++
++	t0 = ktime_get();
++	sl7_ir_snap(led, 0, t0);
++	rc = qcom_flash_strobe_set_hw(led, true);
++	if (rc)
++		return rc;
++
++	t0 = ktime_get();
++	sl7_ir_snap(led, 1, t0);
++	usleep_range(3000, 3100);
++	sl7_ir_snap(led, 2, t0);
++	usleep_range(11800, 12000);
++	sl7_ir_snap(led, 3, t0);
++
++	for (i = 0; i < 4; i++)
++		sl7_ir_snap_print(led, i);
++
++	return 0;
++}
++
+ static int qcom_flash_strobe_get(struct led_classdev_flash *fled_cdev, bool *state)
+ {
+ 	struct qcom_flash_led *led = flcdev_to_qcom_fled(fled_cdev);

@@ -79,6 +79,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0090 | SL7 local: ps883x module parameter `fixed_phy_orientation` (on by default since 7.2.8-18; `ps883x.fixed_phy_orientation=0` disables it): the downstream QMP PHY is always told TYPEC_ORIENTATION_NORMAL while the retimer state and REG0 ORIENTATION_REVERSED bit follow the real plug | ours | not submitted (SL7 specific, firmware-dependent) |
 | 0091 | SL7 local: leds-qcom-flash `ir_max_ua` module parameter (flash current limit per channel for IR LEDs, default 25000 uA, run-time writable 12500 to 100000, hard cap 100 mA per channel in code); an IR LED refuses a larger flash_brightness with -EINVAL; 0080 timer and torch rules unchanged | ours; IR plan stage B | not submitted (SL7 specific) |
 | 0092 | SL7 local: romulus13 replaces the four IR discovery LEDs of 0081 by one ganged IR LED on flash channels 1 and 4 (`ir:flash-14`, 200 mA total = 100 mA per channel at most, 10 ms) | ours; EMITTER-LOCATE.md section 7 | not submitted (SL7 specific) |
+| 0093 | SL7 local: leds-qcom-flash read-only register instrumentation for IR strobes (`ir_test=1` only): 23 flash registers read at idle, arm, +3 ms, +15 ms and after strobe off, logged as "SL7 IR strobe snapshot" lines afterwards; pulse, current and timer unchanged | ours; IR plan stage B | not submitted (debug only) |
 
 Notes on the DT patches:
 
@@ -659,6 +660,15 @@ The discovery LEDs are retired because they overlapped the ganged node (two owne
 
 Checked as `git apply --check` against the series on v7.2 only; CI compiles the driver and runs
 dtbs_check. Never run. Needs omarchy-surface-sl7 36 or later for the test tool.
+
+**Patch 0093 (7.2.8-20).** Stage B at 12.5, 25 and 50 mA per channel showed nothing, and nothing
+logged proved the channels ever ran: the sysfs read-backs are software state and the earlier
+snapshots were taken before or after a pulse. For an IR LED with `ir_test=1`, the strobe path now
+reads STATUS1-3, 0x0C-0x0F, INT_RT_STS, INT_LATCHED_STS, CHAN_TIMER, ITARGET, MODULE_EN,
+IRESOLUTION, CHAN_STROBE, CHAN_EN and 0x50-0x53 at five moments (idle, right after arming,
++3 ms, +15 ms after the 10 ms hardware timer, after strobe off) and logs them afterwards, so
+printk does not skew the timing. Read-only; `flash_strobe=1` returns about 15 ms later, the pulse
+itself is still bounded by the hardware timer.
 
 ## USB-C reverse plug (7.2.8-18): fixed PHY orientation, on by default
 
