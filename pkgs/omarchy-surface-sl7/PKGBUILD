@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=37
+pkgrel=38
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -21,12 +21,14 @@ optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarch
             'brightnessctl: sl7-powertest pins the backlight'
             'mpv: sl7-powertest video'
             'bluez-utils: bluetoothctl in sl7-mac status'
-            'v4l-utils: media-ctl and v4l2-ctl for sl7-ir-probe'
+            'v4l-utils: media-ctl and v4l2-ctl for sl7-ir-probe and sl7-ir-lab'
             'pciutils: lspci in sl7-sleepstats --trace'
             'libcamera-tools: cam and qcam to test the webcam'
             'pipewire-libcamera: the webcam in browsers and video calls'
-            'gum: the sl7-ir-lab menu'
-            'imv: sl7-ir-lab opens the captured frames')
+            'gtk4: the sl7-ir-lab window'
+            'python-gobject: the sl7-ir-lab window (PyGObject)'
+            'python-cairo: the sl7-ir-lab live view and graph'
+            'polkit: pkexec for sl7-ir-lab and the sl7-ir-emitter-test polkit action')
 backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
         'etc/limine-entry-tool.d/omarchy-surface-sl7.conf'
         'etc/pacman.d/omarchy-sl7.conf'
@@ -88,6 +90,8 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-sleepstats'
         'sl7-ir-emitter-test'
         'sl7-ir-lab'
+        'org.omarchy.sl7.ir-emitter-test.policy'
+        'sl7-ir-lab.desktop'
         'omarchy-surface-sl7-ir.modprobe.conf'
         'sl7-usb-rpm'
         'sl7-vrr-rate'
@@ -124,7 +128,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             'eb0d712fd5d1cf085baf5434b332e4937f1ba24e5773e45c2597d85ec8e4b158'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            'd6632fa875d560c767760f47d07cdd2f3d0aea6fd4d297503736afe2326b58cd'
+            '54d5d030bc2587494576a2c762b8f46caba41ea4458f7be2c7235d5c1e4e5950'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -147,8 +151,10 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a'
             '41cf0f5821f9dc5bee37b55e32f220b022e8b8cf008d5269281b293f283c4c92'
             '72fe61cb4b0f79867dc998d6b9e119a77daa68e56232466a6ebc23f34d52aa14'
-            '9739330e0210c93413dd9b8cdc89a7ab67342cf7043bd04246a1999cc7c963e2'
-            'bd415d9477848b928d5aa6b54e7adec046814820955f70b1b36683864fc4ec79'
+            'fa7e8c7dce52623af9b44449b8b474b40e50cc925eb12989150d7ac3226e5c67'
+            'c82ee8d6f3f1e485b6647a01e9ece3dd621e276540caebe6e9ad93105f16fee8'
+            '93ddba82af43a3f7df7a642a06cae86c7adeb1eaef10fdd99294cdaa8ae77d24'
+            '1ea6be0b5ad61494fe2b438349238826080f00e2eed6bfc83fb5c296e73101da'
             '408afb579263f1282aec1f659d7ad94c3ac5ba29131cb40e2e1fe64f2633aa5d'
             'd6a463909152b5369366925f85449c00bbebea0c229024fb84e0144c2f0079aa'
             'a52d29a202208c7f4aae9639be355b3f6407ad39d647b151269dd68816a4cfa0'
@@ -302,6 +308,10 @@ package() {
     "$pkgdir/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf"
   install -Dm755 sl7-ir-emitter-test "$pkgdir/usr/bin/sl7-ir-emitter-test"
   install -Dm755 sl7-ir-lab "$pkgdir/usr/bin/sl7-ir-lab"
+  # sl7-ir-lab runs the tool through pkexec; one authentication holds for a few minutes
+  install -Dm644 org.omarchy.sl7.ir-emitter-test.policy \
+    "$pkgdir/usr/share/polkit-1/actions/org.omarchy.sl7.ir-emitter-test.policy"
+  install -Dm644 sl7-ir-lab.desktop "$pkgdir/usr/share/applications/sl7-ir-lab.desktop"
 
   # 8h. opt-in USB runtime PM, one dwc3 controller at a time. The udev rule is
   # inert while usb-rpm.conf lists no controller (the shipped default).

@@ -1,359 +1,740 @@
-#!/bin/bash
-# sl7-ir-lab: a live view of the Surface Laptop 7 IR camera and a terminal menu
-# to fire the IR emitter test pulses (12.5, 25, 50 mA per channel) and see what
-# the camera saw. Run it as your normal user, in a terminal on the Omarchy
-# desktop, on the "linux-sl7 (IR test)" boot entry:
-#
-#     sl7-ir-lab
-#
-# It is a front end for sl7-ir-emitter-test: every pulse button asks for
-# confirmation with a confirm button, then runs `sudo sl7-ir-emitter-test
-# --i-have-read-the-plan --led ir max_ma_per_channel=NN --pulse-delay 3
-# --confirmed` in this terminal. The confirm button replaces the typed phrase;
-# the approval file, the IR test boot check, the per-boot pulse limit, the
-# hardware timer and the ir_max_ua cap all apply as on the command line. There
-# is no 100 mA button.
-#
-# The live view is mpv, fed from the bridge loopback (/dev/v4l/by-id/
-# sl7-ir-camera) through a restarting capture, because the bridge ends a
-# streaming session after 10 s. It is closed for each pulse and snapshot (one
-# reader at a time keeps the bridge session and the capture clean) and comes
-# back afterwards.
-#
-# Around a pulse the lab captures about 5 s of frames (the emitter test waits
-# 3 s after your confirmation before it fires), then computes the mean and
-# maximum of every frame, compares the brightest frame with a baseline, saves
-# PNGs and the per-frame CSV in ~/sl7-ir-lab/<timestamp>/ (brightest.png,
-# baseline.png, side-by-side.png), opens the side-by-side in imv (or the
-# default image viewer), and prints the instrumentation lines (REGDUMP) of the
-# emitter-test log and the kernel's strobe snapshot lines.
-set -uo pipefail
+#!/usr/bin/python3
+"""sl7-ir-lab: one window with the live Surface Laptop 7 IR camera and the
+IR emitter test buttons. Run it as your normal user on the Omarchy desktop, on
+the "linux-sl7 (IR test)" boot entry:
 
-readonly CAM=/dev/v4l/by-id/sl7-ir-camera
-readonly CAM_W=644
-readonly CAM_H=604
-readonly CAP_FRAMES=190
-readonly CAP_TIMEOUT_S=9
-readonly SYNC_DELAY_S=3
-readonly OUTROOT=${SL7_IR_LAB_DIR:-$HOME/sl7-ir-lab}
-readonly TOOL=sl7-ir-emitter-test
+    sl7-ir-lab
 
-view_pid=
-view_dir=
-cap_pid=
-work=
+The window shows the camera live the whole time: raw GREY 644x604 frames read
+from the sl7-ir-bridge loopback (/dev/v4l/by-id/sl7-ir-camera) through
+`v4l2-ctl --stream-mmap --stream-to=-`, reopened whenever the bridge ends its
+10 s session. Under the image: the mean and maximum of every frame and a 10 s
+graph of the mean with a marker for each pulse.
 
-die() {
-  echo "sl7-ir-lab: $*" >&2
-  exit 1
-}
+Pulse 12.5 / 25 / 50 mA ask "Fire IR pulse at NN mA per channel?" and then run
 
-# Omarchy's gum colours, when Omarchy is present (as omarchy-sl7-faceunlock does).
-if command -v omarchy-restart-gum >/dev/null 2>&1; then
-  # shellcheck disable=SC1091,SC1090
-  source "$(command -v omarchy-restart-gum)" || true
-fi
+    pkexec /usr/bin/sl7-ir-emitter-test --i-have-read-the-plan --led ir \
+        max_ma_per_channel=NN --pulse-delay 2 --confirmed
 
-style() { gum style --foreground "${SL7_ACCENT:-2}" --bold "$@" 2>/dev/null || printf '%s\n' "$*"; }
-faint() { gum style --faint "$@" 2>/dev/null || printf '%s\n' "$*"; }
-
-stop_view() {
-  if [[ -n $view_pid ]]; then
-    kill -TERM -- "-$view_pid" 2>/dev/null || true
-    wait "$view_pid" 2>/dev/null || true
-    view_pid=
-  fi
-  if [[ -n $view_dir ]]; then
-    rm -rf -- "$view_dir"
-    view_dir=
-  fi
-}
-
-stop_capture() {
-  if [[ -n $cap_pid ]] && kill -0 "$cap_pid" 2>/dev/null; then
-    kill "$cap_pid" 2>/dev/null || true
-    wait "$cap_pid" 2>/dev/null || true
-  fi
-  cap_pid=
-}
-
-cleanup() {
-  stop_capture
-  stop_view
-  [[ -n $work ]] && rm -rf -- "$work"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM HUP
-
-start_view() {
-  stop_view
-  view_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/sl7-ir-lab.XXXXXX") || return 0
-  mkfifo "$view_dir/frames" || return 0
-  # One mpv, one persistent writer on the fifo, and a capture loop that restarts
-  # after the bridge ends a session. The loop stops when mpv is gone.
-  # shellcheck disable=SC2016
-  setsid bash -c '
-    cam=$1 fifo=$2 w=$3 h=$4
-    mpv --no-config --profile=low-latency --untimed --cache=no --title=sl7-ir-lab \
-      --demuxer=rawvideo --demuxer-rawvideo-w="$w" --demuxer-rawvideo-h="$h" \
-      --demuxer-rawvideo-mp-format=gray --demuxer-rawvideo-fps=35 "$fifo" >/dev/null 2>&1 &
-    mpv=$!
-    exec 7>"$fifo"
-    while kill -0 "$mpv" 2>/dev/null; do
-      v4l2-ctl -d "$cam" --stream-mmap --stream-to=- >&7 2>/dev/null
-      sleep 0.3
-    done
-  ' sl7-ir-lab-view "$CAM" "$view_dir/frames" "$CAM_W" "$CAM_H" >/dev/null 2>&1 &
-  view_pid=$!
-}
-
-pulses_this_boot() {
-  local n
-  n=$(sudo -n cat /run/sl7-ir-emitter-test/pulses 2>/dev/null | tr -d '[:space:]')
-  [[ $n =~ ^[0-9]+$ ]] || n=0
-  printf '%s' "$n"
-}
-
-# Frame statistics and PNGs. Arguments: capture file, output directory.
-read -r -d '' ANALYSE_PY <<'PYEOF' || true
+without blocking the window (the camera keeps streaming). --confirmed replaces
+the typed phrase for 12.5, 25 and 50 mA per channel only; the approval file, the
+IR test boot, the per-boot pulse limit, the hardware timer and the ir_max_ua cap
+all still apply, and there is no 100 mA button. The emitter test sets the IR
+sensor to manual maximum exposure itself and restores it on every exit path.
+After the pulse the lab looks for a spike in the frames around the fire time
+(median and robust sd, as the old analyser did), shows the brightest frame next
+to a baseline frame for a few seconds in the window, and keeps the tool output
+(REGDUMP lines, kernel strobe snapshot) in the collapsible panel. Everything is
+saved under ~/sl7-ir-lab/<timestamp>/.
+"""
+import collections
+import datetime
+import os
+import re
+import shutil
 import struct
+import subprocess
 import sys
+import threading
+import time
 import zlib
 
-W, H = int(sys.argv[1]), int(sys.argv[2])
-cap, outdir = sys.argv[3], sys.argv[4]
-fsz = W * H
-K = 5.0
-FLOOR = 0.02
+W = 644
+H = 604
+FRAME = W * H
+CAM = "/dev/v4l/by-id/sl7-ir-camera"
+TOOL = "/usr/bin/sl7-ir-emitter-test"
+MAX_PULSES = 12
+SPARK_S = 10.0
+SPIKE_SD = 5.0
+SD_FLOOR = 0.02
+PULSE_DELAY_S = 2
+INSET_SHOW_S = 10
+OUTROOT = os.environ.get("SL7_IR_LAB_DIR") or os.path.join(os.path.expanduser("~"), "sl7-ir-lab")
+ALPHA = b"\xff" * FRAME
 
 
-def med(v):
-    s = sorted(v)
+def fail(msg):
+    sys.stderr.write("sl7-ir-lab: %s\n" % msg)
+    sys.exit(1)
+
+
+try:
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import GLib, Gdk, Gtk
+except (ImportError, ValueError) as exc:
+    fail("GTK 4 with PyGObject is required (pacman -S gtk4 python-gobject): %s" % exc)
+try:
+    import cairo
+except ImportError as exc:
+    fail("pycairo is required (pacman -S python-cairo): %s" % exc)
+
+
+def med(values):
+    s = sorted(values)
     n = len(s)
+    if not n:
+        return 0.0
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
-def png(path, w, h, rows):
-    def chunk(tag, data):
-        c = struct.pack(">I", len(data)) + tag + data
-        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-    raw = b"".join(b"\0" + r for r in rows)
+def write_png(path, data):
+    """Write one GREY W x H frame as an 8-bit grayscale PNG."""
+    def chunk(tag, d):
+        c = struct.pack(">I", len(d)) + tag + d
+        return c + struct.pack(">I", zlib.crc32(tag + d) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\0" + data[r * W:(r + 1) * W] for r in range(H))
     with open(path, "wb") as fh:
         fh.write(b"\x89PNG\r\n\x1a\n")
-        fh.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)))
-        fh.write(chunk(b"IDAT", zlib.compress(raw, 6)))
+        fh.write(chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 0, 0, 0, 0)))
+        fh.write(chunk(b"IDAT", zlib.compress(raw, 4)))
         fh.write(chunk(b"IEND", b""))
 
 
-frames = []
-with open(cap, "rb") as f:
-    while True:
-        b = f.read(fsz)
-        if len(b) < fsz:
-            break
-        frames.append(b)
-n = len(frames)
-if n < 20:
-    print("ERROR only %d whole frames captured" % n)
-    sys.exit(2)
-means = [sum(b) / fsz for b in frames]
-maxs = [max(b) for b in frames]
-use = list(range(1, n))  # frame 0 is the bridge's black frame
-m = med([means[k] for k in use])
-sd = max(1.4826 * med([abs(means[k] - m) for k in use]), FLOOR)
-pk = max(use, key=lambda k: means[k])
-if pk >= 8:
-    bk = pk - 5
-else:
-    bk = min(use, key=lambda k: abs(means[k] - m))
-with open(outdir + "/frames.csv", "w") as fh:
-    fh.write("frame,mean,max\n")
-    for k in range(n):
-        fh.write("%d,%.3f,%d\n" % (k, means[k], maxs[k]))
+_luts = {}
 
 
-def rows(b):
-    return [b[r * W:(r + 1) * W] for r in range(H)]
+def gray_surface(data, gain=1.0):
+    """GREY bytes to a Cairo RGB24 surface. Returns (surface, backing buffer)."""
+    if gain > 1.01:
+        key = int(gain * 4)
+        lut = _luts.get(key)
+        if lut is None:
+            g = key / 4.0
+            lut = bytes(min(255, int(v * g)) for v in range(256))
+            _luts[key] = lut
+        data = data.translate(lut)
+    out = bytearray(FRAME * 4)
+    out[0::4] = data
+    out[1::4] = data
+    out[2::4] = data
+    out[3::4] = ALPHA
+    return cairo.ImageSurface.create_for_data(out, cairo.FORMAT_RGB24, W, H, W * 4), out
 
 
-rb, rp = rows(frames[bk]), rows(frames[pk])
-png(outdir + "/baseline.png", W, H, rb)
-png(outdir + "/brightest.png", W, H, rp)
-png(outdir + "/side-by-side.png", 2 * W, H, [a + b for a, b in zip(rb, rp)])
-z = (means[pk] - m) / sd
-print("frames captured: %d (frame 0 skipped), median frame mean %.2f (robust sd %.3f)" % (n, m, sd))
-print("baseline frame %d: mean %.2f, max %d" % (bk, means[bk], maxs[bk]))
-print("brightest frame %d: mean %.2f, max %d" % (pk, means[pk], maxs[pk]))
-print("peak minus baseline: mean %+.2f (%.1f sd), max %+d" % (
-    means[pk] - means[bk], z, maxs[pk] - maxs[bk]))
-print("VERDICT: %s" % ("SPIKE (peak frame is more than %.0f sd above the median)" % K
-                       if z > K else "no spike above %.0f sd" % K))
-PYEOF
+class Camera:
+    """Reads GREY frames from the loopback in a thread, reopening on session end."""
 
-latest_log() { # newest emitter-test run log, only if newer than $1 (a marker file)
-  local f newest=
-  for f in /var/tmp/sl7-ir-*.txt; do
-    [[ -e $f ]] || continue
-    [[ -z $newest || $f > $newest ]] && newest=$f # names carry the timestamp
-  done
-  [[ -n $newest && $newest -nt $1 ]] || return 1
-  printf '%s' "$newest"
-}
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.proc = None
+        self.latest = None  # (seq, bytes, mean, max)
+        self.seq = 0
+        self.sessions = 0
+        self.status = "starting"
+        self.history = collections.deque(maxlen=35 * 40)  # (t, seq, mean, max)
+        self.ring = collections.deque(maxlen=12)  # (seq, bytes)
+        self.markers = collections.deque(maxlen=32)  # monotonic fire times
+        self.watch = None  # pulse tracking, see begin_watch
 
-# Starts the capture once the tool logged the confirmation: the tool then
-# waits SYNC_DELAY_S before the pulse.
-capture_watcher() { # MARKER OUTFILE
-  local marker=$1 out=$2 log i
-  for ((i = 0; i < 3000; i++)); do # up to 5 minutes at 0.1 s
-    log=$(latest_log "$marker") && grep -q "CONFIRMED by" "$log" 2>/dev/null && break
-    log=
-    sleep 0.1
-  done
-  [[ -n $log ]] || exit 0
-  timeout -k 1 "$CAP_TIMEOUT_S" v4l2-ctl -d "$CAM" --stream-mmap --stream-count="$CAP_FRAMES" \
-    --stream-to="$out" >/dev/null 2>&1
-}
+    def start(self):
+        threading.Thread(target=self.run, daemon=True).start()
 
-pulse() { # MA
-  local ma=$1 ts outdir marker log rc
-  gum confirm "Fire IR pulse at $ma mA per channel?" --affirmative "Fire" --negative "Cancel" || return 0
-  ts=$(date +%Y%m%dT%H%M%S)
-  outdir=$OUTROOT/$ts
-  mkdir -p "$outdir" || { echo "cannot create $outdir"; return 0; }
-  stop_view
-  marker=$work/marker-$ts
-  : >"$marker"
-  sleep 1
-  capture_watcher "$marker" "$work/cap.raw" &
-  cap_pid=$!
-  echo
-  faint "The pulse fires about $SYNC_DELAY_S s after the emitter test starts."
-  sudo "$TOOL" --i-have-read-the-plan --led ir "max_ma_per_channel=$ma" --pulse-delay "$SYNC_DELAY_S" --confirmed
-  rc=$?
-  if ((rc != 0)); then
-    stop_capture
-    echo
-    style "The emitter test ended with exit code $rc: no pulse was analysed."
-    rm -f "$work/cap.raw"
-    return 0
-  fi
-  wait "$cap_pid" 2>/dev/null
-  cap_pid=
-  echo
-  style "Analysing the capture"
-  if [[ -s $work/cap.raw ]] && python3 -c "$ANALYSE_PY" "$CAM_W" "$CAM_H" "$work/cap.raw" "$outdir"; then
-    echo "Saved in $outdir (side-by-side.png, brightest.png, baseline.png, frames.csv)"
-    if command -v imv >/dev/null 2>&1; then
-      imv "$outdir/side-by-side.png" >/dev/null 2>&1 &
-      disown 2>/dev/null || true
-    elif command -v xdg-open >/dev/null 2>&1; then
-      xdg-open "$outdir/side-by-side.png" >/dev/null 2>&1 &
-      disown 2>/dev/null || true
-    fi
-  else
-    echo "No usable capture (is the bridge streaming? journalctl -u sl7-ir-bridge)."
-  fi
-  rm -f "$work/cap.raw"
-  log=$(latest_log "$marker") || log=
-  if [[ -n $log ]]; then
-    echo
-    style "Instrumentation (emitter-test log ${log})"
-    grep -E "REGDUMP|REGMAP|EXPOSURE|FIRE |flash_fault|PULSE" "$log" || true
-    echo
-    style "Kernel strobe snapshots"
-    { sudo -n journalctl -k --since "-2min" --no-pager -o cat 2>/dev/null || journalctl -k --since "-2min" --no-pager -o cat 2>/dev/null; } |
-      grep -F "SL7 IR strobe snapshot" || echo "(none readable: linux-sl7 7.2.8-20 or later logs them, 'sudo journalctl -k' shows them)"
-  fi
-  return 0
-}
+    def close(self):
+        self.stop.set()
+        p = self.proc
+        if p is not None:
+            try:
+                p.kill()
+            except OSError:
+                pass
 
-snapshot() {
-  local ts outdir
-  ts=$(date +%Y%m%dT%H%M%S)
-  outdir=$OUTROOT/$ts
-  mkdir -p "$outdir" || return 0
-  stop_view
-  if timeout -k 1 "$CAP_TIMEOUT_S" v4l2-ctl -d "$CAM" --stream-mmap --stream-count=12 --stream-to="$work/snap.raw" >/dev/null 2>&1 &&
-    python3 - "$CAM_W" "$CAM_H" "$work/snap.raw" "$outdir/snapshot.png" <<'PYEOF'
-import struct
-import sys
-import zlib
+    def run(self):
+        while not self.stop.is_set():
+            if not os.path.exists(CAM):
+                self.status = "waiting for %s (is sl7-ir-bridge running?)" % CAM
+                self.stop.wait(1.0)
+                continue
+            try:
+                p = subprocess.Popen(
+                    ["v4l2-ctl", "-d", CAM, "--stream-mmap", "--stream-to=-"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            except OSError as exc:
+                self.status = "cannot start v4l2-ctl: %s" % exc
+                self.stop.wait(2.0)
+                continue
+            self.proc = p
+            self.sessions += 1
+            self.status = "streaming (session %d)" % self.sessions
+            try:
+                self.read_session(p)
+            finally:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+                p.wait()
+                self.proc = None
+            if not self.stop.is_set():
+                self.status = "reopening the camera"
+                self.stop.wait(0.25)
 
-w, h = int(sys.argv[1]), int(sys.argv[2])
-fsz = w * h
-data = open(sys.argv[3], "rb").read()
-n = len(data) // fsz
-if n < 2:
-    sys.exit(1)
-b = data[(n - 1) * fsz:n * fsz]
+    def read_session(self, p):
+        buf = bytearray(FRAME)
+        mv = memoryview(buf)
+        f = p.stdout
+        first = True
+        while not self.stop.is_set():
+            got = 0
+            while got < FRAME:
+                n = f.readinto(mv[got:])
+                if not n:
+                    return
+                got += n
+            t = time.monotonic()
+            if first:  # the bridge's black frame
+                first = False
+                continue
+            data = bytes(buf)
+            mean = sum(data) / FRAME
+            mx = max(data)
+            with self.lock:
+                self.seq += 1
+                seq = self.seq
+                self.latest = (seq, data, mean, mx)
+                self.history.append((t, seq, mean, mx))
+                self.ring.append((seq, data))
+                w = self.watch
+                if w is not None and w["t_fire"] is not None and w["t_fire"] - 0.1 <= t <= w["t_fire"] + 1.0:
+                    if w["best"] is None or mean > w["best"][2]:
+                        w["best"] = (seq, data, mean, mx)
+
+    def begin_watch(self):
+        with self.lock:
+            self.watch = {"t_fire": None, "best": None, "pre": None}
+
+    def mark_fire(self):
+        t = time.monotonic()
+        with self.lock:
+            if self.watch is not None:
+                self.watch["t_fire"] = t
+                if self.ring:
+                    self.watch["pre"] = self.ring[-3 if len(self.ring) >= 3 else -1]
+            self.markers.append(t)
+
+    def end_watch(self):
+        with self.lock:
+            w, self.watch = self.watch, None
+            return w, list(self.history)
 
 
-def chunk(tag, d):
-    c = struct.pack(">I", len(d)) + tag + d
-    return c + struct.pack(">I", zlib.crc32(tag + d) & 0xFFFFFFFF)
+CSS = b"""
+.toast { background: rgba(30, 30, 30, 0.92); color: #ffffff; padding: 8px 16px; border-radius: 10px; }
+.verdict { font-weight: bold; }
+.caption { font-size: 11px; }
+"""
 
 
-raw = b"".join(b"\0" + b[r * w:(r + 1) * w] for r in range(h))
-with open(sys.argv[4], "wb") as fh:
-    fh.write(b"\x89PNG\r\n\x1a\n")
-    fh.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)))
-    fh.write(chunk(b"IDAT", zlib.compress(raw, 6)))
-    fh.write(chunk(b"IEND", b""))
-PYEOF
-  then
-    echo "Saved $outdir/snapshot.png"
-  else
-    echo "Snapshot failed (is the bridge streaming? journalctl -u sl7-ir-bridge)."
-  fi
-  rm -f "$work/snap.raw"
-}
+class Lab(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.omarchy.sl7.IrLab")
+        self.cam = Camera()
+        self.cur = None  # (surface, buffer) of the live frame
+        self.shown_seq = 0
+        self.ewma_max = None
+        self.pulses = None
+        self.busy = False
+        self.out_lines = []
+        self.inset = None  # (base surface/buf, peak surface/buf, captions)
+        self.inset_gen = 0
+        self.toast_gen = 0
 
-pause() {
-  read -r -p "Enter to continue " _ || true
-}
+    # ---- window -------------------------------------------------------------
+    def do_activate(self):
+        if getattr(self, "win", None) is not None:
+            self.win.present()
+            return
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-main() {
-  local c
-  [[ $EUID -ne 0 ]] || die "run as your normal user (it uses sudo for the emitter test)"
-  [[ -t 0 && -t 1 ]] || die "an interactive terminal is required"
-  for c in gum mpv v4l2-ctl python3 sudo; do
-    command -v "$c" >/dev/null 2>&1 || die "$c is required (pacman -S $c; v4l2-ctl is in v4l-utils)"
-  done
-  command -v "$TOOL" >/dev/null 2>&1 || die "$TOOL is not installed (omarchy-surface-sl7)"
-  work=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/sl7-ir-lab-work.XXXXXX") || die "cannot create a work directory"
-  if ! systemctl is-active --quiet sl7-ir-bridge.service; then
-    echo "sl7-ir-bridge.service is not active, starting it"
-    sudo systemctl start sl7-ir-bridge.service || die "cannot start sl7-ir-bridge.service"
-    sleep 1
-  fi
-  [[ -c $CAM ]] || die "$CAM does not exist (is v4l2loopback loaded and the bridge running?)"
-  sudo -v || die "sudo is needed for the emitter test"
-  start_view
-  while :; do
-    local hdr choice
-    hdr=$(printf 'IR lab   pulses fired this boot: %s of 12   (every gate of %s applies)' "$(pulses_this_boot)" "$TOOL")
-    [[ -n $view_pid ]] && ! kill -0 "$view_pid" 2>/dev/null && view_pid=
-    [[ -n $view_pid ]] || start_view
-    choice=$(gum choose --header "$hdr" --height 10 \
-      "Pulse 12.5 mA per channel" "Pulse 25 mA per channel" "Pulse 50 mA per channel" \
-      "Status" "Snapshot" "Quit") || break
-    case $choice in
-      "Pulse 12.5"*) pulse 12.5; pause ;;
-      "Pulse 25"*) pulse 25; pause ;;
-      "Pulse 50"*) pulse 50; pause ;;
-      Status)
-        "$TOOL" --status
-        pause
-        ;;
-      Snapshot)
-        snapshot
-        pause
-        ;;
-      Quit) break ;;
-    esac
-    start_view
-  done
-}
+        self.win = Gtk.ApplicationWindow(application=self, title="SL7 IR Lab")
+        self.win.set_default_size(900, 880)
+        self.win.connect("close-request", self.on_close)
 
-main "$@"
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(root, "set_margin_" + side)(8)
+        self.win.set_child(root)
+
+        top = Gtk.Box(spacing=12)
+        title = Gtk.Label(label="SL7 IR Lab", xalign=0)
+        title.add_css_class("title-3")
+        top.append(title)
+        self.pulses_lbl = Gtk.Label(hexpand=True, xalign=1)
+        top.append(self.pulses_lbl)
+        self.stretch = Gtk.CheckButton(label="Contrast stretch")
+        top.append(self.stretch)
+        root.append(top)
+
+        overlay = Gtk.Overlay(vexpand=True, hexpand=True)
+        self.live = Gtk.DrawingArea(vexpand=True, hexpand=True)
+        self.live.set_content_width(480)
+        self.live.set_content_height(450)
+        self.live.set_draw_func(self.draw_live)
+        overlay.set_child(self.live)
+
+        self.inset_box = Gtk.Box(spacing=8, halign=Gtk.Align.END, valign=Gtk.Align.END)
+        for side in ("bottom", "end"):
+            getattr(self.inset_box, "set_margin_" + side)(10)
+        self.inset_areas = []
+        self.inset_caps = []
+        for idx in (0, 1):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            area = Gtk.DrawingArea()
+            area.set_content_width(200)
+            area.set_content_height(188)
+            area.set_draw_func(self.draw_inset, idx)
+            cap = Gtk.Label()
+            cap.add_css_class("caption")
+            col.append(area)
+            col.append(cap)
+            self.inset_box.append(col)
+            self.inset_areas.append(area)
+            self.inset_caps.append(cap)
+        self.inset_box.set_visible(False)
+        overlay.add_overlay(self.inset_box)
+
+        self.toast = Gtk.Label(halign=Gtk.Align.CENTER, valign=Gtk.Align.START)
+        self.toast.add_css_class("toast")
+        self.toast.set_margin_top(14)
+        self.toast.set_visible(False)
+        overlay.add_overlay(self.toast)
+        root.append(overlay)
+
+        self.readout = Gtk.Label(xalign=0, label="waiting for the camera")
+        self.readout.add_css_class("monospace")
+        root.append(self.readout)
+
+        self.spark = Gtk.DrawingArea()
+        self.spark.set_content_height(90)
+        self.spark.set_draw_func(self.draw_spark)
+        root.append(self.spark)
+
+        self.verdict = Gtk.Label(xalign=0, wrap=True, label="No pulse fired yet.")
+        self.verdict.add_css_class("verdict")
+        root.append(self.verdict)
+
+        buttons = Gtk.Box(spacing=8, homogeneous=True)
+        self.pulse_btns = []
+        for ma in ("12.5", "25", "50"):
+            b = Gtk.Button(label="Pulse %s mA" % ma)
+            b.connect("clicked", lambda _b, m=ma: self.ask_pulse(m))
+            buttons.append(b)
+            self.pulse_btns.append(b)
+        self.snap_btn = Gtk.Button(label="Snapshot")
+        self.snap_btn.connect("clicked", lambda _b: self.snapshot())
+        buttons.append(self.snap_btn)
+        self.status_btn = Gtk.Button(label="Status")
+        self.status_btn.connect("clicked", lambda _b: self.run_status())
+        buttons.append(self.status_btn)
+        root.append(buttons)
+
+        self.expander = Gtk.Expander(label="Registers and tool output")
+        sw = Gtk.ScrolledWindow(min_content_height=170)
+        self.text = Gtk.TextView(editable=False, monospace=True, cursor_visible=False)
+        self.text.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        sw.set_child(self.text)
+        self.expander.set_child(sw)
+        root.append(self.expander)
+
+        self.update_pulses()
+        self.cam.start()
+        GLib.timeout_add(33, self.tick)
+        self.win.present()
+
+    def on_close(self, _win):
+        self.cam.close()
+        return False
+
+    # ---- small helpers ------------------------------------------------------
+    def update_pulses(self):
+        n = "?" if self.pulses is None else str(self.pulses)
+        self.pulses_lbl.set_text("Pulses fired this boot: %s / %d" % (n, MAX_PULSES))
+
+    def set_busy(self, busy):
+        self.busy = busy
+        for b in self.pulse_btns + [self.status_btn]:
+            b.set_sensitive(not busy)
+
+    def show_toast(self, text):
+        self.toast_gen += 1
+        gen = self.toast_gen
+        self.toast.set_text(text)
+        self.toast.set_visible(True)
+
+        def hide():
+            if gen == self.toast_gen:
+                self.toast.set_visible(False)
+            return False
+
+        GLib.timeout_add_seconds(4, hide)
+
+    def append_text(self, line):
+        buf = self.text.get_buffer()
+        buf.insert(buf.get_end_iter(), line if line.endswith("\n") else line + "\n")
+        mark = buf.create_mark(None, buf.get_end_iter(), False)
+        self.text.scroll_to_mark(mark, 0.0, False, 0.0, 0.0)
+        buf.delete_mark(mark)
+        return False
+
+    def gain(self):
+        if not self.stretch.get_active() or not self.ewma_max:
+            return 1.0
+        return max(1.0, min(16.0, 255.0 / max(self.ewma_max, 1.0)))
+
+    # ---- live view, readout, graph -----------------------------------------
+    def tick(self):
+        with self.cam.lock:
+            latest = self.cam.latest
+        if latest is not None and latest[0] != self.shown_seq:
+            seq, data, mean, mx = latest
+            self.shown_seq = seq
+            self.ewma_max = float(mx) if self.ewma_max is None else 0.98 * self.ewma_max + 0.02 * mx
+            self.cur = gray_surface(data, self.gain())
+            self.live.queue_draw()
+            now = time.monotonic()
+            with self.cam.lock:
+                fps = sum(1 for h in self.cam.history if h[0] > now - 1.0)
+            self.readout.set_text("frame %d   mean %6.2f   max %3d   %d fps   %s" % (
+                seq, mean, mx, fps, self.cam.status))
+        else:
+            with self.cam.lock:
+                last_t = self.cam.history[-1][0] if self.cam.history else 0.0
+            if time.monotonic() - last_t > 1.5:
+                self.readout.set_text(self.cam.status)
+        self.spark.queue_draw()
+        return True
+
+    def draw_live(self, _area, cr, w, h):
+        cr.set_source_rgb(0.04, 0.04, 0.06)
+        cr.paint()
+        if self.cur is None:
+            cr.set_source_rgb(0.7, 0.7, 0.7)
+            cr.move_to(16, 28)
+            cr.show_text(self.cam.status)
+            return
+        s = min(w / W, h / H)
+        cr.save()
+        cr.translate((w - W * s) / 2, (h - H * s) / 2)
+        cr.scale(s, s)
+        cr.set_source_surface(self.cur[0], 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+        cr.paint()
+        cr.restore()
+
+    def draw_inset(self, _area, cr, w, h, idx):
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        if self.inset is None:
+            return
+        surf = self.inset[idx][0]
+        s = min(w / W, h / H)
+        cr.save()
+        cr.translate((w - W * s) / 2, (h - H * s) / 2)
+        cr.scale(s, s)
+        cr.set_source_surface(surf, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+        cr.paint()
+        cr.restore()
+        cr.set_source_rgb(1, 1, 1)
+        cr.set_line_width(1)
+        cr.rectangle(0.5, 0.5, w - 1, h - 1)
+        cr.stroke()
+
+    def draw_spark(self, _area, cr, w, h):
+        cr.set_source_rgb(0.07, 0.07, 0.09)
+        cr.paint()
+        now = time.monotonic()
+        t0 = now - SPARK_S
+        with self.cam.lock:
+            pts = [(x[0], x[2]) for x in self.cam.history if x[0] >= t0]
+            marks = [m for m in self.cam.markers if m >= t0]
+        if len(pts) < 2:
+            return
+        lo = min(p[1] for p in pts)
+        hi = max(p[1] for p in pts)
+        if hi - lo < 1.0:
+            mid = (hi + lo) / 2
+            lo, hi = mid - 0.5, mid + 0.5
+        pad = 14
+
+        def px(t):
+            return (t - t0) / SPARK_S * (w - 2)
+
+        def py(v):
+            return h - pad - (v - lo) / (hi - lo) * (h - 2 * pad)
+
+        cr.set_line_width(1.5)
+        for m in marks:
+            cr.set_source_rgba(1.0, 0.3, 0.3, 0.9)
+            cr.move_to(px(m), 0)
+            cr.line_to(px(m), h)
+            cr.stroke()
+        cr.set_source_rgb(0.4, 0.85, 0.5)
+        cr.set_line_width(1.2)
+        cr.move_to(px(pts[0][0]), py(pts[0][1]))
+        for t, v in pts[1:]:
+            cr.line_to(px(t), py(v))
+        cr.stroke()
+        cr.set_source_rgb(0.75, 0.75, 0.75)
+        cr.set_font_size(11)
+        cr.move_to(4, 11)
+        cr.show_text("mean %.1f" % hi)
+        cr.move_to(4, h - 3)
+        cr.show_text("%.1f   (last %d s, red = pulse)" % (lo, SPARK_S))
+
+    # ---- snapshot -----------------------------------------------------------
+    def new_outdir(self):
+        d = os.path.join(OUTROOT, datetime.datetime.now().strftime("%Y%m%dT%H%M%S"))
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def snapshot(self):
+        with self.cam.lock:
+            latest = self.cam.latest
+        if latest is None:
+            self.show_toast("No frame yet: nothing to save")
+            return
+        try:
+            d = self.new_outdir()
+            path = os.path.join(d, "snapshot.png")
+            write_png(path, latest[1])
+        except OSError as exc:
+            self.show_toast("Snapshot failed: %s" % exc)
+            return
+        self.show_toast("Saved " + path.replace(os.path.expanduser("~"), "~", 1))
+
+    # ---- pulse --------------------------------------------------------------
+    def ask_pulse(self, ma):
+        if self.busy:
+            return
+        dlg = Gtk.Window(title="Confirm IR pulse", transient_for=self.win, modal=True, resizable=False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        for side in ("top", "bottom", "start", "end"):
+            getattr(box, "set_margin_" + side)(18)
+        box.append(Gtk.Label(label="Fire IR pulse at %s mA per channel?" % ma))
+        box.append(Gtk.Label(
+            label="Nobody looks at the bezel. The emitter test asks for your password if needed.",
+            wrap=True, max_width_chars=48))
+        row = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        fire = Gtk.Button(label="Fire")
+        fire.add_css_class("destructive-action")
+        row.append(cancel)
+        row.append(fire)
+        box.append(row)
+        dlg.set_child(box)
+        dlg.set_default_widget(cancel)
+        cancel.connect("clicked", lambda _b: dlg.close())
+
+        def go(_b):
+            dlg.close()
+            self.start_pulse(ma)
+
+        fire.connect("clicked", go)
+        keys = Gtk.EventControllerKey()
+
+        def on_key(_c, keyval, _code, _state):
+            if keyval == Gdk.KEY_Escape:
+                dlg.close()
+                return True
+            return False
+
+        keys.connect("key-pressed", on_key)
+        dlg.add_controller(keys)
+        dlg.present()
+        cancel.grab_focus()
+
+    def start_pulse(self, ma):
+        if self.busy:
+            return
+        try:
+            outdir = self.new_outdir()
+        except OSError as exc:
+            self.show_toast("Cannot create the output directory: %s" % exc)
+            return
+        self.set_busy(True)
+        self.out_lines = []
+        self.text.get_buffer().set_text("")
+        self.verdict.set_text("Pulse %s mA: waiting for the emitter test (authenticate if asked)..." % ma)
+        self.inset_box.set_visible(False)
+        self.cam.begin_watch()
+        threading.Thread(target=self.pulse_worker, args=(ma, outdir), daemon=True).start()
+
+    def ui(self, fn, *args):
+        GLib.idle_add(fn, *args)
+
+    def pulse_worker(self, ma, outdir):
+        cmd = ["pkexec", TOOL, "--i-have-read-the-plan", "--led", "ir", "max_ma_per_channel=" + ma,
+               "--pulse-delay", str(PULSE_DELAY_S), "--confirmed"]
+        rc = -1
+        try:
+            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+            for line in p.stdout:
+                line = line.rstrip("\n")
+                self.out_lines.append(line)
+                self.ui(self.append_text, line)
+                if "flash_strobe <- 1" in line:
+                    self.cam.mark_fire()
+                    self.ui(self.verdict.set_text, "Pulse %s mA fired. Looking for a spike..." % ma)
+                elif "CONFIRMED" in line:
+                    self.ui(self.verdict.set_text, "Armed at %s mA: firing in about %d s..." % (ma, PULSE_DELAY_S))
+                mt = re.search(r"count this boot: (\d+)", line)
+                if mt:
+                    self.pulses = int(mt.group(1))
+                    self.ui(self.update_pulses)
+            rc = p.wait()
+        except OSError as exc:
+            self.out_lines.append("cannot run pkexec: %s" % exc)
+            self.ui(self.append_text, "cannot run pkexec: %s" % exc)
+        time.sleep(1.2)  # frames after the pulse
+        res = self.analyse(ma, outdir, rc)
+        self.ui(self.apply_result, res)
+
+    def analyse(self, ma, outdir, rc):
+        w, hist = self.cam.end_watch()
+        res = {"ma": ma, "rc": rc, "outdir": outdir, "text": "", "spike": False, "best": None}
+        t_fire = w["t_fire"] if w else None
+        extra = []
+        if t_fire is None:
+            last = self.out_lines[-1] if self.out_lines else "no output"
+            res["text"] = "No pulse was fired (emitter test exit code %d): %s" % (rc, last)
+        else:
+            win = [x for x in hist if t_fire - 1.6 <= x[0] <= t_fire + 1.6]
+            ref = [x for x in win if x[0] < t_fire - 0.3 or x[0] > t_fire + 1.0]
+            if len(ref) < 10:
+                ref = [x for x in win if x[0] < t_fire - 0.3]
+            if len(ref) < 5:
+                ref = win
+            best = w["best"]
+            if not ref or best is None:
+                res["text"] = "Pulse fired but no frames were read around it (is the bridge streaming?)"
+            else:
+                m = med([x[2] for x in ref])
+                sd = max(1.4826 * med([abs(x[2] - m) for x in ref]), SD_FLOOR)
+                z = (best[2] - m) / sd
+                pre = w["pre"]
+                base = pre[1] if pre else None
+                res["spike"] = z > SPIKE_SD
+                if res["spike"]:
+                    res["text"] = "SPIKE +%.1f sd at frame %d (mean %.1f vs median %.1f, max %d)" % (
+                        z, best[0], best[2], m, best[3])
+                else:
+                    res["text"] = "no spike (peak +%.1f sd at frame %d, below %.0f sd; mean %.1f vs median %.1f)" % (
+                        z, best[0], SPIKE_SD, best[2], m)
+                res["best"] = (best, base, pre[0] if pre else None)
+                try:
+                    with open(os.path.join(outdir, "frames.csv"), "w") as fh:
+                        fh.write("frame,t_rel_fire_s,mean,max\n")
+                        for x in win:
+                            fh.write("%d,%.3f,%.3f,%d\n" % (x[1], x[0] - t_fire, x[2], x[3]))
+                    write_png(os.path.join(outdir, "brightest.png"), best[1])
+                    if base:
+                        write_png(os.path.join(outdir, "baseline.png"), base)
+                except OSError as exc:
+                    extra.append("could not save everything: %s" % exc)
+        snap = self.strobe_snapshot()
+        if snap:
+            self.out_lines.append("---- kernel strobe snapshot ----")
+            self.out_lines.extend(snap)
+            self.ui(self.append_text, "---- kernel strobe snapshot ----\n" + "\n".join(snap))
+        else:
+            note = "(no 'SL7 IR strobe snapshot' kernel lines readable as this user; linux-sl7 7.2.8-20 or later logs them)"
+            self.ui(self.append_text, note)
+        try:
+            with open(os.path.join(outdir, "tool_output.txt"), "w") as fh:
+                fh.write("\n".join(self.out_lines) + "\n")
+            with open(os.path.join(outdir, "summary.txt"), "w") as fh:
+                fh.write("pulse %s mA per channel, exit code %d\n%s\n" % (ma, rc, res["text"]))
+        except OSError:
+            pass
+        if extra:
+            res["text"] += "  [" + "; ".join(extra) + "]"
+        return res
+
+    def strobe_snapshot(self):
+        try:
+            r = subprocess.run(["journalctl", "-k", "--since", "-2min", "--no-pager", "-o", "cat"],
+                               capture_output=True, text=True, errors="replace", timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return [ln for ln in r.stdout.splitlines() if "SL7 IR strobe snapshot" in ln]
+
+    def apply_result(self, res):
+        self.set_busy(False)
+        txt = "Pulse %s mA: %s" % (res["ma"], res["text"])
+        if res["rc"] not in (0, -1) and res["best"] is None:
+            self.expander.set_expanded(True)
+        self.verdict.set_text(txt + "   [%s]" % res["outdir"].replace(os.path.expanduser("~"), "~", 1))
+        if res["best"] is not None:
+            best, base, base_seq = res["best"]
+            g = self.gain()
+            self.inset = (
+                gray_surface(base if base else best[1], g),
+                gray_surface(best[1], g),
+            )
+            self.inset_caps[0].set_text("baseline" + (" (frame %d)" % base_seq if base_seq else ""))
+            self.inset_caps[1].set_text("brightest (frame %d)" % best[0])
+            self.inset_box.set_visible(True)
+            for a in self.inset_areas:
+                a.queue_draw()
+            self.inset_gen += 1
+            gen = self.inset_gen
+
+            def hide():
+                if gen == self.inset_gen:
+                    self.inset_box.set_visible(False)
+                return False
+
+            GLib.timeout_add_seconds(INSET_SHOW_S, hide)
+        self.show_toast(res["text"][:80])
+        return False
+
+    # ---- status -------------------------------------------------------------
+    def run_status(self):
+        if self.busy:
+            return
+        self.set_busy(True)
+        self.text.get_buffer().set_text("")
+        self.expander.set_expanded(True)
+        self.append_text("pkexec %s --status" % TOOL)
+
+        def work():
+            try:
+                r = subprocess.run(["pkexec", TOOL, "--status"], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, errors="replace", timeout=120)
+                out = (r.stdout + r.stderr).strip()
+            except (OSError, subprocess.SubprocessError) as exc:
+                out = "status failed: %s" % exc
+            mt = re.search(r"pulses fired this boot: (\d+)", out)
+            if mt:
+                self.pulses = int(mt.group(1))
+                self.ui(self.update_pulses)
+            self.ui(self.append_text, out)
+            self.ui(self.set_busy, False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+def main():
+    if os.geteuid() == 0:
+        fail("run it as your normal user (it uses pkexec for the emitter test)")
+    for prog in ("v4l2-ctl", "pkexec"):
+        if shutil.which(prog) is None:
+            fail("%s is required (v4l-utils provides v4l2-ctl, polkit provides pkexec)" % prog)
+    if not os.path.exists(TOOL):
+        fail("%s is not installed (omarchy-surface-sl7)" % TOOL)
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        fail("no graphical session (WAYLAND_DISPLAY or DISPLAY is not set)")
+    sys.exit(Lab().run(sys.argv[:1]))
+
+
+if __name__ == "__main__":
+    main()

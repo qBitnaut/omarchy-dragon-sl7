@@ -50,10 +50,11 @@
 #       printed also goes to /var/tmp/sl7-ir-<time>.txt. --pulse-delay S
 #       (0..5, default 0) waits S seconds after the typed confirmation, before
 #       the first pulse, so a caller can start a camera capture; it relaxes no
-#       gate. --confirmed (used by sl7-ir-lab after its confirm button)
+#       gate. --confirmed (used by sl7-ir-lab after its confirm dialog)
 #       replaces the typed "FIRE IR <MA>MA" phrase for --led ir at 12.5, 25
-#       and 50 mA per channel only; 100 mA and --channel refuse it. Every
-#       other gate stays.
+#       and 50 mA per channel only, and then needs no terminal (the lab runs
+#       the tool through pkexec); 100 mA and --channel refuse it and keep the
+#       typed phrases in a terminal. Every other gate stays.
 #
 #   sudo sl7-ir-emitter-test --remove-snapshot
 #       Fires nothing, needs no approval file (root and the IR test boot
@@ -841,7 +842,9 @@ if ((watch_only)); then
 fi
 
 # ---- confirmation -----------------------------------------------------------
-if ((!fake && !have_tty)); then
+# --confirmed (12.5, 25, 50 mA --led ir only, enforced above) was confirmed by
+# the caller's dialog and needs no terminal; every typed phrase does.
+if ((!fake && !have_tty && !confirmed)); then
   die 7 "an interactive terminal is required for the confirmation"
 fi
 # Total current in tenths of mA (12.5 mA = 125) and the charge of one pulse in

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>omarchy-dragon-sl7</vendor>
+  <vendor_url>https://github.com/qBitnaut/omarchy-dragon-sl7</vendor_url>
+  <action id="org.omarchy.sl7.ir-emitter-test">
+    <description>Run the Surface Laptop 7 IR emitter test</description>
+    <message>Authentication is required to run the SL7 IR emitter test (it can fire the IR LED)</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/sl7-ir-emitter-test</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>
+  </action>
+</policyconfig>

@@ -729,7 +729,7 @@ writes `ir_max_ua` (read back), then per pulse `flash_brightness` = 2 x the per-
 The approval file, IR test boot, 3 pulses per run, 12 per boot and fault checks are unchanged.
 `--channel N` remains for kernels that still have the discovery LEDs (7.2.8-18 or earlier).
 
-**Instrumentation and the IR lab (omarchy-surface-sl7 37, with linux-sl7 7.2.8-20).** The tool
+**Instrumentation (omarchy-surface-sl7 37, with linux-sl7 7.2.8-20).** The tool
 now copies everything it prints to `/var/tmp/sl7-ir-<time>.txt`, dumps the flash registers
 through regmap debugfs before arming, while the strobe is set (with `flash_fault`, before
 `flash_strobe=0`) and after the disarm, and for `--led ir` sets the IR sensor to manual exposure
@@ -737,13 +737,29 @@ at its maximum for the run so a 10 ms pulse cannot miss a frame (`--no-manual-ex
 it). `sudo sl7-ir-emitter-test --remove-snapshot` fires nothing: it unloads leds_qcom_flash,
 prints the kernel's "remove, after all-off" register snapshot and loads it back.
 
-`sl7-ir-lab` (as your user, on the IR test boot) shows the live IR camera in mpv and a gum menu:
-Pulse 12.5 / 25 / 50 mA per channel, Status, Snapshot, Quit. Each pulse asks with a confirm
-button, then runs the emitter test with `--confirmed`, which replaces the typed phrase for
-`--led ir` at 12.5, 25 and 50 mA per channel only (100 mA and `--channel` refuse it; every other
-gate stays). The lab captures about 5 s around the pulse, saves `baseline.png`, `brightest.png`,
-`side-by-side.png` and `frames.csv` under `~/sl7-ir-lab/<timestamp>/`, opens the side-by-side
-and prints the register lines. Needs gum, mpv, v4l-utils and python3; imv is optional.
+**`sl7-ir-lab` (omarchy-surface-sl7 38).** One GTK 4 window (Python, PyGObject), launched as your
+user on the IR test boot from the Omarchy launcher ("SL7 IR Lab") or with `sl7-ir-lab`. The live
+IR camera fills the window and never closes: raw GREY frames are read from the bridge loopback
+through `v4l2-ctl --stream-mmap --stream-to=-` and the stream is reopened whenever the bridge ends
+its 10 s session. Under the image: mean and max of every frame and a 10 s graph of the mean with a
+red marker per pulse; "Contrast stretch" brightens the dark frames (a pulse still saturates).
+Buttons: Pulse 12.5 / 25 / 50 mA (a dialog asks "Fire IR pulse at NN mA per channel?", Cancel is
+the default), Snapshot (PNG in `~/sl7-ir-lab/<timestamp>/`, with a toast) and Status. A pulse runs
+`pkexec /usr/bin/sl7-ir-emitter-test --i-have-read-the-plan --led ir max_ma_per_channel=NN
+--pulse-delay 2 --confirmed` without blocking the window. `--confirmed` replaces the typed phrase
+for `--led ir` at 12.5, 25 and 50 mA per channel only and, with it, the tool no longer needs a
+terminal (100 mA and `--channel` still need the typed phrases in a terminal); every other gate
+(approval file, IR test boot, 3 per run, 12 per boot, `ir_max_ua`, hardware timer) stays. The tool
+sets the sensor to manual maximum exposure itself and restores it on every exit, with the stream
+open. After the pulse the lab compares the brightest frame near the fire time with the median and
+robust sd of the frames around it ("SPIKE +x.x sd at frame N" above 5 sd, else "no spike"), shows
+the brightest frame next to a baseline frame in the window for 10 s, and fills the collapsible
+"Registers and tool output" panel with the tool output (REGDUMP, EXPOSURE, FIRE lines) and the
+kernel's "SL7 IR strobe snapshot" lines. Per pulse it saves `frames.csv`, `baseline.png`,
+`brightest.png`, `tool_output.txt` and `summary.txt` under `~/sl7-ir-lab/<timestamp>/`. The polkit
+action `org.omarchy.sl7.ir-emitter-test` (`allow_active=auth_admin_keep`) means one authentication
+covers the pulses of the next few minutes; a polkit agent must be running in the session. Needs
+v4l-utils, gtk4, python-gobject, python-cairo and polkit (optional dependencies of the package).
 
 **IR stage A safety fix (omarchy-surface-sl7 26, with linux-sl7 7.2.8-14).** The PMIC safety timer
 very likely counts (n + 1) x 10 ms while the stock driver writes n = timeout / 10, so a requested
