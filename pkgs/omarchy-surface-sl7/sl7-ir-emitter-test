@@ -36,6 +36,31 @@
 #       One pulse is 10 ms: 25 / 50 / 100 / 200 mA total = 0.25 / 0.5 / 1.0 /
 #       2.0 mC (Windows: about 1.11 mC per lit frame, see below).
 #
+#       Instrumentation (every --led ir run; linux-sl7 7.2.8-20 adds the
+#       kernel side, patch 0093): the tool reads the flash register set of the
+#       PMIC (offsets 0x06-0x09, 0x0c-0x0f, 0x10, 0x18, 0x3e, 0x41, 0x42, 0x45,
+#       0x46, 0x49, 0x4a, 0x4d, 0x4e, 0x50-0x53 from the flash base 0xee00)
+#       from the regmap debugfs (the regmap whose 0xee04/0xee05 read 18/07),
+#       and logs REGDUMP lines idle before arm, with the strobe still set
+#       (after the 50 ms wait, BEFORE flash_strobe=0, together with
+#       flash_fault) and after the disarm. For --led ir it also sets the IR
+#       sensor (vd55g subdev) to manual exposure at the control's maximum for
+#       the run and restores it afterwards (--no-manual-exposure skips it; if
+#       the subdev is not found the tool warns and goes on). Everything
+#       printed also goes to /var/tmp/sl7-ir-<time>.txt. --pulse-delay S
+#       (0..5, default 0) waits S seconds after the typed confirmation, before
+#       the first pulse, so a caller can start a camera capture; it relaxes no
+#       gate. --confirmed (used by sl7-ir-lab after its confirm button)
+#       replaces the typed "FIRE IR <MA>MA" phrase for --led ir at 12.5, 25
+#       and 50 mA per channel only; 100 mA and --channel refuse it. Every
+#       other gate stays.
+#
+#   sudo sl7-ir-emitter-test --remove-snapshot
+#       Fires nothing, needs no approval file (root and the IR test boot
+#       only): modprobe -r leds_qcom_flash (which switches every channel off),
+#       prints the "snapshot remove, after all-off" lines from the kernel log,
+#       then loads the module back through the modprobe gate.
+#
 #   sudo sl7-ir-emitter-test --i-have-read-the-plan --channel N [--repeat R]
 #       Old kernels with the discovery LEDs only. N = 1..4 (ir:flash-N,
 #       led-sources = N), always 12.5 mA. R = 1..3 pulses, 1 s apart
@@ -97,6 +122,8 @@
 # Every action is logged to /var/log/sl7-ir-emitter-test.log and the journal
 # (tag sl7-ir-emitter-test), and echoed.
 #
+# Run log: /var/tmp/sl7-ir-<time>.txt (everything printed), besides the log above.
+#
 # Exit codes: 0 done, 2 usage, 3 Stage B not approved, 4 not the IR test boot
 # or hardware not as expected, 5 fault or limit, 6 sysfs write/readback failed,
 # 7 not confirmed, 8 --watch problem (bridge, capture or analysis).
@@ -149,6 +176,8 @@ irparam=$R/sys/module/leds_qcom_flash/parameters/ir_max_ua
 approval=$R/etc/omarchy-surface-sl7/ir-stage-b-approved
 logf=$R/var/log/sl7-ir-emitter-test.log
 rundir=$R/run/sl7-ir-emitter-test
+debugfs_regmap=$R/sys/kernel/debug/regmap
+subdev_sys=$R/sys/class/video4linux
 camdev=$R/dev/v4l/by-id/sl7-ir-camera
 
 me=sl7-ir-emitter-test
@@ -165,6 +194,22 @@ watch_only=0
 channel_given=0
 cap_pid=
 watchdir=
+remove_snap=0
+expo_opt=on
+pulse_delay=0
+confirmed=0
+expo_dev=
+expo_saved_ae=
+expo_saved_exp=
+expo_touched=0
+regmap_file=
+tee_pid=
+have_tty=0
+if [[ -t 0 && -t 1 ]]; then have_tty=1; fi
+
+# Flash register offsets read for the instrumentation (from the base 0xee00).
+readonly FLASH_BASE=0xee00
+readonly DUMP_REGS=(0x06 0x07 0x08 0x09 0x0c 0x0d 0x0e 0x0f 0x10 0x18 0x3e 0x41 0x42 0x45 0x46 0x49 0x4a 0x4d 0x4e 0x50 0x51 0x52 0x53)
 
 usage() {
   sed -n '2,/^set -uo/{/^set -uo/!p}' "$0" | sed 's/^# \{0,1\}//' >&2
@@ -215,12 +260,106 @@ restore_limit() {
   return 0
 }
 
-# Emitter first, then the limit, then the capture, then the raw frames (never kept).
+# Manual exposure (IR sensor, vd55g subdev) for the pulses, restored afterwards.
+ctrl_field() { # TEXT NAME FIELD
+  grep -E "^[[:space:]]*$2 " <<<"$1" | head -n1 | grep -oE "$3=-?[0-9]+" | head -n1 | cut -d= -f2
+}
+
+expo_manual_on() {
+  local n name ctrls max v
+  if ! command -v v4l2-ctl >/dev/null 2>&1; then
+    log "WARN manual exposure skipped: v4l2-ctl is not installed"
+    return 0
+  fi
+  for n in "$subdev_sys"/v4l-subdev*; do
+    [[ -e $n/name ]] || continue
+    name=$(rd "$n/name")
+    if [[ $name == *vd55g* ]]; then
+      expo_dev=$R/dev/${n##*/}
+      break
+    fi
+  done
+  if [[ -z $expo_dev ]]; then
+    log "WARN manual exposure skipped: no vd55g subdev found in ${subdev_sys#"$R"}"
+    return 0
+  fi
+  if ! ctrls=$(v4l2-ctl -d "$expo_dev" --list-ctrls 2>&1); then
+    log "WARN manual exposure skipped: cannot list the controls of ${expo_dev#"$R"}: $ctrls"
+    expo_dev=
+    return 0
+  fi
+  expo_saved_ae=$(ctrl_field "$ctrls" auto_exposure value)
+  expo_saved_exp=$(ctrl_field "$ctrls" exposure value)
+  max=$(ctrl_field "$ctrls" exposure max)
+  [[ $max =~ ^[0-9]+$ ]] || max=1796
+  if [[ -z $expo_saved_ae || -z $expo_saved_exp ]]; then
+    log "WARN manual exposure skipped: auto_exposure/exposure controls not found on ${expo_dev#"$R"}"
+    expo_dev=
+    return 0
+  fi
+  log "EXPOSURE ${expo_dev#"$R"} ($name): saved auto_exposure=$expo_saved_ae exposure=$expo_saved_exp, setting manual and exposure=$max"
+  expo_touched=1
+  v4l2-ctl -d "$expo_dev" --set-ctrl auto_exposure=1 >/dev/null 2>&1 || log "WARN could not set auto_exposure=1"
+  v4l2-ctl -d "$expo_dev" --set-ctrl exposure="$max" >/dev/null 2>&1 || log "WARN could not set exposure=$max"
+  v=$(v4l2-ctl -d "$expo_dev" --get-ctrl auto_exposure,exposure 2>&1 | tr '\n' ' ')
+  log "EXPOSURE read back: $v"
+  return 0
+}
+
+expo_restore() {
+  ((expo_touched)) || return 0
+  expo_touched=0
+  v4l2-ctl -d "$expo_dev" --set-ctrl auto_exposure="$expo_saved_ae" >/dev/null 2>&1
+  if [[ $expo_saved_ae == 1 ]]; then v4l2-ctl -d "$expo_dev" --set-ctrl exposure="$expo_saved_exp" >/dev/null 2>&1; fi
+  log "EXPOSURE restored on ${expo_dev#"$R"}: auto_exposure=$expo_saved_ae exposure=$expo_saved_exp"
+  return 0
+}
+
+# Flash register dump through the regmap debugfs: the PMIC regmap is the one
+# whose registers 0xee04 and 0xee05 read 0x18 and 0x07. Every line of the file
+# is 9 bytes ("eeXX: VV\n"), so one register is dd bs=9 skip=<address>.
+dd_line() { dd if="$1" bs=9 skip=$(($2)) count=1 2>/dev/null | tr -d '\n'; }
+
+find_regmap() {
+  local d f a b
+  for d in "$debugfs_regmap"/*/; do
+    f=${d%/}/registers
+    [[ -r $f ]] || continue
+    a=$(dd_line "$f" 0xee04)
+    b=$(dd_line "$f" 0xee05)
+    if [[ $a == "ee04: 18"* && $b == "ee05: 07"* ]]; then
+      regmap_file=$f
+      log "REGMAP flash registers via ${f#"$R"} (0xee04=18, 0xee05=07)"
+      return 0
+    fi
+  done
+  log "WARN no regmap debugfs with 0xee04=18 and 0xee05=07 under ${debugfs_regmap#"$R"} (debugfs not mounted?): no REGDUMP lines"
+  return 0
+}
+
+regdump() { # WHEN
+  local off l v out=""
+  [[ -n $regmap_file ]] || return 0
+  for off in "${DUMP_REGS[@]}"; do
+    l=$(dd_line "$regmap_file" $((FLASH_BASE + off)))
+    v=${l#*: }
+    v=${v//[[:space:]]/}
+    out+=" $(printf '%02x' "$off")=${v:-??}"
+  done
+  log "REGDUMP ($1, offsets from $FLASH_BASE):$out"
+}
+
+# Emitter first, then exposure and the limit, then the capture, then the raw frames (never kept).
 on_exit() {
   disarm_all
+  expo_restore
   restore_limit
   stop_capture
   if [[ -n $watchdir && $watchdir == "$rundir"/watch.* ]]; then rm -rf -- "$watchdir"; fi
+  if [[ -n $tee_pid ]]; then
+    exec >&- 2>&-
+    wait "$tee_pid" 2>/dev/null || true
+  fi
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -297,6 +436,10 @@ while (($#)); do
     --status) status_only=1 ;;
     --watch) watch=1 ;;
     --watch-only-test) watch_only=1 ;;
+    --remove-snapshot) remove_snap=1 ;;
+    --no-manual-exposure) expo_opt=off ;;
+    --pulse-delay) pulse_delay=${2:-}; shift ;;
+    --confirmed) confirmed=1 ;;
     -h | --help) usage ;;
     *) echo "sl7-ir-emitter-test: unknown argument: $1" >&2; usage ;;
   esac
@@ -308,8 +451,17 @@ if ((status_only)); then
   exit 0
 fi
 
-if ((watch_only)); then
-  if ((watch || channel_given)) || [[ -n $led_kind || -n $max_ma_arg || $repeat != 1 ]]; then
+if [[ ! $pulse_delay =~ ^[0-5]$ ]]; then
+  echo "sl7-ir-emitter-test: --pulse-delay takes a whole number of seconds, 0..5" >&2
+  usage
+fi
+if ((remove_snap)); then
+  if ((watch || watch_only || channel_given || confirmed)) || [[ -n $led_kind || -n $max_ma_arg || $repeat != 1 ]]; then
+    echo "sl7-ir-emitter-test: --remove-snapshot takes no other option (it fires nothing)" >&2
+    usage
+  fi
+elif ((watch_only)); then
+  if ((watch || channel_given || confirmed)) || [[ -n $led_kind || -n $max_ma_arg || $repeat != 1 ]]; then
     echo "sl7-ir-emitter-test: --watch-only-test takes no --channel, --led, max_ma_per_channel=, --repeat or --watch (it fires nothing)" >&2
     usage
   fi
@@ -326,11 +478,16 @@ else
       *) echo "sl7-ir-emitter-test: max_ma_per_channel= must be 12.5, 25, 50 or 100 (got '$max_ma_arg')" >&2; usage ;;
     esac
     ((per_ch_ua <= CH_UA_HARD_MAX)) || { echo "sl7-ir-emitter-test: internal error: per-channel current above the hard cap" >&2; exit 2; }
+    if ((confirmed && per_ch_ua >= CH_UA_HARD_MAX)); then
+      echo "sl7-ir-emitter-test: --confirmed covers 12.5, 25 and 50 mA per channel only; 100 mA needs the typed phrases" >&2
+      exit 2
+    fi
     nch=$IR_NCH
     ledid=$IR_LED_ID
   else
     [[ $channel =~ ^[1-4]$ ]] || { echo "sl7-ir-emitter-test: --led ir or --channel N (1..4) is required" >&2; usage; }
     [[ -z $max_ma_arg ]] || { echo "sl7-ir-emitter-test: max_ma_per_channel= needs --led ir (--channel is always 12.5 mA)" >&2; usage; }
+    ((!confirmed)) || { echo "sl7-ir-emitter-test: --confirmed needs --led ir (--channel keeps the typed phrase)" >&2; exit 2; }
     per_ch_ua=$CH_UA_BASE
     step_label=12.5
     nch=1
@@ -342,9 +499,17 @@ else
   [[ $repeat =~ ^[1-9][0-9]*$ ]] && ((repeat <= MAX_REPEAT)) || { echo "sl7-ir-emitter-test: --repeat must be 1..$MAX_REPEAT" >&2; usage; }
 fi
 
+# Everything from here on is also written to /var/tmp/sl7-ir-<time>.txt.
+vlog=$R/var/tmp/sl7-ir-$(date +%Y%m%dT%H%M%S).txt
+if mkdir -p "${vlog%/*}" 2>/dev/null && (umask 022; : >"$vlog") 2>/dev/null; then
+  exec > >(tee -a "$vlog") 2>&1
+  tee_pid=$!
+  echo "sl7-ir-emitter-test: output also goes to ${vlog#"$R"}"
+fi
+
 # ---- gate 1: Stage B approval (the Stage A refusal) -------------------------
-# --watch-only-test fires nothing, so it does not need the approval.
-if ((!watch_only)); then
+# --watch-only-test and --remove-snapshot fire nothing: no approval needed.
+if ((!watch_only && !remove_snap)); then
   if [[ ! -e $approval && ! -L $approval ]]; then
     die 3 "Stage B is not approved: $approval does not exist. Only the owner creates it, by hand, after reading the plan. Nothing was touched."
   fi
@@ -363,6 +528,26 @@ cmdline_has 'sl7[.]ir_test=1' || die 4 "not the IR test boot entry: sl7.ir_test=
 cmdline_has 'panic=5' || die 4 "panic=5 is not on the kernel command line (the IR test entry sets it)"
 [[ -r $modparam && $(rd "$modparam") == Y ]] || die 4 "leds_qcom_flash is not loaded with ir_test=Y"
 
+
+# ---- --remove-snapshot: unload, read the all-off snapshot, load back --------
+if ((remove_snap)); then
+  since=$(date '+%Y-%m-%d %H:%M:%S')
+  log "START remove-snapshot: modprobe -r leds_qcom_flash (remove switches every channel off), then back"
+  modprobe -r leds_qcom_flash || die 4 "modprobe -r leds_qcom_flash failed (module in use?)"
+  sleep 1
+  snap=$(journalctl -k --since "$since" --no-pager -o cat 2>/dev/null | grep -F "remove, after all-off" || true)
+  if [[ -z $snap ]]; then
+    snap=$(dmesg 2>/dev/null | grep -F "remove, after all-off" | tail -n 60 || true)
+    log "NOTE the journal had no remove snapshot since $since, showing the dmesg tail (may include an older removal)"
+  fi
+  echo "---- kernel log: remove, after all-off ----"
+  printf '%s\n' "${snap:-(no snapshot lines found)}"
+  echo "---- end ----"
+  modprobe leds_qcom_flash || log "WARN modprobe leds_qcom_flash (load back) failed: reboot to restore the IR LED"
+  sleep 1
+  log "DONE remove-snapshot: module loaded back, ir_test=$(rd "$modparam")"
+  exit 0
+fi
 
 check_fault() { # WHEN
   local f t bad=""
@@ -656,7 +841,7 @@ if ((watch_only)); then
 fi
 
 # ---- confirmation -----------------------------------------------------------
-if ((!fake)) && [[ ! -t 0 || ! -t 1 ]]; then
+if ((!fake && !have_tty)); then
   die 7 "an interactive terminal is required for the confirmation"
 fi
 # Total current in tenths of mA (12.5 mA = 125) and the charge of one pulse in
@@ -707,13 +892,18 @@ if ((watch)); then
 EOF
 fi
 log "START led=$ledname per_channel_ua=$per_ch_ua total_ua=$fire_ua repeat=$repeat user=${SUDO_USER:-$(id -un)} kernel=$(uname -r) cmdline='$(rd "$cmdline")'"
-if [[ -n $led_kind ]]; then want="FIRE IR ${step_label}MA"; else want="FIRE CHANNEL $channel"; fi
-printf 'Type "%s" to fire, anything else aborts: ' "$want"
-answer=
-read -r -t 180 answer || answer=
-echo
-[[ $answer == "$want" ]] || die 7 "not confirmed (typed '$answer')"
-log "CONFIRMED by typed phrase"
+if ((confirmed)); then
+  # sl7-ir-lab asked first with a confirm button (12.5, 25 and 50 mA per channel only).
+  log "CONFIRMED by the sl7-ir-lab confirm button"
+else
+  if [[ -n $led_kind ]]; then want="FIRE IR ${step_label}MA"; else want="FIRE CHANNEL $channel"; fi
+  printf 'Type "%s" to fire, anything else aborts: ' "$want"
+  answer=
+  read -r -t 180 answer || answer=
+  echo
+  [[ $answer == "$want" ]] || die 7 "not confirmed (typed '$answer')"
+  log "CONFIRMED by typed phrase"
+fi
 if ((per_ch_ua >= CH_UA_HARD_MAX)); then
   want2="ACCEPT 100 MA PER CHANNEL"
   echo "100 mA per channel is the driver's hard cap: 200 mA total, $pulse_uc uC per pulse, more charge than Windows per lit frame."
@@ -732,6 +922,13 @@ if [[ -n $led_kind ]]; then
 fi
 
 # ---- fire -------------------------------------------------------------------
+find_regmap
+if [[ -n $led_kind && $expo_opt == on ]]; then expo_manual_on; fi
+if ((pulse_delay > 0)); then
+  # After the confirmation and every gate: only gives a caller (sl7-ir-lab) time to start its capture.
+  log "WAIT ${pulse_delay} s before the first pulse (--pulse-delay)"
+  sleep "$pulse_delay"
+fi
 fire_ts=()
 if ((watch)); then
   # lead + (gaps of ~1.2 s + one pulse of ~0.3 s + the tail) at 40 fps (above the bridge's 35)
@@ -749,13 +946,18 @@ while ((i < repeat)); do
   wr "$led/flash_timeout" "$FIRE_TIMEOUT_US"
   rdback "$led/flash_timeout" "$FIRE_TIMEOUT_US"
   check_fault "armed"
+  regdump "idle, armed values written, before strobe"
   pulses=$((pulses + 1))
   printf '%s\n' "$pulses" >"$rundir/pulses" || die 6 "cannot record the pulse count in $rundir/pulses"
   log "FIRE $ledname $fire_ua uA (count this boot: $pulses)"
   if ((watch)); then read -r fire_now _ </proc/uptime; fire_ts+=("$fire_now"); fi
   wr "$led/flash_strobe" 1
   sleep "$POST_STROBE_WAIT_S"
+  # Still strobed: fault and registers BEFORE the strobe is switched off.
+  log "READ  $ledname/flash_fault (strobe still set, before disarm) = '$(rd "$led/flash_fault")'"
+  regdump "strobe still set, before flash_strobe=0"
   wr "$led/flash_strobe" 0
+  regdump "after flash_strobe=0"
   if ((watch)); then log "FIRE_T pulse $i/$repeat t_boottime=${fire_now} (capture start t_boottime=$t_launch, lead ready t_boottime=$t_ready)"; fi
   check_fault "after"
 done

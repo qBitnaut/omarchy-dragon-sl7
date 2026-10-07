@@ -1,0 +1,359 @@
+#!/bin/bash
+# sl7-ir-lab: a live view of the Surface Laptop 7 IR camera and a terminal menu
+# to fire the IR emitter test pulses (12.5, 25, 50 mA per channel) and see what
+# the camera saw. Run it as your normal user, in a terminal on the Omarchy
+# desktop, on the "linux-sl7 (IR test)" boot entry:
+#
+#     sl7-ir-lab
+#
+# It is a front end for sl7-ir-emitter-test: every pulse button asks for
+# confirmation with a confirm button, then runs `sudo sl7-ir-emitter-test
+# --i-have-read-the-plan --led ir max_ma_per_channel=NN --pulse-delay 3
+# --confirmed` in this terminal. The confirm button replaces the typed phrase;
+# the approval file, the IR test boot check, the per-boot pulse limit, the
+# hardware timer and the ir_max_ua cap all apply as on the command line. There
+# is no 100 mA button.
+#
+# The live view is mpv, fed from the bridge loopback (/dev/v4l/by-id/
+# sl7-ir-camera) through a restarting capture, because the bridge ends a
+# streaming session after 10 s. It is closed for each pulse and snapshot (one
+# reader at a time keeps the bridge session and the capture clean) and comes
+# back afterwards.
+#
+# Around a pulse the lab captures about 5 s of frames (the emitter test waits
+# 3 s after your confirmation before it fires), then computes the mean and
+# maximum of every frame, compares the brightest frame with a baseline, saves
+# PNGs and the per-frame CSV in ~/sl7-ir-lab/<timestamp>/ (brightest.png,
+# baseline.png, side-by-side.png), opens the side-by-side in imv (or the
+# default image viewer), and prints the instrumentation lines (REGDUMP) of the
+# emitter-test log and the kernel's strobe snapshot lines.
+set -uo pipefail
+
+readonly CAM=/dev/v4l/by-id/sl7-ir-camera
+readonly CAM_W=644
+readonly CAM_H=604
+readonly CAP_FRAMES=190
+readonly CAP_TIMEOUT_S=9
+readonly SYNC_DELAY_S=3
+readonly OUTROOT=${SL7_IR_LAB_DIR:-$HOME/sl7-ir-lab}
+readonly TOOL=sl7-ir-emitter-test
+
+view_pid=
+view_dir=
+cap_pid=
+work=
+
+die() {
+  echo "sl7-ir-lab: $*" >&2
+  exit 1
+}
+
+# Omarchy's gum colours, when Omarchy is present (as omarchy-sl7-faceunlock does).
+if command -v omarchy-restart-gum >/dev/null 2>&1; then
+  # shellcheck disable=SC1091,SC1090
+  source "$(command -v omarchy-restart-gum)" || true
+fi
+
+style() { gum style --foreground "${SL7_ACCENT:-2}" --bold "$@" 2>/dev/null || printf '%s\n' "$*"; }
+faint() { gum style --faint "$@" 2>/dev/null || printf '%s\n' "$*"; }
+
+stop_view() {
+  if [[ -n $view_pid ]]; then
+    kill -TERM -- "-$view_pid" 2>/dev/null || true
+    wait "$view_pid" 2>/dev/null || true
+    view_pid=
+  fi
+  if [[ -n $view_dir ]]; then
+    rm -rf -- "$view_dir"
+    view_dir=
+  fi
+}
+
+stop_capture() {
+  if [[ -n $cap_pid ]] && kill -0 "$cap_pid" 2>/dev/null; then
+    kill "$cap_pid" 2>/dev/null || true
+    wait "$cap_pid" 2>/dev/null || true
+  fi
+  cap_pid=
+}
+
+cleanup() {
+  stop_capture
+  stop_view
+  [[ -n $work ]] && rm -rf -- "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+start_view() {
+  stop_view
+  view_dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/sl7-ir-lab.XXXXXX") || return 0
+  mkfifo "$view_dir/frames" || return 0
+  # One mpv, one persistent writer on the fifo, and a capture loop that restarts
+  # after the bridge ends a session. The loop stops when mpv is gone.
+  # shellcheck disable=SC2016
+  setsid bash -c '
+    cam=$1 fifo=$2 w=$3 h=$4
+    mpv --no-config --profile=low-latency --untimed --cache=no --title=sl7-ir-lab \
+      --demuxer=rawvideo --demuxer-rawvideo-w="$w" --demuxer-rawvideo-h="$h" \
+      --demuxer-rawvideo-mp-format=gray --demuxer-rawvideo-fps=35 "$fifo" >/dev/null 2>&1 &
+    mpv=$!
+    exec 7>"$fifo"
+    while kill -0 "$mpv" 2>/dev/null; do
+      v4l2-ctl -d "$cam" --stream-mmap --stream-to=- >&7 2>/dev/null
+      sleep 0.3
+    done
+  ' sl7-ir-lab-view "$CAM" "$view_dir/frames" "$CAM_W" "$CAM_H" >/dev/null 2>&1 &
+  view_pid=$!
+}
+
+pulses_this_boot() {
+  local n
+  n=$(sudo -n cat /run/sl7-ir-emitter-test/pulses 2>/dev/null | tr -d '[:space:]')
+  [[ $n =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+
+# Frame statistics and PNGs. Arguments: capture file, output directory.
+read -r -d '' ANALYSE_PY <<'PYEOF' || true
+import struct
+import sys
+import zlib
+
+W, H = int(sys.argv[1]), int(sys.argv[2])
+cap, outdir = sys.argv[3], sys.argv[4]
+fsz = W * H
+K = 5.0
+FLOOR = 0.02
+
+
+def med(v):
+    s = sorted(v)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def png(path, w, h, rows):
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    raw = b"".join(b"\0" + r for r in rows)
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n")
+        fh.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)))
+        fh.write(chunk(b"IDAT", zlib.compress(raw, 6)))
+        fh.write(chunk(b"IEND", b""))
+
+
+frames = []
+with open(cap, "rb") as f:
+    while True:
+        b = f.read(fsz)
+        if len(b) < fsz:
+            break
+        frames.append(b)
+n = len(frames)
+if n < 20:
+    print("ERROR only %d whole frames captured" % n)
+    sys.exit(2)
+means = [sum(b) / fsz for b in frames]
+maxs = [max(b) for b in frames]
+use = list(range(1, n))  # frame 0 is the bridge's black frame
+m = med([means[k] for k in use])
+sd = max(1.4826 * med([abs(means[k] - m) for k in use]), FLOOR)
+pk = max(use, key=lambda k: means[k])
+if pk >= 8:
+    bk = pk - 5
+else:
+    bk = min(use, key=lambda k: abs(means[k] - m))
+with open(outdir + "/frames.csv", "w") as fh:
+    fh.write("frame,mean,max\n")
+    for k in range(n):
+        fh.write("%d,%.3f,%d\n" % (k, means[k], maxs[k]))
+
+
+def rows(b):
+    return [b[r * W:(r + 1) * W] for r in range(H)]
+
+
+rb, rp = rows(frames[bk]), rows(frames[pk])
+png(outdir + "/baseline.png", W, H, rb)
+png(outdir + "/brightest.png", W, H, rp)
+png(outdir + "/side-by-side.png", 2 * W, H, [a + b for a, b in zip(rb, rp)])
+z = (means[pk] - m) / sd
+print("frames captured: %d (frame 0 skipped), median frame mean %.2f (robust sd %.3f)" % (n, m, sd))
+print("baseline frame %d: mean %.2f, max %d" % (bk, means[bk], maxs[bk]))
+print("brightest frame %d: mean %.2f, max %d" % (pk, means[pk], maxs[pk]))
+print("peak minus baseline: mean %+.2f (%.1f sd), max %+d" % (
+    means[pk] - means[bk], z, maxs[pk] - maxs[bk]))
+print("VERDICT: %s" % ("SPIKE (peak frame is more than %.0f sd above the median)" % K
+                       if z > K else "no spike above %.0f sd" % K))
+PYEOF
+
+latest_log() { # newest emitter-test run log, only if newer than $1 (a marker file)
+  local f newest=
+  for f in /var/tmp/sl7-ir-*.txt; do
+    [[ -e $f ]] || continue
+    [[ -z $newest || $f > $newest ]] && newest=$f # names carry the timestamp
+  done
+  [[ -n $newest && $newest -nt $1 ]] || return 1
+  printf '%s' "$newest"
+}
+
+# Starts the capture once the tool logged the confirmation: the tool then
+# waits SYNC_DELAY_S before the pulse.
+capture_watcher() { # MARKER OUTFILE
+  local marker=$1 out=$2 log i
+  for ((i = 0; i < 3000; i++)); do # up to 5 minutes at 0.1 s
+    log=$(latest_log "$marker") && grep -q "CONFIRMED by" "$log" 2>/dev/null && break
+    log=
+    sleep 0.1
+  done
+  [[ -n $log ]] || exit 0
+  timeout -k 1 "$CAP_TIMEOUT_S" v4l2-ctl -d "$CAM" --stream-mmap --stream-count="$CAP_FRAMES" \
+    --stream-to="$out" >/dev/null 2>&1
+}
+
+pulse() { # MA
+  local ma=$1 ts outdir marker log rc
+  gum confirm "Fire IR pulse at $ma mA per channel?" --affirmative "Fire" --negative "Cancel" || return 0
+  ts=$(date +%Y%m%dT%H%M%S)
+  outdir=$OUTROOT/$ts
+  mkdir -p "$outdir" || { echo "cannot create $outdir"; return 0; }
+  stop_view
+  marker=$work/marker-$ts
+  : >"$marker"
+  sleep 1
+  capture_watcher "$marker" "$work/cap.raw" &
+  cap_pid=$!
+  echo
+  faint "The pulse fires about $SYNC_DELAY_S s after the emitter test starts."
+  sudo "$TOOL" --i-have-read-the-plan --led ir "max_ma_per_channel=$ma" --pulse-delay "$SYNC_DELAY_S" --confirmed
+  rc=$?
+  if ((rc != 0)); then
+    stop_capture
+    echo
+    style "The emitter test ended with exit code $rc: no pulse was analysed."
+    rm -f "$work/cap.raw"
+    return 0
+  fi
+  wait "$cap_pid" 2>/dev/null
+  cap_pid=
+  echo
+  style "Analysing the capture"
+  if [[ -s $work/cap.raw ]] && python3 -c "$ANALYSE_PY" "$CAM_W" "$CAM_H" "$work/cap.raw" "$outdir"; then
+    echo "Saved in $outdir (side-by-side.png, brightest.png, baseline.png, frames.csv)"
+    if command -v imv >/dev/null 2>&1; then
+      imv "$outdir/side-by-side.png" >/dev/null 2>&1 &
+      disown 2>/dev/null || true
+    elif command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$outdir/side-by-side.png" >/dev/null 2>&1 &
+      disown 2>/dev/null || true
+    fi
+  else
+    echo "No usable capture (is the bridge streaming? journalctl -u sl7-ir-bridge)."
+  fi
+  rm -f "$work/cap.raw"
+  log=$(latest_log "$marker") || log=
+  if [[ -n $log ]]; then
+    echo
+    style "Instrumentation (emitter-test log ${log})"
+    grep -E "REGDUMP|REGMAP|EXPOSURE|FIRE |flash_fault|PULSE" "$log" || true
+    echo
+    style "Kernel strobe snapshots"
+    { sudo -n journalctl -k --since "-2min" --no-pager -o cat 2>/dev/null || journalctl -k --since "-2min" --no-pager -o cat 2>/dev/null; } |
+      grep -F "SL7 IR strobe snapshot" || echo "(none readable: linux-sl7 7.2.8-20 or later logs them, 'sudo journalctl -k' shows them)"
+  fi
+  return 0
+}
+
+snapshot() {
+  local ts outdir
+  ts=$(date +%Y%m%dT%H%M%S)
+  outdir=$OUTROOT/$ts
+  mkdir -p "$outdir" || return 0
+  stop_view
+  if timeout -k 1 "$CAP_TIMEOUT_S" v4l2-ctl -d "$CAM" --stream-mmap --stream-count=12 --stream-to="$work/snap.raw" >/dev/null 2>&1 &&
+    python3 - "$CAM_W" "$CAM_H" "$work/snap.raw" "$outdir/snapshot.png" <<'PYEOF'
+import struct
+import sys
+import zlib
+
+w, h = int(sys.argv[1]), int(sys.argv[2])
+fsz = w * h
+data = open(sys.argv[3], "rb").read()
+n = len(data) // fsz
+if n < 2:
+    sys.exit(1)
+b = data[(n - 1) * fsz:n * fsz]
+
+
+def chunk(tag, d):
+    c = struct.pack(">I", len(d)) + tag + d
+    return c + struct.pack(">I", zlib.crc32(tag + d) & 0xFFFFFFFF)
+
+
+raw = b"".join(b"\0" + b[r * w:(r + 1) * w] for r in range(h))
+with open(sys.argv[4], "wb") as fh:
+    fh.write(b"\x89PNG\r\n\x1a\n")
+    fh.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)))
+    fh.write(chunk(b"IDAT", zlib.compress(raw, 6)))
+    fh.write(chunk(b"IEND", b""))
+PYEOF
+  then
+    echo "Saved $outdir/snapshot.png"
+  else
+    echo "Snapshot failed (is the bridge streaming? journalctl -u sl7-ir-bridge)."
+  fi
+  rm -f "$work/snap.raw"
+}
+
+pause() {
+  read -r -p "Enter to continue " _ || true
+}
+
+main() {
+  local c
+  [[ $EUID -ne 0 ]] || die "run as your normal user (it uses sudo for the emitter test)"
+  [[ -t 0 && -t 1 ]] || die "an interactive terminal is required"
+  for c in gum mpv v4l2-ctl python3 sudo; do
+    command -v "$c" >/dev/null 2>&1 || die "$c is required (pacman -S $c; v4l2-ctl is in v4l-utils)"
+  done
+  command -v "$TOOL" >/dev/null 2>&1 || die "$TOOL is not installed (omarchy-surface-sl7)"
+  work=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/sl7-ir-lab-work.XXXXXX") || die "cannot create a work directory"
+  if ! systemctl is-active --quiet sl7-ir-bridge.service; then
+    echo "sl7-ir-bridge.service is not active, starting it"
+    sudo systemctl start sl7-ir-bridge.service || die "cannot start sl7-ir-bridge.service"
+    sleep 1
+  fi
+  [[ -c $CAM ]] || die "$CAM does not exist (is v4l2loopback loaded and the bridge running?)"
+  sudo -v || die "sudo is needed for the emitter test"
+  start_view
+  while :; do
+    local hdr choice
+    hdr=$(printf 'IR lab   pulses fired this boot: %s of 12   (every gate of %s applies)' "$(pulses_this_boot)" "$TOOL")
+    [[ -n $view_pid ]] && ! kill -0 "$view_pid" 2>/dev/null && view_pid=
+    [[ -n $view_pid ]] || start_view
+    choice=$(gum choose --header "$hdr" --height 10 \
+      "Pulse 12.5 mA per channel" "Pulse 25 mA per channel" "Pulse 50 mA per channel" \
+      "Status" "Snapshot" "Quit") || break
+    case $choice in
+      "Pulse 12.5"*) pulse 12.5; pause ;;
+      "Pulse 25"*) pulse 25; pause ;;
+      "Pulse 50"*) pulse 50; pause ;;
+      Status)
+        "$TOOL" --status
+        pause
+        ;;
+      Snapshot)
+        snapshot
+        pause
+        ;;
+      Quit) break ;;
+    esac
+    start_view
+  done
+}
+
+main "$@"

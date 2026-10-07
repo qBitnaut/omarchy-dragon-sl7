@@ -729,6 +729,22 @@ writes `ir_max_ua` (read back), then per pulse `flash_brightness` = 2 x the per-
 The approval file, IR test boot, 3 pulses per run, 12 per boot and fault checks are unchanged.
 `--channel N` remains for kernels that still have the discovery LEDs (7.2.8-18 or earlier).
 
+**Instrumentation and the IR lab (omarchy-surface-sl7 37, with linux-sl7 7.2.8-20).** The tool
+now copies everything it prints to `/var/tmp/sl7-ir-<time>.txt`, dumps the flash registers
+through regmap debugfs before arming, while the strobe is set (with `flash_fault`, before
+`flash_strobe=0`) and after the disarm, and for `--led ir` sets the IR sensor to manual exposure
+at its maximum for the run so a 10 ms pulse cannot miss a frame (`--no-manual-exposure` skips
+it). `sudo sl7-ir-emitter-test --remove-snapshot` fires nothing: it unloads leds_qcom_flash,
+prints the kernel's "remove, after all-off" register snapshot and loads it back.
+
+`sl7-ir-lab` (as your user, on the IR test boot) shows the live IR camera in mpv and a gum menu:
+Pulse 12.5 / 25 / 50 mA per channel, Status, Snapshot, Quit. Each pulse asks with a confirm
+button, then runs the emitter test with `--confirmed`, which replaces the typed phrase for
+`--led ir` at 12.5, 25 and 50 mA per channel only (100 mA and `--channel` refuse it; every other
+gate stays). The lab captures about 5 s around the pulse, saves `baseline.png`, `brightest.png`,
+`side-by-side.png` and `frames.csv` under `~/sl7-ir-lab/<timestamp>/`, opens the side-by-side
+and prints the register lines. Needs gum, mpv, v4l-utils and python3; imv is optional.
+
 **IR stage A safety fix (omarchy-surface-sl7 26, with linux-sl7 7.2.8-14).** The PMIC safety timer
 very likely counts (n + 1) x 10 ms while the stock driver writes n = timeout / 10, so a requested
 10 ms would have run about 20 ms. Patch 0080 now programs n - 1 for IR LEDs, so the hardware pulse
