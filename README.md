@@ -190,6 +190,22 @@ About **2.9 W** at 30% brightness with the browser closed, on battery, measured 
 20 minutes with the battery gauge. An earlier bug in the measuring tool overstated
 the savings; these are the corrected numbers.
 
+### Awake, against Windows 11 (preliminary)
+
+Same-spec Surface Laptop 7 13.8" (X1P-64-100) pair, on battery, 50% brightness locked,
+30 minute idle desktop, average discharge power. **Preliminary: to be re-run and updated
+after the 2026-10-07 run.**
+
+| Bench | Windows 11 | Linux (7.2.8-15) |
+|---|---|---|
+| v1 (first scripts; Linux gauge in whole percent steps) | 3.19 W | 3.27 W |
+| v2 (fixed scripts, `power_now` integrated on Linux) | 3.08 W | **2.95 W** (about 4% lower) |
+
+The Linux v2 run predates the DPU per-mixer clock fix (7.2.8-16) and the Wi-Fi power-save
+fix (`omarchy-surface-sl7` 32), so a re-run with both is pending. Windows had its background
+services (search indexer and similar) active. One run per cell, so treat differences of a
+few percent as indicative only.
+
 ### Suspend
 
 Deep suspend, 8 to 10 minute traces with `sl7-sleepstats --trace`:
