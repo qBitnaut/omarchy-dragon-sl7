@@ -816,8 +816,8 @@ sd_find() {
   return 1
 }
 
-sd_ctl_get() { # NAME
-  v4l2-ctl -d "$sd_dev" --get-ctrl "$1" 2>/dev/null | sed -n 's/^[^:]*: *//p' | head -n1
+sd_ctl_get() { # NAME: the value only (menu controls print "1 (Manual Mode)")
+  v4l2-ctl -d "$sd_dev" --get-ctrl "$1" 2>/dev/null | sed -n 's/^[^:]*: *\([^ ]*\).*/\1/p' | head -n1
 }
 
 sd_ctl_set() { # NAME VALUE: set, read back, abort when the read back differs
@@ -1454,7 +1454,7 @@ print_status() {
       "flash_brightness=$(rd "$d/flash_brightness") flash_timeout=$(rd "$d/flash_timeout")" \
       "flash_strobe=$(rd "$d/flash_strobe") flash_fault='$(rd "$d/flash_fault")'"
   done
-  echo "ir:flash-* LEDs: $n (expected 1, ir:flash-14, on the IR test entry of linux-sl7 7.2.8-19 or later; 4 on 7.2.8-18 or earlier; 0 otherwise)"
+  echo "ir:flash-* LEDs: $n (expected 2, ir:flash-14 and ir:flash-23, on the IR test entry of linux-sl7 7.2.8-21 or later; 1 on 7.2.8-19 and -20; 4 on 7.2.8-18 or earlier; 0 otherwise)"
   if [[ -r $rundir/pulses ]]; then echo "pulses fired this boot: $(rd "$rundir/pulses") (limit $MAX_PULSES_PER_BOOT, $STAGE_MAX_PULSES_PER_BOOT for --stage runs)"; fi
   if [[ -r $illumparam ]]; then
     echo "vd55g illuminator: $(rd "$illumparam") (Y on the IR test boot: GPIO 1 strobe and led_mode honoured)"
