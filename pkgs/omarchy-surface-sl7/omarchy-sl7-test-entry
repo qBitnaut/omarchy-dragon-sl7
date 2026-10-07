@@ -62,7 +62,7 @@ export tag_new tag_old
 
 usage() {
   echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME] | cleanup [--legacy]" >&2
-  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL)" >&2
+  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL), usbc-flip (ps883x.fixed_phy_orientation=1, USB-C reverse-plug test)" >&2
   exit 2
 }
 
@@ -71,6 +71,7 @@ preset_params() {
     psr) echo "msm.psr_enabled=1" ;;
     ir-test) echo "sl7.ir_test=1 panic=5" ;;
     clk-unused) echo "-clk_ignore_unused -pd_ignore_unused clk_unused_defer" ;;
+    usbc-flip) echo "ps883x.fixed_phy_orientation=1" ;;
   esac
 }
 
@@ -79,6 +80,7 @@ preset_note() {
     psr) echo "KNOWN BROKEN: the panel turns off when idle and returns only when something paints" ;;
     ir-test) echo "IR EMITTER TEST BOOT: the PM8550 IR flash LEDs exist on this boot only; nothing fires by itself (README 11c)" ;;
     clk-unused) echo "EXPERIMENTAL: no clk_ignore_unused/pd_ignore_unused, unused clocks and domains disabled 30 s after boot; a boot may freeze (1 in 5 on the Dell without the deferral): choose the normal entry" ;;
+    usbc-flip) echo "TEST: the retimer does the Type-C flip and the QMP PHY stays normal, for USB3 on a reverse plug; DisplayPort alt mode in reverse is unvalidated" ;;
   esac
 }
 
@@ -364,7 +366,7 @@ case $cmd in
       exit 2
     fi
     [[ -n $params ]] || params=$(preset_params "$name")
-    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, ir-test, clk-unused); give PARAMS" >&2; exit 2; }
+    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, ir-test, clk-unused, usbc-flip); give PARAMS" >&2; exit 2; }
     [[ $params =~ ^[A-Za-z0-9._=:,/+-]+( [A-Za-z0-9._=:,/+-]+)*$ ]] || { echo "omarchy-sl7-test-entry: unsafe characters in PARAMS" >&2; exit 2; }
     mkdir -p "$state_dir"
     sf="${state_dir:?}/${name:?}"
@@ -392,7 +394,7 @@ case $cmd in
     if [[ $name == ir-test ]]; then ir_approval_note; fi
     ;;
   list)
-    for p in psr ir-test clk-unused; do
+    for p in psr ir-test clk-unused usbc-flip; do
       if is_enabled "$p"; then s=enabled; else s=disabled; fi
       printf '%-10s %-8s %s  [%s]\n' "$p" "$s" "$(preset_params "$p")" "$(preset_note "$p")"
     done
@@ -429,6 +431,7 @@ case $cmd in
       status_one psr "$(preset_params psr)"
       status_one ir-test "$(preset_params ir-test)"
       status_one clk-unused "$(preset_params clk-unused)"
+      status_one usbc-flip "$(preset_params usbc-flip)"
       while IFS=$'\t' read -r name params; do
         [[ -n $name && -z $(preset_params "$name") ]] && status_one "$name" "$params"
       done < <(enabled_entries)

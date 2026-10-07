@@ -76,6 +76,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0086 | SL7 local: romulus (13.8 and 15 inch) enables `&iris` with the Microsoft signed `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn` (V4L2 stateful decoder and encoder) | ours; firmware from the SL7 MSI via `omarchy-surface-sl7-firmware` | not submitted (needs signed firmware in linux-firmware) |
 | 0087-0088 | clk and genpd: defer disabling of unused clocks and power domains by 30 s, **only with `clk_unused_defer` on the command line** (used by `omarchy-sl7-test-entry enable clk-unused`) | jhovold/linux `1e3e4a97ba7e`, `b3f09e07cfbb` (Johan Hovold, Sep 2024) plus our opt-in gate | not mainline; Hovold's WIP, drop when mainline has an equivalent |
 | 0089 | SL7 local: drm/msm/dpu computes the core clock per layer mixer when the CRTC uses several mixers (3D merge): mode clock divided by the mixer count, planes wider than a mixer split in two pipes, plane clocks read from the checked state | ours; companion of `f5d079564c44` (Jessica Zhang, mode filter only) | not submitted (discuss with Dmitry Baryshkov and Jessica Zhang first) |
+| 0090 | SL7 local: ps883x module parameter `fixed_phy_orientation` (off by default): the downstream QMP PHY is always told TYPEC_ORIENTATION_NORMAL while the retimer state and REG0 ORIENTATION_REVERSED bit follow the real plug | ours | not submitted (SL7 test, pending hardware results) |
 
 Notes on the DT patches:
 
@@ -632,6 +633,24 @@ once measured). The probe and remove register snapshots now name every register 
 
 Nothing fires the emitter. Requires omarchy-surface-sl7 22 or later for the load gate. Plan:
 `Research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md`.
+
+## USB-C reverse plug (7.2.8-17): fixed PHY orientation test
+
+Patch 0090. On the SL7 USB3 SuperSpeed fails to train whenever the plug is reverse, on both USB-C
+ports (Polling to Inactive warm-reset loop, no high speed fallback); normal orientation works.
+Flipping only the retimer bit (REG0 0x21 with the QMP PHY reversed) fails too, and 0070 is cleared:
+the failure follows orientation, not the XO change. Hypothesis: the Microsoft firmware on the PS8830
+retimer performs the flip itself, so the QMP combo PHY must stay normal.
+
+`ps883x.fixed_phy_orientation=1` makes `ps883x_sw_set()` forward TYPEC_ORIENTATION_NORMAL to the
+QMP PHY whenever the orientation is not NONE; the retimer's own state and the REG0 bit still follow
+the plug. Default off, behaviour unchanged. Enable with
+`sudo omarchy-sl7-test-entry enable usbc-flip` (omarchy-surface-sl7 33 or later) and boot the
+"linux-sl7 (USBC-FLIP test)" entry, then replug in both orientations.
+
+Caveat: DisplayPort alt mode in reverse orientation is not validated; the DP lanes may need the PHY
+to follow the plug. Do not make this the default before testing DP on a reverse plug. Not run on
+hardware by the author.
 
 ## Not in v0
 

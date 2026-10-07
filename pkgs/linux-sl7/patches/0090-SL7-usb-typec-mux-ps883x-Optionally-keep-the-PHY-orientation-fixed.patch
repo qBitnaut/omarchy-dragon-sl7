@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 15:00:00 -0500
+Subject: [PATCH] SL7: usb: typec: mux: ps883x: Optionally keep the PHY orientation fixed
+
+SL7: usb: typec: mux: ps883x: Optionally keep the PHY orientation fixed
+
+On the Surface Laptop 7, USB3 SuperSpeed fails to train whenever the
+plug is reversed, on both USB-C ports: the link goes Polling to Inactive
+in a warm-reset loop and never falls back to high speed. Normal
+orientation works. Flipping only the retimer bit (REG0 0x21 with the
+QMP combo PHY reversed) fails as well, and the XO change in 0070 is
+cleared as the cause.
+
+Hypothesis: the Microsoft firmware on the PS8830 retimer already
+performs the Type-C flip, so the QMP PHY has to stay in normal
+orientation whatever the plug does.
+
+Add the module parameter fixed_phy_orientation (off by default, so the
+behaviour is unchanged). When it is set and the orientation is not
+TYPEC_ORIENTATION_NONE, ps883x_sw_set() forwards
+TYPEC_ORIENTATION_NORMAL to the downstream switch (the QMP combo PHY).
+The retimer's own orientation state and the ORIENTATION_REVERSED bit in
+REG0 still follow the real plug.
+
+Enable with ps883x.fixed_phy_orientation=1 on the kernel command line
+(omarchy-sl7-test-entry enable usbc-flip).
+
+Test only. DisplayPort alt mode in reverse orientation must be validated
+before this can become the default: the DP lanes may need the PHY to
+follow the plug.
+
+Rationale: SL7 local, hardware evidence from 2026-10-06 replug captures.
+
+Origin: ours
+Upstream-Status: Not submitted. SL7 specific, pending hardware results.
+---
+diff --git a/drivers/usb/typec/mux/ps883x.c b/drivers/usb/typec/mux/ps883x.c
+--- a/drivers/usb/typec/mux/ps883x.c
++++ b/drivers/usb/typec/mux/ps883x.c
+@@ -349,13 +349,26 @@ static int ps883x_set(struct ps883x_retimer *retimer, struct typec_retimer_state
+ 	return ps883x_configure(retimer, cfg0, cfg1, cfg2, reset);
+ }
+ 
++/*
++ * SL7 test: on the Surface Laptop 7 USB3 SuperSpeed does not train when the
++ * plug is reversed, whether or not the QMP PHY follows the flip. Opt-in: keep
++ * the downstream PHY in normal orientation and let the retimer do the flip.
++ */
++static bool fixed_phy_orientation;
++module_param(fixed_phy_orientation, bool, 0444);
++MODULE_PARM_DESC(fixed_phy_orientation, "Retimer performs the Type-C flip; keep the downstream QMP PHY in normal orientation (SL7 test)");
++
+ static int ps883x_sw_set(struct typec_switch_dev *sw,
+ 			 enum typec_orientation orientation)
+ {
+ 	struct ps883x_retimer *retimer = typec_switch_get_drvdata(sw);
++	enum typec_orientation phy_orientation = orientation;
+ 	int ret = 0;
+ 
+-	ret = typec_switch_set(retimer->typec_switch, orientation);
++	if (fixed_phy_orientation && orientation != TYPEC_ORIENTATION_NONE)
++		phy_orientation = TYPEC_ORIENTATION_NORMAL;
++
++	ret = typec_switch_set(retimer->typec_switch, phy_orientation);
+ 	if (ret)
+ 		return ret;
+ 
