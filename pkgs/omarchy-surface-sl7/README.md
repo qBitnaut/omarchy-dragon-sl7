@@ -632,7 +632,8 @@ an unknown channel. This is the build-only part: **nothing in this package fires
 
 **What exists.** linux-sl7 patch 0080 (leds-qcom-flash IR safety) and 0081 (romulus13 DT) describe
 four IR LEDs, `ir:flash-1` to `ir:flash-4`, one per PM8550 flash channel, each limited to 12.5 mA
-flash and a 10 ms hardware timer, torch refused. They are in the DTB of every boot entry but can
+flash and a 10 ms hardware timer, torch refused (from linux-sl7 7.2.8-19 patches 0091 and 0092
+replace them by the ganged `ir:flash-14`, see the Stage B paragraph below). They are in the DTB of every boot entry but can
 bind only on the IR test boot entry.
 
 **The gate (two independent layers).**
@@ -671,8 +672,8 @@ order:
 
 1. **`/etc/omarchy-surface-sl7/ir-stage-b-approved` exists** (regular file, root-owned, not
    writable by group or others, not a symlink). No package ships it, nothing creates it and the
-   tool never removes it. Only Chris creates it by hand, after reading the plan:
-   `sudo mkdir -p /etc/omarchy-surface-sl7 && echo "approved by Chris $(date -I)" | sudo tee /etc/omarchy-surface-sl7/ir-stage-b-approved`
+   tool never removes it. Only the owner creates it by hand, after reading the plan:
+   `sudo mkdir -p /etc/omarchy-surface-sl7 && echo "approved by the owner $(date -I)" | sudo tee /etc/omarchy-surface-sl7/ir-stage-b-approved`
    and removes it when Stage B is done.
 2. It runs as root on the IR test entry (`sl7.ir_test=1` and `panic=5` on the command line,
    `leds_qcom_flash` loaded with `ir_test=Y`), with `ir:flash-N` present and every `ir:flash-*`
@@ -705,6 +706,28 @@ in the log and journal) are kept, and the raw capture is deleted on exit. `--wat
 captures with no pulses to check that the baseline is stable (`STABLE`/`UNSTABLE`); it touches no
 LED and needs no approval file, but still the root, IR test entry and bridge. Exit code 8 is a
 `--watch` problem (bridge, capture or analysis).
+
+**Stage B, ganged IR LED (omarchy-surface-sl7 36, with linux-sl7 7.2.8-19).** The 12.5 mA
+single-channel discovery test showed nothing. linux-sl7 patches 0091 and 0092 replace the four
+discovery LEDs by one LED, `ir:flash-14` (PM8550 flash channels 1 and 4 ganged, as the Windows
+driver does), and add the driver limit `ir_max_ua` (uA per channel, default 25000, run-time
+writable 12500 to 100000, hard cap 100 mA per channel in code). The tool gains `--led ir` and
+`max_ma_per_channel=`:
+
+```
+sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir --repeat 3 --watch
+sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir max_ma_per_channel=25 --repeat 3 --watch
+sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir max_ma_per_channel=50 --repeat 3 --watch
+```
+
+`max_ma_per_channel=` is 12.5 (default), 25 or 50; 100 is accepted and asks for a second phrase.
+Every run needs its own typed phrase after the checklist: `FIRE IR 12.5MA`, `FIRE IR 25MA`,
+`FIRE IR 50MA` (`FIRE IR 100MA`, then `ACCEPT 100 MA PER CHANNEL`). After the confirmation the tool
+writes `ir_max_ua` (read back), then per pulse `flash_brightness` = 2 x the per-channel current and
+`flash_timeout=10000` (read back), and it sets `ir_max_ua` back to 25000 on exit. The pulse stays
+10 ms: 25 / 50 / 100 / 200 mA total are 0.25 / 0.5 / 1.0 / 2.0 mC (Windows 1.11 mC per lit frame).
+The approval file, IR test boot, 3 pulses per run, 12 per boot and fault checks are unchanged.
+`--channel N` remains for kernels that still have the discovery LEDs (7.2.8-18 or earlier).
 
 **IR stage A safety fix (omarchy-surface-sl7 26, with linux-sl7 7.2.8-14).** The PMIC safety timer
 very likely counts (n + 1) x 10 ms while the stock driver writes n = timeout / 10, so a requested

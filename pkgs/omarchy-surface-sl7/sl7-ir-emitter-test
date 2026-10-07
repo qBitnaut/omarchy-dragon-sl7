@@ -1,13 +1,16 @@
 #!/bin/bash
 # sl7-ir-emitter-test: Stage B (measurement M2) of the SL7 IR emitter plan. It
-# fires ONE 12.5 mA x 10 ms pulse on ONE PM8550 flash channel through the LED
-# class sysfs, to find out which channel drives the IR illuminator.
+# fires short (10 ms) pulses through the LED class sysfs, either on the ganged
+# IR LED ir:flash-14 (PM8550 flash channels 1 and 4 together, --led ir, the
+# stage B path, linux-sl7 7.2.8-19 or later) or, on a kernel that still has the
+# four discovery LEDs (7.2.8-18 or earlier), one 12.5 mA pulse on ONE channel
+# (--channel N).
 #
 # DISABLED BY DEFAULT. It refuses to do anything until the file
 #
 #     /etc/omarchy-surface-sl7/ir-stage-b-approved
 #
-# exists. Nothing ships that file; only Chris creates it, by hand, after reading
+# exists. Nothing ships that file; only the owner creates it, by hand, after reading
 # research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md. This tool never creates or
 # removes it.
 #
@@ -15,8 +18,27 @@
 #       Read-only. Shows the gate state and the ir:flash-N LEDs. No approval
 #       needed, writes nothing.
 #
+#   sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir [max_ma_per_channel=MA] [--repeat R] [--watch]
+#       The ganged IR LED ir:flash-14 (channels 1 and 4, the current is split
+#       equally, so the LED current is twice MA). MA is the current per channel:
+#       12.5 (default), 25 or 50; 100 (the driver's hard cap) additionally asks
+#       a second confirmation. Besides everything listed for --channel below
+#       (approval file, IR test boot, root, terminal, R, pulse limits, fault
+#       check, --watch), it
+#         - types the phrase "FIRE IR <MA>MA" for every run (FIRE IR 12.5MA,
+#           FIRE IR 25MA, FIRE IR 50MA, FIRE IR 100MA); 100 mA also needs
+#           the second phrase "ACCEPT 100 MA PER CHANNEL"
+#         - sets the driver limit ir_max_ua (/sys/module/leds_qcom_flash/
+#           parameters/ir_max_ua, uA per channel) to MA after the confirmation,
+#           reads it back, and sets it back to 25000 on exit
+#         - writes flash_brightness = 2 x MA (uA) and flash_timeout = 10000 us
+#           per pulse, each read back; the driver refuses a larger current.
+#       One pulse is 10 ms: 25 / 50 / 100 / 200 mA total = 0.25 / 0.5 / 1.0 /
+#       2.0 mC (Windows: about 1.11 mC per lit frame, see below).
+#
 #   sudo sl7-ir-emitter-test --i-have-read-the-plan --channel N [--repeat R]
-#       N = 1..4 (ir:flash-N, led-sources = N). R = 1..3 pulses, 1 s apart
+#       Old kernels with the discovery LEDs only. N = 1..4 (ir:flash-N,
+#       led-sources = N), always 12.5 mA. R = 1..3 pulses, 1 s apart
 #       (default 1). Needs all of:
 #         - the approval file above (regular file, root-owned, not writable by
 #           group or others, not a symlink)
@@ -53,19 +75,24 @@
 #       no approval file and no typed phrase, but still needs root and the IR
 #       test boot entry, and the same bridge.
 #
-# The limits are constants in this file (12500 uA, 10000 us, at most 3 pulses
-# per run, at most 12 per boot); there is no option to raise them. The driver
-# clamps independently (patch 0080: 700 mA, 100 ms) and the DT limits are the
-# same 12.5 mA / 10 ms. Raising any of them is a later, reviewed step.
+# The limits are constants in this file (per channel 12500, 25000, 50000 or
+# 100000 uA as chosen above and never more, 10000 us, at most 3 pulses per run,
+# at most 12 per boot); there is no option to raise them. The driver clamps
+# independently (patch 0080: 700 mA total, 100 ms; patch 0091: ir_max_ua per
+# channel with a hard cap of 100 mA per channel) and the DT limit of the ganged
+# LED is 100 mA per channel / 10 ms. Raising any of them is a later, reviewed
+# step.
 #
 # Effective pulse and charge. The PMIC safety timer field very likely counts
 # (n + 1) x 10 ms, and the stock driver writes n = timeout / 10, so a stock
 # "10 ms" would run about 20 ms. Patch 0080 programs n = timeout / 10 - 1 for
 # IR LEDs, so the hardware pulse equals the requested 10 ms (if the field is
 # really n x 10 ms the pulse is only shorter). One pulse is therefore at most
-# 12.5 mA x 10 ms = 0.125 mC, about 11 % of Windows' 700 mA x 1.59 ms = 1.11 mC
-# per lit frame (the 1.8 % figure is the current only, not the charge). On a
-# kernel without the 0080 encoding fix the pulse would be about 20 ms, 0.25 mC.
+# 12.5 mA x 10 ms = 0.125 mC (one channel, discovery), about 11 % of Windows'
+# 700 mA x 1.59 ms = 1.11 mC per lit frame. At 100 mA per channel the ganged
+# LED draws 200 mA x 10 ms = 2.0 mC, about 1.8 times Windows' charge per frame
+# (at 29 % of its current, but 6 times as long). On a kernel without the 0080
+# encoding fix the pulse would be about 20 ms, twice the charge.
 #
 # Every action is logged to /var/log/sl7-ir-emitter-test.log and the journal
 # (tag sl7-ir-emitter-test), and echoed.
@@ -79,7 +106,11 @@
 # root, tty and ownership checks are relaxed. DIR / is refused.
 set -uo pipefail
 
-readonly FIRE_UA=12500
+readonly CH_UA_BASE=12500
+readonly CH_UA_HARD_MAX=100000
+readonly IR_LIMIT_DEFAULT_UA=25000
+readonly IR_NCH=2
+readonly IR_LED_ID=14
 readonly FIRE_TIMEOUT_US=10000
 readonly MAX_REPEAT=3
 readonly MAX_PULSES_PER_BOOT=12
@@ -114,6 +145,7 @@ fi
 cmdline=$R/proc/cmdline
 leds=$R/sys/class/leds
 modparam=$R/sys/module/leds_qcom_flash/parameters/ir_test
+irparam=$R/sys/module/leds_qcom_flash/parameters/ir_max_ua
 approval=$R/etc/omarchy-surface-sl7/ir-stage-b-approved
 logf=$R/var/log/sl7-ir-emitter-test.log
 rundir=$R/run/sl7-ir-emitter-test
@@ -121,6 +153,9 @@ camdev=$R/dev/v4l/by-id/sl7-ir-camera
 
 me=sl7-ir-emitter-test
 channel=
+led_kind=
+max_ma_arg=
+param_touched=0
 repeat=1
 read_plan=0
 status_only=0
@@ -170,9 +205,20 @@ stop_capture() {
   cap_pid=
 }
 
-# Emitter first, then the capture, then the raw frames (never kept).
+# Driver limit back to its default (the emitter is already off).
+restore_limit() {
+  ((param_touched)) || return 0
+  param_touched=0
+  printf '%s' "$IR_LIMIT_DEFAULT_UA" >"$irparam" 2>/dev/null &&
+    log "RESTORE ${irparam#"$R"} <- $IR_LIMIT_DEFAULT_UA" ||
+    log "RESTORE FAILED ${irparam#"$R"} (reload leds_qcom_flash or reboot to reset it)"
+  return 0
+}
+
+# Emitter first, then the limit, then the capture, then the raw frames (never kept).
 on_exit() {
   disarm_all
+  restore_limit
   stop_capture
   if [[ -n $watchdir && $watchdir == "$rundir"/watch.* ]]; then rm -rf -- "$watchdir"; fi
 }
@@ -224,6 +270,11 @@ print_status() {
   else
     echo "leds_qcom_flash: not loaded"
   fi
+  if [[ -r $irparam ]]; then
+    echo "leds_qcom_flash ir_max_ua: $(rd "$irparam") uA per channel (default $IR_LIMIT_DEFAULT_UA, driver hard cap $CH_UA_HARD_MAX)"
+  elif [[ -e $irparam ]]; then
+    echo "leds_qcom_flash ir_max_ua: present (run with sudo to read it)"
+  fi
   n=0
   for d in "$leds"/ir:flash-*; do
     [[ -d $d ]] || continue
@@ -232,7 +283,7 @@ print_status() {
       "flash_brightness=$(rd "$d/flash_brightness") flash_timeout=$(rd "$d/flash_timeout")" \
       "flash_strobe=$(rd "$d/flash_strobe") flash_fault='$(rd "$d/flash_fault")'"
   done
-  echo "ir:flash-* LEDs: $n (expected 4 on the IR test entry, 0 otherwise)"
+  echo "ir:flash-* LEDs: $n (expected 1, ir:flash-14, on the IR test entry of linux-sl7 7.2.8-19 or later; 4 on 7.2.8-18 or earlier; 0 otherwise)"
   if [[ -r $rundir/pulses ]]; then echo "pulses fired this boot: $(rd "$rundir/pulses") (limit $MAX_PULSES_PER_BOOT)"; fi
 }
 
@@ -240,6 +291,8 @@ while (($#)); do
   case $1 in
     --i-have-read-the-plan) read_plan=1 ;;
     --channel) channel=${2:-}; channel_given=1; shift ;;
+    --led) led_kind=${2:-}; shift ;;
+    max_ma_per_channel=*) max_ma_arg=${1#max_ma_per_channel=} ;;
     --repeat) repeat=${2:-}; shift ;;
     --status) status_only=1 ;;
     --watch) watch=1 ;;
@@ -256,13 +309,36 @@ if ((status_only)); then
 fi
 
 if ((watch_only)); then
-  if ((watch || channel_given)) || [[ $repeat != 1 ]]; then
-    echo "sl7-ir-emitter-test: --watch-only-test takes no --channel, --repeat or --watch (it fires nothing)" >&2
+  if ((watch || channel_given)) || [[ -n $led_kind || -n $max_ma_arg || $repeat != 1 ]]; then
+    echo "sl7-ir-emitter-test: --watch-only-test takes no --channel, --led, max_ma_per_channel=, --repeat or --watch (it fires nothing)" >&2
     usage
   fi
 else
   [[ $read_plan -eq 1 ]] || { echo "sl7-ir-emitter-test: --i-have-read-the-plan is required" >&2; usage; }
-  [[ $channel =~ ^[1-4]$ ]] || { echo "sl7-ir-emitter-test: --channel N (1..4) is required" >&2; usage; }
+  if [[ -n $led_kind ]]; then
+    ((!channel_given)) || { echo "sl7-ir-emitter-test: --led ir and --channel N are exclusive" >&2; usage; }
+    [[ $led_kind == ir ]] || { echo "sl7-ir-emitter-test: --led takes only: ir" >&2; usage; }
+    case $max_ma_arg in
+      '' | 12.5) per_ch_ua=12500; step_label=12.5 ;;
+      25) per_ch_ua=25000; step_label=25 ;;
+      50) per_ch_ua=50000; step_label=50 ;;
+      100) per_ch_ua=100000; step_label=100 ;;
+      *) echo "sl7-ir-emitter-test: max_ma_per_channel= must be 12.5, 25, 50 or 100 (got '$max_ma_arg')" >&2; usage ;;
+    esac
+    ((per_ch_ua <= CH_UA_HARD_MAX)) || { echo "sl7-ir-emitter-test: internal error: per-channel current above the hard cap" >&2; exit 2; }
+    nch=$IR_NCH
+    ledid=$IR_LED_ID
+  else
+    [[ $channel =~ ^[1-4]$ ]] || { echo "sl7-ir-emitter-test: --led ir or --channel N (1..4) is required" >&2; usage; }
+    [[ -z $max_ma_arg ]] || { echo "sl7-ir-emitter-test: max_ma_per_channel= needs --led ir (--channel is always 12.5 mA)" >&2; usage; }
+    per_ch_ua=$CH_UA_BASE
+    step_label=12.5
+    nch=1
+    ledid=$channel
+  fi
+  fire_ua=$((per_ch_ua * nch))
+  ledname=ir:flash-$ledid
+  max_total_ua=$((nch == 1 ? CH_UA_BASE : IR_NCH * CH_UA_HARD_MAX))
   [[ $repeat =~ ^[1-9][0-9]*$ ]] && ((repeat <= MAX_REPEAT)) || { echo "sl7-ir-emitter-test: --repeat must be 1..$MAX_REPEAT" >&2; usage; }
 fi
 
@@ -270,7 +346,7 @@ fi
 # --watch-only-test fires nothing, so it does not need the approval.
 if ((!watch_only)); then
   if [[ ! -e $approval && ! -L $approval ]]; then
-    die 3 "Stage B is not approved: $approval does not exist. Only Chris creates it, by hand, after reading the plan. Nothing was touched."
+    die 3 "Stage B is not approved: $approval does not exist. Only the owner creates it, by hand, after reading the plan. Nothing was touched."
   fi
   [[ -f $approval && ! -L $approval ]] || die 3 "$approval is not a regular file (or is a symlink)"
   if ((!fake)); then
@@ -291,14 +367,18 @@ cmdline_has 'panic=5' || die 4 "panic=5 is not on the kernel command line (the I
 check_fault() { # WHEN
   local f t bad=""
   f=$(rd "$led/flash_fault")
-  log "READ  ir:flash-$channel/flash_fault ($1) = '$f'"
+  log "READ  $ledname/flash_fault ($1) = '$f'"
   for t in $f; do [[ $t == "$ONLY_FAULT" ]] || bad="$bad $t"; done
-  [[ -z $bad ]] || die 5 "fault on ir:flash-$channel ($1):$bad"
+  [[ -z $bad ]] || die 5 "fault on $ledname ($1):$bad"
 }
 
 if ((!watch_only)); then
-  led=$leds/ir:flash-$channel
-  [[ -d $led ]] || die 4 "no LED ir:flash-$channel in $leds"
+  led=$leds/$ledname
+  [[ -d $led ]] || die 4 "no LED $ledname in $leds (--led ir needs linux-sl7 7.2.8-19 or later, --channel needs 7.2.8-18 or earlier)"
+  if [[ -n $led_kind ]]; then
+    [[ -r $irparam && $(rd "$irparam") =~ ^[0-9]+$ ]] || die 4 "${irparam#"$R"} is missing or unreadable (the kernel needs patch 0091, linux-sl7 7.2.8-19 or later)"
+    log "READ  ${irparam#"$R"} = $(rd "$irparam") (will be set to $per_ch_ua for this run)"
+  fi
 
   # ---- gate 3: hardware as expected, before any write -----------------------
   for d in "$leds"/ir:flash-*; do
@@ -307,7 +387,8 @@ if ((!watch_only)); then
   done
   max_ua=$(rd "$led/max_flash_brightness")
   max_us=$(rd "$led/max_flash_timeout")
-  [[ $max_ua =~ ^[0-9]+$ ]] && ((max_ua <= FIRE_UA)) || die 4 "max_flash_brightness is '$max_ua', expected <= $FIRE_UA"
+  [[ $max_ua =~ ^[0-9]+$ ]] && ((max_ua <= max_total_ua)) || die 4 "max_flash_brightness is '$max_ua', expected <= $max_total_ua"
+  ((max_ua >= fire_ua)) || die 4 "max_flash_brightness is $max_ua, below the $fire_ua uA of this run"
   [[ $max_us =~ ^[0-9]+$ ]] && ((max_us <= FIRE_TIMEOUT_US)) || die 4 "max_flash_timeout is '$max_us', expected <= $FIRE_TIMEOUT_US"
   check_fault "before"
 fi
@@ -578,14 +659,27 @@ fi
 if ((!fake)) && [[ ! -t 0 || ! -t 1 ]]; then
   die 7 "an interactive terminal is required for the confirmation"
 fi
+# Total current in tenths of mA (12.5 mA = 125) and the charge of one pulse in
+# uC (mA x ms), for the banner only.
+fire_dma=$((fire_ua / 100))
+fire_ma_txt="$((fire_dma / 10)).$((fire_dma % 10))"
+pulse_uc=$((fire_ua * FIRE_TIMEOUT_US / 1000000))
+if [[ -n $led_kind ]]; then
+  what="IR EMITTER TEST: ganged LED ir:flash-14 (channels 1 + 4), $step_label mA per channel"
+  detail="$repeat pulse(s) of $fire_ma_txt mA total x $((FIRE_TIMEOUT_US / 1000)) ms, $pulse_uc uC each
+  (Windows: 700 mA x 1.59 ms = 1110 uC per lit frame)"
+else
+  what="IR EMITTER TEST: CHANNEL $channel"
+  detail="$repeat pulse(s) of $fire_ma_txt mA x $((FIRE_TIMEOUT_US / 1000)) ms, $pulse_uc uC each
+  (Windows: 700 mA x 1.59 ms = 1110 uC per lit frame)"
+fi
 cat <<EOF
 
-  IR EMITTER TEST: CHANNEL $channel  ($repeat pulse(s) of $((FIRE_UA / 1000)).5 mA x $((FIRE_TIMEOUT_US / 1000)) ms)
+  $what
+  $detail
 
   Read the checklist. This lights an infrared emitter that nobody has
-  characterised. Each pulse is 1.8 % of Windows' current for 10 ms of
-  hardware time: 0.125 mC, about 11 % of Windows' charge per lit frame
-  (700 mA x 1.59 ms = 1.11 mC).
+  characterised. The pulse is 10 ms of hardware time at most.
 
     [ ] Nobody looks at the bezel. The laptop faces a matte white card or a
         wall at 30 cm or more.
@@ -594,7 +688,7 @@ cat <<EOF
     [ ] The glass over the emitter is not cracked or scratched.
     [ ] The sensor detector is running (--watch, or AE off and per-frame mean
         logged by hand).
-    [ ] Chris approved Stage B (the approval file exists).
+    [ ] The owner approved Stage B (the approval file exists).
 
   Log: ${logf#"$R"}
 
@@ -612,14 +706,30 @@ if ((watch)); then
 
 EOF
 fi
-log "START channel=$channel repeat=$repeat user=${SUDO_USER:-$(id -un)} kernel=$(uname -r) cmdline='$(rd "$cmdline")'"
-want="FIRE CHANNEL $channel"
+log "START led=$ledname per_channel_ua=$per_ch_ua total_ua=$fire_ua repeat=$repeat user=${SUDO_USER:-$(id -un)} kernel=$(uname -r) cmdline='$(rd "$cmdline")'"
+if [[ -n $led_kind ]]; then want="FIRE IR ${step_label}MA"; else want="FIRE CHANNEL $channel"; fi
 printf 'Type "%s" to fire, anything else aborts: ' "$want"
 answer=
 read -r -t 180 answer || answer=
 echo
 [[ $answer == "$want" ]] || die 7 "not confirmed (typed '$answer')"
 log "CONFIRMED by typed phrase"
+if ((per_ch_ua >= CH_UA_HARD_MAX)); then
+  want2="ACCEPT 100 MA PER CHANNEL"
+  echo "100 mA per channel is the driver's hard cap: 200 mA total, $pulse_uc uC per pulse, more charge than Windows per lit frame."
+  printf 'Type "%s" to confirm, anything else aborts: ' "$want2"
+  answer=
+  read -r -t 180 answer || answer=
+  echo
+  [[ $answer == "$want2" ]] || die 7 "100 mA not confirmed (typed '$answer')"
+  log "CONFIRMED 100 mA per channel by the second typed phrase"
+fi
+if [[ -n $led_kind ]]; then
+  # The driver limit first, before anything is armed; its read back must match.
+  wr "$irparam" "$per_ch_ua"
+  param_touched=1
+  rdback "$irparam" "$per_ch_ua"
+fi
 
 # ---- fire -------------------------------------------------------------------
 fire_ts=()
@@ -632,16 +742,16 @@ i=0
 while ((i < repeat)); do
   i=$((i + 1))
   if ((i > 1)); then sleep "$PRE_PULSE_GAP_S"; fi
-  log "PULSE $i/$repeat channel $channel: $FIRE_UA uA, $FIRE_TIMEOUT_US us"
+  log "PULSE $i/$repeat $ledname: $fire_ua uA total ($per_ch_ua uA x $nch), $FIRE_TIMEOUT_US us"
   wr "$led/flash_strobe" 0
-  wr "$led/flash_brightness" "$FIRE_UA"
-  rdback "$led/flash_brightness" "$FIRE_UA"
+  wr "$led/flash_brightness" "$fire_ua"
+  rdback "$led/flash_brightness" "$fire_ua"
   wr "$led/flash_timeout" "$FIRE_TIMEOUT_US"
   rdback "$led/flash_timeout" "$FIRE_TIMEOUT_US"
   check_fault "armed"
   pulses=$((pulses + 1))
   printf '%s\n' "$pulses" >"$rundir/pulses" || die 6 "cannot record the pulse count in $rundir/pulses"
-  log "FIRE ir:flash-$channel (count this boot: $pulses)"
+  log "FIRE $ledname $fire_ua uA (count this boot: $pulses)"
   if ((watch)); then read -r fire_now _ </proc/uptime; fire_ts+=("$fire_now"); fi
   wr "$led/flash_strobe" 1
   sleep "$POST_STROBE_WAIT_S"
@@ -652,10 +762,14 @@ done
 if ((watch)); then
   sleep "$WATCH_TAIL_S"
   finish_capture
-  run_analysis pulses "$channel" "${fire_ts[@]}"
+  run_analysis pulses "$ledid" "${fire_ts[@]}"
 fi
-log "DONE channel $channel, $repeat pulse(s). Compare the detector verdict (--watch) and the phone clip for this channel."
+log "DONE $ledname at $fire_ua uA total, $repeat pulse(s). Compare the detector verdict (--watch) and the phone clip for this step."
 echo
 echo "Next: note whether the sensor or the phone saw it (3/3 pulses well above the baseline noise)."
-echo "One channel at a time: reboot or wait, then repeat with the next --channel N. Decision rules: EMITTER-PLAN.md, stage B."
+if [[ -n $led_kind ]]; then
+  echo "One step at a time: 12.5, then 25, then 50 mA per channel (max_ma_per_channel=). Stop at the first step the camera sees. Decision rules: EMITTER-PLAN.md, stage B."
+else
+  echo "One channel at a time: reboot or wait, then repeat with the next --channel N. Decision rules: EMITTER-PLAN.md, stage B."
+fi
 exit 0
