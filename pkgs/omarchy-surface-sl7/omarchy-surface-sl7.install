@@ -10,6 +10,20 @@ _sl7_firmware_present() {
   return 1
 }
 
+# Generate the front camera tuning from the user's own Surface driver package
+# (the copy omarchy-surface-sl7-firmware kept) when it is not there yet.
+# Non-fatal: it must never block the transaction.
+_sl7_camera() {
+  [[ -f /var/lib/omarchy-surface-sl7/camera/com.surface.tuned.ffc_ov02c10.bin &&
+    ! -e /etc/libcamera/ipa/simple/ov02c10.yaml ]] || return 0
+  if /usr/bin/sl7-camera-tuning --if-missing --quiet; then
+    echo "omarchy-surface-sl7: camera tuning generated; restart pipewire/wireplumber (systemctl --user restart pipewire wireplumber) or log out and in."
+  else
+    echo "omarchy-surface-sl7: could not generate the camera tuning; run 'sudo sl7-camera-tuning' later." >&2
+  fi
+  return 0
+}
+
 _sl7_rebuild() {
   if [[ -n ${OMARCHY_SL7_SKIP_REBUILD:-} ]]; then
     echo "omarchy-surface-sl7: OMARCHY_SL7_SKIP_REBUILD set; not rebuilding the initramfs/UKI."
@@ -70,6 +84,8 @@ _sl7_setup() {
     echo "    sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi"
     echo "  (or --from DIR with qcom/x1e80100/microsoft/ staged). See --help."
   fi
+
+  _sl7_camera || true
 
   _sl7_rebuild
 }

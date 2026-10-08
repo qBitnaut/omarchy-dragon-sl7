@@ -33,7 +33,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
 | 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
 | 8j | opt-in cluster parking on battery, off by default (section 8j) | `/usr/bin/sl7-park` |
-| 8k | front webcam tuning built on your machine from Microsoft's driver package, and a capture/compare script (section 8k) | `/usr/bin/sl7-camera-tuning`, `/usr/bin/sl7-camera-check` |
+| 8k | front webcam tuning, generated automatically at install on your machine from your own Surface driver package (`sl7-camera-tuning` regenerates or adjusts it), and a capture/compare script (section 8k) | `/usr/bin/sl7-camera-tuning`, `/usr/bin/sl7-camera-check` |
 | 12e | read-only per-process CPU and wakeup sampler (section 12e) | `/usr/bin/sl7-proftop` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
@@ -475,6 +475,14 @@ Microsoft ships a tuning for it in the Surface driver package. It is Microsoft's
 never part of this package or this repository; `sl7-camera-tuning` reads it from the driver
 package you downloaded and writes a libcamera tuning file on your machine only.
 
+The tuning is generated automatically at install: `omarchy-surface-sl7-firmware` keeps the camera
+file from your MSI and runs `sl7-camera-tuning --if-missing --quiet`, and the package scriptlet
+does the same on install and upgrade when the kept file exists but the tuning does not. An
+existing `/etc/libcamera/ipa/simple/ov02c10.yaml` is never overwritten. Run `sl7-camera-tuning`
+yourself to regenerate it or to change the options below. Clean installs from the installer stick
+stage only the firmware, not the camera file, so run `omarchy-surface-sl7-firmware --from-msi FILE`
+once after first boot to get the tuning too.
+
 Two parts:
 
 1. **libcamera 0.7.2-4.2 or later from the omarchy-sl7 repository** (package `libcamera-sl7`
@@ -487,9 +495,10 @@ Two parts:
 2. **The tuning file**, built from the Microsoft driver package:
 
 ```
-omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
-                                  # as root; also keeps the camera tuning in /var/lib/omarchy-surface-sl7/camera/
-sudo sl7-camera-tuning            # uses that copy (or: --from-msi FILE.msi, --bin FILE)
+sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
+                                  # also keeps the camera tuning in /var/lib/omarchy-surface-sl7/camera/
+                                  # and generates the tuning file from it (skipped if one exists)
+sudo sl7-camera-tuning            # regenerate or adjust: uses that copy (or: --from-msi FILE.msi, --bin FILE)
 systemctl --user restart pipewire wireplumber
 sl7-camera-check                  # frames, logs and a CPU/power sample into ~/sl7-camera-<time>/
 ```
@@ -504,6 +513,8 @@ sl7-camera-check                  # frames, logs and a CPU/power sample into ~/s
 | `--saturation X` | Default saturation, 0 to 2 (1 = none). Default 1.05, chosen on the SL7 with blend 0.6. Same rules as `--contrast`. |
 | `--black-level N` | Override the black level (16-bit scale, 4096 = 64 of 1023). Default: the sensor helper's (4096). See below before changing it. |
 | `--dry-run` | Print the tuning file to your terminal instead of writing it. |
+| `--if-missing` | Do nothing (exit 0, one line) if the tuning file already exists. Used by the installers; never overwrites your file. |
+| `--quiet` | Print only warnings and errors. |
 | `--list` | Print the sets found with their colour temperature ranges and matrices. |
 | `--status` | What is installed, the blend used, whether libcamera has the sensor helper. |
 | `--remove` | Delete the tuning file (libcamera falls back to no correction); `--purge` also deletes the kept copy of Microsoft's file. |

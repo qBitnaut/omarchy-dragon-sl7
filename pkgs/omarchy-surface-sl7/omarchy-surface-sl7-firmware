@@ -79,6 +79,20 @@ keep_camera_tuning() {
   found=$(find "$1" -type f -name com.surface.tuned.ffc_ov02c10.bin -print -quit)
   if [[ -n $found ]] && install -Dm644 "$found" "$camera_dir/com.surface.tuned.ffc_ov02c10.bin"; then
     echo "kept the camera tuning for sl7-camera-tuning in $camera_dir"
+    make_camera_tuning
+  fi
+}
+
+# Build the libcamera tuning file for the front camera from the kept copy, on
+# this machine only. Never overwrites an existing file, and never fails the
+# firmware install. Skipped when the install goes to a staging root.
+make_camera_tuning() {
+  [[ -z ${OMARCHY_SL7_FW_ROOT:-} && -z ${OMARCHY_SL7_CAMERA_DIR:-} ]] || return 0
+  command -v sl7-camera-tuning >/dev/null 2>&1 || return 0
+  if sl7-camera-tuning --if-missing --quiet; then
+    echo "camera tuning is in place (restart pipewire/wireplumber or log out and in to use it)"
+  else
+    echo "$prog: could not generate the camera tuning; run 'sudo sl7-camera-tuning' later (firmware install is unaffected)" >&2
   fi
 }
 

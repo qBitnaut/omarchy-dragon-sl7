@@ -56,6 +56,15 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+QUIET = False
+
+
+def info(msg):
+    """Progress output; silenced by --quiet (warnings and errors are not)."""
+    if not QUIET:
+        print(msg)
+
+
 def warn(msg):
     print("%s: warning: %s" % (PROG, msg), file=sys.stderr)
 
@@ -206,7 +215,7 @@ def sha256_of(path):
 def extract_from_msi(msi, tmp):
     if shutil.which("msiextract") is None:
         die("msiextract not found; install msitools (pacman -S msitools)")
-    print("Extracting %s (this takes a minute)" % msi)
+    info("Extracting %s (this takes a minute)" % msi)
     subprocess.run(["msiextract", "-C", tmp, msi], check=True, stdout=subprocess.DEVNULL)
     found = []
     for root, _dirs, files in os.walk(tmp):
@@ -238,7 +247,7 @@ def cache_copy(src):
         shutil.copyfile(src, dst + ".new")
         os.chmod(dst + ".new", 0o644)
         os.replace(dst + ".new", dst)
-        print("Kept a local copy: %s" % dst)
+        info("Kept a local copy: %s" % dst)
     except OSError as e:
         warn("could not keep a local copy in %s: %s" % (CACHE_DIR, e))
 
@@ -328,7 +337,7 @@ def load_sets(args, tmp):
         die("%s has an unexpected size (%d bytes); refusing" % (src, size))
     digest = sha256_of(src)
     if digest in KNOWN_SHA256:
-        print("Source: %s (%s)" % (src, KNOWN_SHA256[digest]))
+        info("Source: %s (%s)" % (src, KNOWN_SHA256[digest]))
     else:
         warn("%s is not the driver package this tool was written against (sha256 %s); "
              "the content is validated below, check the result" % (src, digest))
@@ -366,6 +375,11 @@ def main():
                          "applications can still override it; default 1.05 (chosen on the SL7)")
     ap.add_argument("--bin", metavar="FILE", help="the extracted %s" % BIN_NAME)
     ap.add_argument("--from-msi", metavar="FILE", help="the Surface Laptop 7 driver MSI (needs msitools)")
+    ap.add_argument("--if-missing", action="store_true",
+                    help="do nothing (exit 0, one log line) if the tuning file already exists, so a file you "
+                         "tuned or wrote is never overwritten; used by the package scriptlet and the firmware installer")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print only warnings and errors (with --if-missing the skip line is silenced too)")
     ap.add_argument("--list", action="store_true", help="print the sets found, with their matrices, and exit")
     ap.add_argument("--dry-run", action="store_true", help="print the tuning file instead of writing it")
     ap.add_argument("--status", action="store_true", help="show what is installed")
@@ -374,6 +388,8 @@ def main():
     ap.add_argument("--force", action="store_true", help="overwrite or remove a tuning file not written by this tool")
     ap.add_argument("--output", default=OUTPUT, metavar="FILE", help="tuning file to write (default %s)" % OUTPUT)
     args = ap.parse_args()
+    global QUIET
+    QUIET = args.quiet
 
     if not (0.0 <= args.blend <= 1.0):
         die("--blend must be between 0 and 1")
@@ -387,6 +403,9 @@ def main():
     if args.status:
         return status(args.output)
     readonly = args.list or args.dry_run
+    if args.if_missing and not (readonly or args.remove) and os.path.exists(args.output):
+        info("%s: %s already exists; leaving it alone" % (PROG, args.output))
+        return 0
     if os.geteuid() != 0 and not readonly:
         die("run as root (sudo %s ...), or use --dry-run / --list / --status" % PROG)
     if args.remove:
@@ -418,14 +437,14 @@ def main():
             f.write(text)
         os.chmod(args.output + ".new", 0o644)
         os.replace(args.output + ".new", args.output)
-        print("Wrote %s (set %d, blend %.2f)" % (args.output, args.set, args.blend))
+        info("Wrote %s (set %d, blend %.2f)" % (args.output, args.set, args.blend))
         cache_copy(src)
 
     if helper_present() is False:
         warn("the installed libcamera has no OV02C10 sensor helper; install libcamera 0.7.2-4.1 or later "
              "from the omarchy-sl7 repository (sudo pacman -Syu)")
-    print("Restart the camera users so they reload it: systemctl --user restart pipewire wireplumber")
-    print("Check the result with: sl7-camera-check")
+    info("Restart the camera users so they reload it: systemctl --user restart pipewire wireplumber")
+    info("Check the result with: sl7-camera-check")
     return 0
 
 
