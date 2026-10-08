@@ -1,7 +1,7 @@
 pkgbase = howdy-next
 	pkgdesc = Modern C++ reimplementation of Howdy facial authentication on Linux (aarch64, models in howdy-next-models)
 	pkgver = 3.4.2
-	pkgrel = 1
+	pkgrel = 2
 	url = https://codeberg.org/nathawat/howdy-next
 	install = howdy-next.install
 	arch = aarch64
@@ -26,7 +26,9 @@ pkgbase = howdy-next
 	backup = etc/howdy/config.ini
 	source = howdy-next-3.4.2.tar.gz::https://codeberg.org/nathawat/howdy-next/archive/v3.4.2.tar.gz
 	source = polkit-agent-helper-howdy.conf
+	source = 0001-quiet-opencv-dnn-target-warning.patch
 	sha256sums = e2e3afabc3d6d3fd696ec0ab6a1f144b6254449216b390be579864a6fd26c50a
 	sha256sums = 2283fc4684751caa41e87023755bba5c3468475b6ed632b13a4ac6e9c748c512
+	sha256sums = 795dcd866ae586a348adbe4d28df57c9e7e7f6993766f332ff0d889fb312728f
 
 pkgname = howdy-next

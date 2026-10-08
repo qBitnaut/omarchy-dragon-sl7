@@ -1,0 +1,22 @@
+--- a/howdy/src/vision/face_model.cpp
++++ b/howdy/src/vision/face_model.cpp
+@@ -11,6 +11,8 @@
+ #include "vision/face_model/internal.hpp"
+ #include "vision/frame_validation.hpp"
+ 
++#include <opencv2/core/utils/logger.hpp>
++
+ #include <exception>
+ #include <filesystem>
+ #include <memory>
+@@ -62,6 +64,10 @@
+ 	FaceModel::FaceModel(const FaceConfig &config)
+ 	    : metric_(config.sface_metric)
+ 	    , backend_(std::make_unique<Backend>()) {
++		// omarchy-dragon-sl7: OpenCV before 5.1 warns "setPreferableTarget Targets are not
++		// supported by the new graph engine" on every scan (harmless, see AGENTS.md). Keep
++		// OpenCV's own log at errors so it does not show up in sudo and login prompts.
++		cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
+ 		backend_->check_readiness = [](const std::filesystem::path &path) -> OpenCvModelReadiness {
+ 			return CheckOpencvModelReadinessWithLabel(path, "OpenCV face model file",
+ 			                                          static_cast<uid_t>(0));
