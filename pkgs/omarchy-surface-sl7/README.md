@@ -26,6 +26,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
+| 8b3 | bag guard: suspend, then power off, a laptop left awake with the lid closed on battery (section 8) | `/usr/bin/omarchy-sl7-bag-guard`, `omarchy-surface-sl7-bag-guard.service`, `/etc/omarchy-surface-sl7/bag-guard.conf` |
 | 8d | optional kernel test boot entries, PSR (known broken) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | `leds_qcom_flash` kept unloaded (the PMIC IR LED path is retired), read-only `sl7-ir-emitter-test --status` and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
@@ -224,6 +225,25 @@ use this tool for the SL7.
   or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting when a connection is
   re-activated; the shipped drop-in and dispatcher script (above) make that setting
   `enable` and put the power-source policy back right after.
+- **Bag guard** (`omarchy-sl7-bag-guard`, unit `omarchy-surface-sl7-bag-guard.service`, enabled by
+  default, config `/etc/omarchy-surface-sl7/bag-guard.conf`). A backstop for a laptop that is
+  awake in a bag: logind normally suspends on lid close, and this acts only when that did not
+  happen. It polls every 15 s (sleeping in between, no wake-ups while suspended) and acts only
+  while the lid is closed (logind `LidClosed`), no power source is online (any non-battery
+  supply in `/sys/class/power_supply` with `online` set) and no external display is connected
+  (a non-`eDP` connector with `status` `connected`), so docked or clamshell use is never
+  touched. Anything it cannot read counts as "do not act". After `AWAKE_GRACE_S` (120) seconds
+  awake in that state it runs `systemctl suspend`. After `MAX_SUSPEND_FAILS` (3) suspend
+  attempts in a row that did not complete (`systemctl` error, or `/sys/power/suspend_stats/success`
+  did not grow) it logs loudly and runs `systemctl poweroff` (there is no hibernation); a
+  thermal zone above `TEMP_LIMIT_C` (60) for `TEMP_GRACE_S` (60) seconds in the same state
+  powers off too. `ACTION_ON_FAIL=suspend-only` never powers off. Counters reset when the lid
+  opens, a charger or external display appears, or a suspend succeeds. Every action and every
+  change of decision is logged, not every poll. Check:
+  `omarchy-sl7-bag-guard --check` (lid, power, displays, every thermal zone, the decision; it
+  never acts; works as a normal user), `journalctl -t omarchy-sl7-bag-guard`, `sl7-doctor`.
+  `ENABLED=0` leaves the service running but idle; `systemctl disable --now
+  omarchy-surface-sl7-bag-guard` removes it.
 
 ### 8f. Touchpad defaults (tap-to-click off)
 

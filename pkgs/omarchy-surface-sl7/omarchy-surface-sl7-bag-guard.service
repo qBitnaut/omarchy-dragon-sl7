@@ -1,0 +1,16 @@
+[Unit]
+Description=Suspend or power off a Surface Laptop 7 left awake with the lid closed on battery
+Documentation=file:///usr/share/doc/omarchy-surface-sl7/README.md
+After=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/omarchy-sl7-bag-guard
+Restart=on-failure
+RestartSec=10
+Nice=10
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

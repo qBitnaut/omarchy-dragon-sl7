@@ -30,7 +30,7 @@ jobs:
             sl7-firmware sl7-doctor set-boot-order surface-laptop-7.sh omarchy-surface-sl7.install \
             omarchy-sl7-repo-ensure 10-omarchy-sl7-repo sl7-ir-probe sl7-ir-emitter-test \
             sl7-usb-rpm sl7-park omarchy-sl7-powermode omarchy-sl7-test-entry \
-            omarchy-sl7-wifi-powersave.dispatcher sl7-camera-check
+            omarchy-sl7-wifi-powersave.dispatcher sl7-camera-check omarchy-sl7-bag-guard
           luac5.4 -p guard-pro-audio.lua
           for f in sl7-vrr-rate sl7-proftop sl7-camera-tuning; do
             python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
@@ -126,7 +126,10 @@ jobs:
             usr/bin/sl7-park \
             usr/bin/sl7-camera-tuning \
             usr/bin/sl7-camera-check \
-            usr/bin/sl7-proftop; do
+            usr/bin/sl7-proftop \
+            usr/bin/omarchy-sl7-bag-guard \
+            etc/omarchy-surface-sl7/bag-guard.conf \
+            usr/lib/systemd/system/omarchy-surface-sl7-bag-guard.service; do
             grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
           done
 

@@ -147,6 +147,9 @@ check "Pro Audio guard installed" \
   test -f /usr/share/wireplumber/scripts/omarchy-surface-sl7/guard-pro-audio.lua \
   -a -f /usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf
 
+check "bag guard service active (omarchy-surface-sl7-bag-guard; omarchy-sl7-bag-guard --check)" \
+  systemctl is-active --quiet omarchy-surface-sl7-bag-guard.service
+
 # omarchy-sl7 package repository: configured, ahead of [omarchy] and ALARM, key trusted.
 if command -v pacman-conf >/dev/null 2>&1; then
   repos=$(pacman-conf --config "$pacman_conf" --repo-list 2>/dev/null)

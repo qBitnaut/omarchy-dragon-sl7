@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=45
+pkgrel=46
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -34,7 +34,8 @@ backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
         'etc/limine-entry-tool.d/omarchy-surface-sl7.conf'
         'etc/pacman.d/omarchy-sl7.conf'
         'etc/omarchy-surface-sl7/power.conf'
-        'etc/omarchy-surface-sl7/usb-rpm.conf')
+        'etc/omarchy-surface-sl7/usb-rpm.conf'
+        'etc/omarchy-surface-sl7/bag-guard.conf')
 install=omarchy-surface-sl7.install
 
 # valeronm/sl7-mac (MIT): factory Wi-Fi/Bluetooth MAC from UEFI, pinned.
@@ -102,7 +103,10 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'zz-omarchy-sl7-wifi-powersave.conf'
         'omarchy-sl7-wifi-powersave.dispatcher'
         'sl7-camera-tuning'
-        'sl7-camera-check')
+        'sl7-camera-check'
+        'omarchy-sl7-bag-guard'
+        'omarchy-surface-sl7-bag-guard.service'
+        'bag-guard.conf')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -118,7 +122,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            '8f0e052c61f1f634ce0ff7be81257e39b3368f3b46e532abd7a0337286ba767a'
+            '1990463034e65a78933ee4dd5d02263c6f3f261b31e77e0f321c94eb0332ef60'
             '64a6520c18dae8205e6802e7081a831a943412e4d5c7ef4d5f4cd81d1a9800d5'
             'b2b08c6b796cc43f3b807b9c083bb906577edfa7027a588867f9488fa92a439c'
             '897147e955439937365d1ae2e44c051faada34cf75684e9f74b391c73219585a'
@@ -130,7 +134,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             'eb0d712fd5d1cf085baf5434b332e4937f1ba24e5773e45c2597d85ec8e4b158'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '1d74dbe6588ac63196151e89054d3878e2adb66d827fd8bc53515291cbc02ad5'
+            '3de9134e6ea3823861260ae9f39f913a6b0bb8d9f9e7ba173935f0bc828902dd'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -166,7 +170,10 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '84d9b78366b4cb6620833331422dc200b3327300ba698d5def9ba562e41d864f'
             '62e225ffc67c113ba344e0c0369870343a7685a81cbb72b4e90f46598363769b'
             '08d6c86510cdc0b2b02553be61e8fd1996704c6352d1299d364451138935ff40'
-            '5396224d70d0b05704358fb05ac9bc935a7767ad2c64b36c09ab12c80c3eaedd')
+            '5396224d70d0b05704358fb05ac9bc935a7767ad2c64b36c09ab12c80c3eaedd'
+            '30a62562b8fabb3f0355d6b2a571e57865b47599116bd11763ef6c358b2f9d63'
+            '4aead7533a13e2774a6cb0347bc3e3bb923c04f021fa7e27217588e27a0a1f71'
+            '6ef7d9f902a3361333e52a78caca27d0d4fc574ed8a1a7d5c166f768a270e95a')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -284,6 +291,15 @@ package() {
   install -dm755 "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
   ln -s ../omarchy-sl7-powermode.service \
     "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/omarchy-sl7-powermode.service"
+
+  # 8b3. bag guard: backstop when the machine is awake, lid closed, on battery
+  # and without an external display (suspend, then power off); enabled by default
+  install -Dm755 omarchy-sl7-bag-guard "$pkgdir/usr/bin/omarchy-sl7-bag-guard"
+  install -Dm644 bag-guard.conf "$pkgdir/etc/omarchy-surface-sl7/bag-guard.conf"
+  install -Dm644 omarchy-surface-sl7-bag-guard.service \
+    "$pkgdir/usr/lib/systemd/system/omarchy-surface-sl7-bag-guard.service"
+  ln -s ../omarchy-surface-sl7-bag-guard.service \
+    "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-surface-sl7-bag-guard.service"
 
   # 8b2. touchpad defaults: tap-to-click off, appended once per user to
   # ~/.config/hypr/input.lua by a user service (new and existing installs)

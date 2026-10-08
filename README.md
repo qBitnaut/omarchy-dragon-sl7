@@ -175,6 +175,7 @@ All ship in `omarchy-surface-sl7` unless noted.
 | `sl7-camera-tuning` | Builds the front webcam's libcamera tuning file from Microsoft's driver package, on your machine (`--blend`, `--dry-run`, `--status`, `--remove`). |
 | `sl7-camera-check` | Captures GPU and CPU frames at 1080p and 720p, raw and dark frames, logs and a CPU/power sample into `~/sl7-camera-<time>/` and tars it. |
 | `omarchy-sl7-powermode` | Applies or shows the AC or battery power mode (frequency caps, Wi-Fi power save). |
+| `omarchy-sl7-bag-guard` | Service (on by default): suspends, then powers off, a laptop left awake with the lid closed on battery and no external display, or too hot; `--check` shows the decision without acting. |
 | `omarchy-sl7-test-entry` | Adds optional boot entries for experiments (`psr`, `clk-unused`); off by default. |
 | `omarchy-sl7-faceunlock` | Face Unlock setup and face manager (Omarchy menu: Setup > Security > Face Unlock). Package `omarchy-sl7-faceunlock`. |
 | `sl7-ir-bridge` | On-demand bridge from the IR camera to a stable V4L2 device, `/dev/v4l/by-id/sl7-ir-camera`. Package `sl7-ir-bridge`. |

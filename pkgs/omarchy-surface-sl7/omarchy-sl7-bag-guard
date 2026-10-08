@@ -1,0 +1,317 @@
+#!/bin/bash
+# omarchy-sl7-bag-guard: backstop against a laptop that is awake, lid closed, on
+# battery and (probably) in a bag. logind normally suspends on lid close; this
+# daemon only acts when that did not happen.
+#
+#   omarchy-sl7-bag-guard            run the daemon (the systemd unit does this)
+#   omarchy-sl7-bag-guard --check    print lid, power, displays, temperatures and
+#                                    the decision; never acts (alias: --status)
+#
+# It acts only while ALL of these hold: lid closed (logind LidClosed), no power
+# source online, no external display connected. Docked/clamshell use is never
+# touched. Anything it cannot read counts as "do not act".
+#
+#   awake with the lid closed for AWAKE_GRACE_S   -> systemctl suspend
+#   MAX_SUSPEND_FAILS consecutive failures        -> systemctl poweroff
+#   zone above TEMP_LIMIT_C for TEMP_GRACE_S      -> systemctl poweroff
+#
+# Counters reset when the lid opens, a charger is connected, an external display
+# appears, or a suspend succeeds. Config: /etc/omarchy-surface-sl7/bag-guard.conf
+# (re-read every poll). Log: journalctl -t omarchy-sl7-bag-guard
+set -u
+
+conf=${OMARCHY_SL7_BAG_GUARD_CONF:-/etc/omarchy-surface-sl7/bag-guard.conf}
+ps=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
+drm=${OMARCHY_SL7_DRM:-/sys/class/drm}
+thermal=${OMARCHY_SL7_THERMAL:-/sys/class/thermal}
+stats=${OMARCHY_SL7_SUSPEND_STATS:-/sys/power/suspend_stats}
+tag=omarchy-sl7-bag-guard
+
+log() { # priority, message
+  local prio=$1
+  shift
+  if [[ -t 1 ]]; then printf '%s: %s\n' "$prio" "$*"; fi
+  logger -t "$tag" -p "daemon.$prio" -- "$*" 2>/dev/null || printf '%s: %s\n' "$tag" "$*" >&2
+}
+
+num() { # variable, default, minimum: keep a valid integer, else the default
+  local n=$1 d=$2 min=$3 v=${!1:-}
+  if [[ $v =~ ^[0-9]+$ ]] && ((10#$v >= min)); then printf -v "$n" %d "$((10#$v))"; else printf -v "$n" %d "$d"; fi
+}
+
+load_conf() {
+  ENABLED=1 AWAKE_GRACE_S=120 MAX_SUSPEND_FAILS=3 TEMP_LIMIT_C=60 TEMP_GRACE_S=60
+  ACTION_ON_FAIL=poweroff POLL_S=15 THERMAL_EXCLUDE='batt|bms|charg|usb'
+  # shellcheck disable=SC1090
+  [[ -r $conf ]] && . "$conf"
+  num ENABLED 1 0
+  num AWAKE_GRACE_S 120 5
+  num MAX_SUSPEND_FAILS 3 1
+  num TEMP_LIMIT_C 60 0 # 0 turns the thermal check off
+  num TEMP_GRACE_S 60 5
+  num POLL_S 15 5
+  [[ $ACTION_ON_FAIL == suspend-only ]] || ACTION_ON_FAIL=poweroff
+}
+
+stat_val() { # suspend_stats counter, or n/a
+  local v
+  if read -r v < "$stats/$1" 2>/dev/null; then echo "$v"; else echo n/a; fi
+}
+
+# Each sampler sets globals; unreadable input gives "unknown".
+sample_lid() { # LID=yes|no|unknown
+  local out s st
+  LID=unknown
+  if out=$(timeout 5 busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.login1.Manager LidClosed 2>/dev/null); then
+    case $out in
+      'b true') LID=yes; return ;;
+      'b false') LID=no; return ;;
+    esac
+  fi
+  for s in /proc/acpi/button/lid/*/state; do
+    [[ -r $s ]] || continue
+    read -r _ st < "$s" || continue
+    case $st in
+      closed) LID=yes; return ;;
+      open) LID=no; return ;;
+    esac
+  done
+}
+
+sample_ac() { # AC=yes|no|unknown, AC_SRC=online sources
+  local s t v bat=0
+  AC=no AC_SRC=''
+  for s in "$ps"/*; do
+    [[ -r $s/type ]] || continue
+    read -r t < "$s/type" || continue
+    if [[ $t == Battery ]]; then
+      bat=1
+      continue
+    fi
+    [[ -r $s/online ]] || continue
+    read -r v < "$s/online" || continue
+    [[ $v =~ ^[0-9]+$ ]] || continue
+    if ((10#$v != 0)); then
+      AC=yes
+      AC_SRC+=" ${s##*/}($t)"
+    fi
+  done
+  ((bat)) || AC=unknown # no battery gauge visible: cannot tell, do not act
+}
+
+sample_display() { # EXT=yes|no|unknown, EXT_LIST=connected non-internal connectors
+  local c name st seen=0
+  EXT=no EXT_LIST=''
+  for c in "$drm"/card*-*; do
+    [[ -r $c/status ]] || continue
+    seen=1
+    name=${c##*/}
+    name=${name#card*-}
+    case $name in eDP-* | LVDS-* | DSI-* | Writeback-* | Virtual-*) continue ;; esac
+    read -r st < "$c/status" || continue
+    if [[ $st == connected ]]; then
+      EXT=yes
+      EXT_LIST+=" $name"
+    fi
+  done
+  ((seen)) || EXT=unknown
+}
+
+sample_temp() { # TEMP_MAX (m°C, 0 = none usable), TEMP_ZONE, TEMP_LIST
+  local z t ty
+  TEMP_MAX=0 TEMP_ZONE='' TEMP_LIST=''
+  for z in "$thermal"/thermal_zone*; do
+    [[ -r $z/temp ]] || continue
+    read -r t < "$z/temp" 2>/dev/null || continue
+    [[ $t =~ ^[0-9]+$ ]] || continue
+    t=$((10#$t))
+    ty=''
+    read -r ty < "$z/type" 2>/dev/null
+    if [[ -n $THERMAL_EXCLUDE && ${ty,,} =~ $THERMAL_EXCLUDE ]] || ((t < 1000 || t > 150000)); then
+      TEMP_LIST+=" ${ty:-${z##*/}}=$((t / 1000))(ignored)"
+      continue
+    fi
+    TEMP_LIST+=" ${ty:-${z##*/}}=$((t / 1000))"
+    if ((t > TEMP_MAX)); then
+      TEMP_MAX=$t
+      TEMP_ZONE=${ty:-${z##*/}}
+    fi
+  done
+}
+
+# Sets DEC (stable text, logged on change) and ARMED (1 = may act).
+decide() {
+  ARMED=0
+  if ((!ENABLED)); then DEC='idle: disabled (ENABLED=0)'
+  elif [[ $LID == no ]]; then DEC='idle: lid open'
+  elif [[ $LID != yes ]]; then DEC='idle: lid state unknown'
+  elif [[ $AC == yes ]]; then DEC='idle: power source online'
+  elif [[ $AC != no ]]; then DEC='idle: power source state unknown'
+  elif [[ $EXT == yes ]]; then DEC='idle: external display connected'
+  elif [[ $EXT != no ]]; then DEC='idle: display state unknown'
+  else
+    DEC='armed: lid closed on battery, no external display'
+    ARMED=1
+  fi
+}
+
+fmt_temp() { # m°C -> "47.3"
+  printf '%d.%d' "$(($1 / 1000))" "$((($1 % 1000) / 100))"
+}
+
+do_check() {
+  local state
+  load_conf
+  sample_lid
+  sample_ac
+  sample_display
+  sample_temp
+  decide
+  printf 'config:    %s (ENABLED=%s)\n' "$conf" "$ENABLED"
+  printf 'lid:       %s\n' "$LID"
+  printf 'power:     %s%s\n' "$AC" "${AC_SRC:+ (online:$AC_SRC)}"
+  printf 'displays:  external %s%s\n' "$EXT" "${EXT_LIST:+ ($EXT_LIST )}"
+  if ((TEMP_MAX)); then
+    printf 'temp:      max %s C (%s), limit %s C%s\n' "$(fmt_temp "$TEMP_MAX")" "$TEMP_ZONE" \
+      "$TEMP_LIMIT_C" "$( ((TEMP_LIMIT_C == 0)) && echo ' (thermal check off)')"
+  else
+    printf 'temp:      no usable thermal zone\n'
+  fi
+  printf 'zones:     %s\n' "${TEMP_LIST:- none}"
+  printf 'policy:    suspend after %s s awake; %s consecutive suspend failures -> %s; %s C for %s s -> %s\n' \
+    "$AWAKE_GRACE_S" "$MAX_SUSPEND_FAILS" "$ACTION_ON_FAIL" "$TEMP_LIMIT_C" "$TEMP_GRACE_S" \
+    "$([[ $ACTION_ON_FAIL == poweroff ]] && echo poweroff || echo suspend)"
+  printf 'decision:  %s\n' "$DEC"
+  if ((ARMED && TEMP_LIMIT_C > 0 && TEMP_MAX > TEMP_LIMIT_C * 1000)); then
+    printf '           temperature is over the limit: would act after %s s\n' "$TEMP_GRACE_S"
+  fi
+  state=$(systemctl is-active omarchy-surface-sl7-bag-guard.service 2>/dev/null)
+  printf 'service:   %s\n' "${state:-unknown}"
+}
+
+# Daemon state.
+awake=0 temp_s=0 fails=0 hot=0 succ_prev=n/a
+
+reset_counters() {
+  awake=0 temp_s=0 fails=0 hot=0
+}
+
+stop_system() { # reason
+  log crit "$1: powering off cleanly"
+  if ! systemctl poweroff; then
+    log crit "systemctl poweroff failed; retrying ignoring inhibitors"
+    systemctl poweroff -i || log crit "poweroff failed again; will retry after the grace period"
+  fi
+  reset_counters
+}
+
+try_suspend() {
+  local s0 f0 s1 f1 rc ok=0
+  s0=$(stat_val success)
+  f0=$(stat_val fail)
+  log notice "lid closed on battery, awake for ${awake}s (grace ${AWAKE_GRACE_S}s): systemctl suspend"
+  timeout 60 systemctl suspend
+  rc=$?
+  s1=$(stat_val success)
+  f1=$(stat_val fail)
+  if [[ $s0 != n/a ]]; then
+    [[ $s1 != "$s0" ]] && ok=1
+  elif ((rc == 0)); then
+    ok=1
+  fi
+  succ_prev=$s1
+  awake=0
+  if ((ok)); then
+    log notice "suspend completed (systemctl rc=$rc); counters reset"
+    fails=0
+    return
+  fi
+  fails=$((fails + 1))
+  log warning "suspend did not complete (systemctl rc=$rc, suspend_stats fail $f0 -> $f1, success $s0 -> $s1): failure $fails of $MAX_SUSPEND_FAILS"
+  if ((fails >= MAX_SUSPEND_FAILS)); then
+    if [[ $ACTION_ON_FAIL == poweroff ]]; then
+      stop_system "$fails consecutive suspend failures with the lid closed on battery, hibernation is not available"
+    else
+      log crit "$fails consecutive suspend failures with the lid closed on battery; ACTION_ON_FAIL=suspend-only: not powering off"
+    fi
+  fi
+}
+
+run() {
+  local last_dec='' prev now dt succ
+  read -r prev _ < /proc/uptime
+  prev=${prev%.*}
+  succ_prev=$(stat_val success)
+  log info "started (poll ${POLL_S:-15}s)"
+  while :; do
+    load_conf
+    read -r now _ < /proc/uptime
+    now=${now%.*}
+    dt=$((now - prev))
+    prev=$now
+    # A gap far beyond the poll interval is a suspend or a stall: not awake time.
+    ((dt < 0 || dt > POLL_S * 3)) && dt=0
+
+    sample_lid
+    if [[ $LID == yes ]]; then
+      sample_ac
+      sample_display
+      sample_temp
+    fi
+    decide
+    if [[ $DEC != "$last_dec" ]]; then
+      log info "$DEC"
+      last_dec=$DEC
+    fi
+
+    succ=$(stat_val success)
+    if [[ $succ != "$succ_prev" ]]; then
+      # a suspend finished since the last poll (logind's, not ours): start over
+      succ_prev=$succ
+      reset_counters
+      dt=0
+    fi
+
+    if ((!ARMED)); then
+      reset_counters
+    else
+      awake=$((awake + dt))
+      if ((TEMP_LIMIT_C > 0 && TEMP_MAX > TEMP_LIMIT_C * 1000)); then
+        temp_s=$((temp_s + dt))
+        if ((!hot)); then
+          hot=1
+          log warning "zone $TEMP_ZONE at $(fmt_temp "$TEMP_MAX") C is over ${TEMP_LIMIT_C} C with the lid closed on battery"
+        fi
+      else
+        ((hot)) && log info "temperature back under ${TEMP_LIMIT_C} C"
+        temp_s=0 hot=0
+      fi
+      if ((temp_s >= TEMP_GRACE_S)); then
+        if [[ $ACTION_ON_FAIL == poweroff ]]; then
+          stop_system "zone $TEMP_ZONE at $(fmt_temp "$TEMP_MAX") C for ${temp_s}s (limit ${TEMP_LIMIT_C} C) with the lid closed on battery"
+        else
+          log crit "zone $TEMP_ZONE at $(fmt_temp "$TEMP_MAX") C for ${temp_s}s with the lid closed on battery; ACTION_ON_FAIL=suspend-only: suspending"
+          temp_s=0
+          try_suspend
+        fi
+      elif ((awake >= AWAKE_GRACE_S)); then
+        try_suspend
+      fi
+    fi
+    sleep "$POLL_S"
+  done
+}
+
+case ${1:-} in
+  '') run ;;
+  --check | --status | -c) do_check ;;
+  -h | --help)
+    echo "usage: omarchy-sl7-bag-guard [--check]"
+    echo "  no argument: run the daemon; --check (--status): print the state and decision, never act"
+    ;;
+  *)
+    echo "omarchy-sl7-bag-guard: unknown option $1" >&2
+    exit 2
+    ;;
+esac
