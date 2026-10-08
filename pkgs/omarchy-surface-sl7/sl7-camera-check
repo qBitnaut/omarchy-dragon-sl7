@@ -1,0 +1,320 @@
+#!/bin/bash
+# Capture everything needed to judge the Surface Laptop 7 front camera (OV02C10
+# through libcamera's software ISP) into ~/sl7-camera-<timestamp>/ and tar it:
+#   - versions, `cam -l`, the tuning file in use (header and hash only)
+#   - a libcamera debug log per mode, grepped for: sensor helper loaded, tuning
+#     file loaded, GPU (EGL) or CPU debayer
+#   - one frame each from the GPU and CPU debayer at 1920x1080 and at 1280x720
+#     (compare the two sizes to see whether the ISP crops or scales)
+#   - a raw frame (DNG) and, after you cover the lens, a dark raw set for the
+#     black level
+#   - a short CPU/power sample at 720p
+# Run it as your normal user from the graphical session, with no other program
+# using the camera. It only reads; it writes nothing outside the output folder.
+set -uo pipefail
+
+prog=${0##*/}
+covered=ask
+power_secs=15
+out=""
+
+usage() {
+  cat <<USAGE
+Usage: $prog [--no-covered] [--power-seconds N] [--output DIR]
+
+  --no-covered       skip the dark (lens covered) raw set; do not prompt
+  --power-seconds N  length of the 720p CPU/power sample (default $power_secs, 0 = skip)
+  --output DIR       output folder (default ~/sl7-camera-<timestamp>)
+
+The folder and its .tar.gz hold the tuning file in use and frames of your face
+and room; the tuning is derived from Microsoft's file, so do not post it publicly.
+USAGE
+}
+
+while (($#)); do
+  case $1 in
+    --no-covered) covered=no; shift ;;
+    --power-seconds) power_secs=${2:?--power-seconds needs a number}; shift 2 ;;
+    --output) out=${2:?--output needs a directory}; shift 2 ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+command -v cam >/dev/null 2>&1 || { echo "$prog: cam not found (pacman -S libcamera-tools)" >&2; exit 1; }
+if ((EUID == 0)); then
+  echo "$prog: run as your normal user, not root" >&2
+  exit 1
+fi
+
+ts=$(date +%Y%m%d-%H%M%S)
+out=${out:-$HOME/sl7-camera-$ts}
+mkdir -p "$out"/frames "$out"/logs
+tuning=/etc/libcamera/ipa/simple/ov02c10.yaml
+summary=$out/summary.txt
+: >"$summary"
+
+say() { printf '%s\n' "$*" | tee -a "$summary"; }
+hdr() { printf '\n== %s ==\n' "$*" | tee -a "$summary"; }
+
+camrun() { # MODE LOGFILE cam-args...
+  local mode=$1 log=$2
+  shift 2
+  LIBCAMERA_SOFTISP_MODE=$mode LIBCAMERA_LOG_LEVELS='*:DEBUG' cam "$@" >"$log" 2>&1
+}
+
+hdr "Versions"
+{
+  date
+  uname -srm
+  for p in libcamera libcamera-ipa libcamera-tools pipewire pipewire-libcamera wireplumber mesa linux-sl7 omarchy-surface-sl7; do
+    pacman -Q "$p" 2>/dev/null || echo "$p: not installed"
+  done
+} | tee -a "$summary"
+if grep -q ov02c10 /usr/lib/libcamera/ipa_soft_simple.so 2>/dev/null; then
+  say "OV02C10 sensor helper compiled into the software ISP: yes"
+else
+  say "OV02C10 sensor helper compiled into the software ISP: NO (libcamera is not the omarchy-sl7 build)"
+fi
+dmesg 2>/dev/null | grep -i -E 'ov02c10|camss' | tail -n 20 >"$out/logs/dmesg-camera.txt" || true
+
+hdr "cam -l"
+cam -l 2>&1 | tee "$out/logs/cam-list.txt" | tee -a "$summary"
+
+hdr "Tuning file"
+if [[ -f $tuning ]]; then
+  say "$tuning: present"
+  sed -n '1,4p' "$tuning" | tee -a "$summary"
+  say "sha256: $(sha256sum "$tuning" | cut -d' ' -f1)"
+  cp "$tuning" "$out/ov02c10.yaml"
+else
+  say "$tuning: absent (libcamera uses uncalibrated.yaml: no colour correction)"
+fi
+
+# --- debug runs: GPU and CPU, 1920x1080 and 1280x720 viewfinder -------------
+grab() { # MODE WxH
+  local mode=$1 size=$2 w=${2%x*} h=${2#*x} tag
+  tag=$mode-${w}x$h
+  say "capturing $tag"
+  camrun "$mode" "$out/logs/cam-$tag.log" -c1 -C20 \
+    -s "role=viewfinder,width=$w,height=$h,pixelformat=BGR888" \
+    -F"$out/frames/$tag-#.ppm"
+  # keep only the last (settled) frame
+  local last
+  last=$(ls "$out"/frames/"$tag"-*.ppm 2>/dev/null | tail -n 1)
+  if [[ -n $last ]]; then
+    find "$out/frames" -name "$tag-*.ppm" ! -samefile "$last" -delete
+    mv "$last" "$out/frames/$tag.ppm"
+  else
+    say "  no frame captured for $tag (see logs/cam-$tag.log)"
+  fi
+}
+
+hdr "Frames"
+for mode in gpu cpu; do
+  for size in 1920x1080 1280x720; do
+    grab "$mode" "$size"
+  done
+done
+
+# PPM to PNG when a converter is available
+for tool in magick convert pnmtopng ffmpeg; do
+  command -v "$tool" >/dev/null 2>&1 && break
+  tool=""
+done
+if [[ -n ${tool:-} ]]; then
+  for f in "$out"/frames/*.ppm; do
+    [[ -f $f ]] || continue
+    case $tool in
+      magick | convert) "$tool" "$f" "${f%.ppm}.png" ;;
+      pnmtopng) pnmtopng "$f" >"${f%.ppm}.png" ;;
+      ffmpeg) ffmpeg -loglevel error -y -i "$f" "${f%.ppm}.png" ;;
+    esac
+  done
+  say "converted frames to PNG with $tool"
+else
+  say "no PPM to PNG converter (magick, convert, pnmtopng, ffmpeg) found; frames stay PPM"
+fi
+
+# --- what the logs say -------------------------------------------------------
+hdr "Log findings"
+for log in "$out"/logs/cam-gpu-1920x1080.log "$out"/logs/cam-cpu-1920x1080.log; do
+  [[ -f $log ]] || continue
+  say "-- ${log##*/}"
+  grep -E 'Using tuning file|tuning file .* not found|Failed to create camera sensor helper|Failed to parse|Configuration file' "$log" | sort -u | head -n 6 | sed 's/^/   /' | tee -a "$summary"
+  if grep -q 'DebayerEGL' "$log" || grep -q 'ccmUniformDataIn_' "$log"; then
+    say "   debayer: GPU (EGL)"
+  elif grep -q 'EGL not available' "$log"; then
+    say "   debayer: CPU (EGL not available)"
+  else
+    say "   debayer: CPU (no EGL messages)"
+  fi
+  grep -E 'Exposure|exposure.*gain' "$log" | sed -n '1p' | sed 's/^/   /' | tee -a "$summary"
+  say "   errors: $(grep -c -E 'ERROR' "$log")  warnings: $(grep -c -E 'WARN' "$log")"
+done
+
+# mean colour of each captured frame (PPM, P6, 8 bit)
+hdr "Frame means (R G B, 0-255) and size"
+python3 - "$out"/frames/*.ppm <<'PY' | tee -a "$summary"
+import sys
+for path in sys.argv[1:]:
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        parts = data.split(None, 4)
+        w, h = int(parts[1]), int(parts[2])
+        px = data[len(data) - w * h * 3:]
+        r, g, b = (sum(px[i::3]) / (w * h) for i in range(3))
+        print("%-22s %dx%d  %.1f %.1f %.1f" % (path.rsplit("/", 1)[-1], w, h, r, g, b))
+    except (OSError, ValueError, IndexError) as e:
+        print("%s: unreadable (%s)" % (path, e))
+PY
+
+# --- raw frames --------------------------------------------------------------
+rawstats() { # file
+  python3 - "$1" <<'PY'
+import array, sys
+path = sys.argv[1]
+data = open(path, "rb").read()
+H = 1092
+if len(data) % H:
+    print("  %s: %d bytes, layout not recognised" % (path.rsplit("/", 1)[-1], len(data)))
+    sys.exit(0)
+stride = len(data) // H
+tot = [[0, 0], [0, 0]]
+if stride >= 1928 * 2 and stride < 1928 * 2 + 512:
+    arr = array.array("H")
+    arr.frombytes(data)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    n = stride // 2
+    for y in range(H):
+        row = arr[y * n:(y + 1) * n]
+        for x in (0, 1):
+            tot[y & 1][x] += sum(row[x:1928:2])
+    cnt = (1928 // 2) * (H // 2)
+elif 2410 <= stride < 2410 + 512:
+    cnt = (1928 // 2) * (H // 2)
+    for y in range(H):
+        row = data[y * stride:(y + 1) * stride]
+        for x in (0, 1):
+            s = 0
+            for k in range(x, 4, 2):
+                s += sum(row[k:2410:5]) * 4 + sum((b >> (2 * k)) & 3 for b in row[4:2410:5])
+            tot[y & 1][x] += s
+else:
+    print("  %s: %d bytes, layout not recognised" % (path.rsplit("/", 1)[-1], len(data)))
+    sys.exit(0)
+print("  %s: per-site mean (10-bit) row0: %.2f %.2f  row1: %.2f %.2f" % (
+    path.rsplit("/", 1)[-1], tot[0][0] / cnt, tot[0][1] / cnt, tot[1][0] / cnt, tot[1][1] / cnt))
+PY
+}
+
+capture_raw() { # TAG EXT COUNT
+  local tag=$1 ext=$2 count=$3
+  camrun cpu "$out/logs/cam-$tag-$ext.log" -c1 -C"$count" -s role=raw -F"$out/frames/$tag-#.$ext"
+  # keep the last three frames
+  local keep n
+  n=$(ls "$out"/frames/"$tag"-*."$ext" 2>/dev/null | wc -l)
+  if ((n > 3)); then
+    ls "$out"/frames/"$tag"-*."$ext" | head -n $((n - 3)) | while IFS= read -r f; do rm -f "$f"; done
+  fi
+  keep=$(ls "$out"/frames/"$tag"-*."$ext" 2>/dev/null | wc -l)
+  say "  $tag ($ext): $keep frame(s)"
+}
+
+hdr "Raw frames"
+capture_raw raw-scene dng 15
+capture_raw raw-scene bin 15
+for f in "$out"/frames/raw-scene-*.bin; do
+  [[ -f $f ]] && rawstats "$f" | tee -a "$summary"
+done
+
+if [[ $covered == ask ]]; then
+  if [[ -t 0 && -t 1 ]]; then
+    printf '\nCover the camera lens completely (tape or a finger), then press Enter. Type s to skip: '
+    read -r reply
+    [[ $reply == s ]] && covered=no || covered=yes
+  else
+    covered=no
+    say "not a terminal: skipping the dark raw set (run interactively to take it)"
+  fi
+fi
+if [[ $covered == yes ]]; then
+  hdr "Dark raw frames (lens covered)"
+  capture_raw raw-dark dng 15
+  capture_raw raw-dark bin 15
+  for f in "$out"/frames/raw-dark-*.bin; do
+    [[ -f $f ]] && rawstats "$f" | tee -a "$summary"
+  done
+  say "Uncover the lens."
+fi
+
+# --- CPU / power at 720p -----------------------------------------------------
+if ((power_secs > 0)); then
+  hdr "720p stream: CPU and power over ${power_secs}s"
+  LIBCAMERA_SOFTISP_MODE=gpu cam -c1 -C -s role=viewfinder,width=1280,height=720,pixelformat=BGR888 >/dev/null 2>&1 &
+  campid=$!
+  sleep 3
+  python3 - "$campid" "$power_secs" <<'PY' | tee -a "$summary"
+import glob, os, sys, time
+pid, secs = int(sys.argv[1]), int(sys.argv[2])
+hz = os.sysconf("SC_CLK_TCK")
+
+def proc_ticks():
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            p = f.read().rsplit(")", 1)[1].split()
+        return int(p[11]) + int(p[12])
+    except (OSError, IndexError, ValueError):
+        return None
+
+def cpu_total():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    return sum(v), v[3] + v[4]
+
+def watts():
+    for bat in glob.glob("/sys/class/power_supply/*"):
+        try:
+            if open(bat + "/type").read().strip() != "Battery":
+                continue
+            if open(bat + "/status").read().strip() != "Discharging":
+                return None
+            try:
+                return int(open(bat + "/power_now").read()) / 1e6
+            except OSError:
+                return int(open(bat + "/current_now").read()) * int(open(bat + "/voltage_now").read()) / 1e12
+        except (OSError, ValueError):
+            continue
+    return None
+
+t0, p0, (c0, i0) = time.time(), proc_ticks(), cpu_total()
+ws = []
+while time.time() - t0 < secs:
+    time.sleep(1)
+    w = watts()
+    if w is not None:
+        ws.append(w)
+t1, p1, (c1, i1) = time.time(), proc_ticks(), cpu_total()
+if p0 is None or p1 is None:
+    print("cam exited before the sample finished (see logs)")
+else:
+    print("cam process CPU: %.1f%% of one core" % (100.0 * (p1 - p0) / hz / (t1 - t0)))
+    print("whole system busy: %.1f%%" % (100.0 * (1 - (i1 - i0) / (c1 - c0))))
+if ws:
+    print("battery discharge: %.2f W average over %d samples" % (sum(ws) / len(ws), len(ws)))
+else:
+    print("battery discharge: not available (on AC power?)")
+PY
+  kill -INT "$campid" 2>/dev/null
+  wait "$campid" 2>/dev/null
+fi
+
+gzip -f "$out"/logs/cam-*.log 2>/dev/null
+tarball=$out.tar.gz
+tar -C "$(dirname "$out")" -czf "$tarball" "$(basename "$out")"
+echo
+echo "Folder:  $out"
+echo "Archive: $tarball"
+echo "It holds frames of your surroundings and the tuning in use (derived from Microsoft's file): do not post it publicly."

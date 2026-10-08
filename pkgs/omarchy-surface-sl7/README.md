@@ -32,6 +32,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
 | 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
 | 8j | opt-in cluster parking on battery, off by default (section 8j) | `/usr/bin/sl7-park` |
+| 8k | front webcam tuning built on your machine from Microsoft's driver package, and a capture/compare script (section 8k) | `/usr/bin/sl7-camera-tuning`, `/usr/bin/sl7-camera-check` |
 | 12e | read-only per-process CPU and wakeup sampler (section 12e) | `/usr/bin/sl7-proftop` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
@@ -442,6 +443,84 @@ Compare `SYS` and `CPU_CLUSTER_0/1/2` (clusters 1 and 2 should fall), first at i
 difference) then under the workload. Also read the idle residency of the clusters in
 `/sys/kernel/debug/pm_genpd/power-domain-cpu-cluster{1,2}/idle_states` (root) and watch for
 latency: `sl7-proftop` while parked shows where the time goes.
+
+### 8k. Front webcam: `sl7-camera-tuning`, `sl7-camera-check`
+
+The front camera is an OmniVision OV02C10 (ACPI `MSHW0470`), 2 lanes on CSIPHY4, one mode,
+1928x1092 at 30 fps, 10-bit Bayer. It reaches applications through libcamera's simple pipeline
+and its software ISP (GPU debayer by default since libcamera 0.7.0), then PipeWire.
+
+Out of the box libcamera has no tuning for this sensor, so the picture has no colour correction.
+Microsoft ships a tuning for it in the Surface driver package. It is Microsoft's, so it is
+never part of this package or this repository; `sl7-camera-tuning` reads it from the driver
+package you downloaded and writes a libcamera tuning file on your machine only.
+
+Two parts:
+
+1. **libcamera 0.7.2-4.1 or later from the omarchy-sl7 repository** (package `libcamera-sl7`
+   builds the usual `libcamera`, `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera` and
+   `python-libcamera`). It adds the OV02C10 camera sensor helper (analogue gain in 1/16 steps,
+   10-bit black level 64, from upstream patch 28362), without which AGC does not run. It is a
+   plain update: `sudo pacman -Syu`.
+2. **The tuning file**, built from the Microsoft driver package:
+
+```
+omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
+                                  # as root; also keeps the camera tuning in /var/lib/omarchy-surface-sl7/camera/
+sudo sl7-camera-tuning            # uses that copy (or: --from-msi FILE.msi, --bin FILE)
+systemctl --user restart pipewire wireplumber
+sl7-camera-check                  # frames, logs and a CPU/power sample into ~/sl7-camera-<time>/
+```
+
+`sl7-camera-tuning` options:
+
+| Option | Meaning |
+|---|---|
+| `--blend X` | Strength of Microsoft's colour matrices, 0 (none) to 1 (full). Default 0.7. Full strength gave a green tint and noise with libcamera's grey-world white balance on a comparable Dell sensor; 70% was the usable setting there. |
+| `--set N` | Which illuminant set to use (default 1). `--list` shows what the file holds. |
+| `--black-level N` | Override the black level (16-bit scale, 4096 = 64 of 1023). Default: the sensor helper's. |
+| `--dry-run` | Print the tuning file to your terminal instead of writing it. |
+| `--list` | Print the sets found with their colour temperature ranges and matrices. |
+| `--status` | What is installed, the blend used, whether libcamera has the sensor helper. |
+| `--remove` | Delete the tuning file (libcamera falls back to no correction); `--purge` also deletes the kept copy of Microsoft's file. |
+
+Where it writes: `/etc/libcamera/ipa/simple/ov02c10.yaml`. libcamera 0.7.2 looks for
+`<sensor model>.yaml` in `$LIBCAMERA_IPA_CONFIG_PATH`, then `/etc/libcamera/ipa/<ipa>/`, then
+`/usr/share/libcamera/ipa/<ipa>/`, with `simple` as the IPA name of the software ISP. The file
+lists `BlackLevel`, `Awb`, `Ccm`, `Adjust` and `Agc` (0.7.2 has no other keys for them: grey-world
+white balance and the built-in exposure control). The software ISP's colour matrix has a CPU or
+GPU cost, which is why libcamera only enables it for a tuned sensor.
+
+How the colour matrices are taken from Microsoft's file: each colour temperature range has one
+3x3 matrix; the matrices of a set are stored back to back, the ranges just in front. The tool
+accepts a set only if every row sums to 1, the values are sane, the ranges form an increasing
+chain from about 1 K to at least 8000 K, and there is one range per matrix, and it refuses to write
+anything otherwise. The gaps between ranges are taken to be interpolation zones (the usual Chromatix layout);
+the tool reproduces that by emitting each matrix at both ends of its range (flat inside, linear between). A black level and
+white balance reference could not be identified in the file, so libcamera's own are used.
+
+Known limits: libcamera's EGL (GPU) debayer has an open bug where the white balance gain does not
+fully reach the blue channel on some sensors (libcamera issue 355); if the picture is yellow-green
+under the GPU path but fine with `LIBCAMERA_SOFTISP_MODE=cpu`, it is that. To force the CPU path
+for PipeWire: `systemctl --user edit wireplumber` and add
+`[Service]` / `Environment=LIBCAMERA_SOFTISP_MODE=cpu`.
+
+#### Using the camera in a browser
+
+The camera is a libcamera device behind PipeWire, so a browser has to use the PipeWire camera
+portal, which needs `pipewire-libcamera`, `wireplumber` and `xdg-desktop-portal` (all part of an
+Omarchy install except `pipewire-libcamera`: `sudo pacman -S pipewire-libcamera`, then
+`systemctl --user restart pipewire wireplumber`). These settings were not verified on the SL7 yet.
+
+- **Chromium:** open `chrome://flags/#enable-webrtc-pipewire-camera`, set it to Enabled and relaunch.
+  Permanently: add `--enable-features=WebRtcPipeWireCamera` to `~/.config/chromium-flags.conf`.
+- **Firefox:** `about:config`, set `media.webrtc.camera.allow-pipewire` to `true`, restart Firefox.
+- **Zen** (Firefox based): the same `about:config` setting.
+
+Choose **720p** in the web app's video settings (Meet, Teams, Jitsi and Zoom all have a resolution
+or quality setting): the software ISP cost grows with the pixel count, and the sensor's single mode
+is 1928x1092, so 720p is a downscale that saves power and CPU/GPU load. `sl7-camera-check` takes a
+1920x1080 and a 1280x720 frame next to each other so you can see whether 720p crops or scales.
 
 ### 9. Upstream leaf
 

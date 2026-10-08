@@ -53,7 +53,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Battery percentage and charging | Works | `qcom_battmgr` patch for capacity; Omarchy's battery scripts are patched to see the Qualcomm gauge. |
 | USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s), in either plug orientation (linux-sl7 7.2.8-18 or later), with DisplayPort alt mode and docks. USB4 and Thunderbolt bandwidth is not available yet. |
 | Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume. See [power results](#power-and-performance-results-so-far) for the drain. |
-| Front webcam | Partial | OV02C10 through libcamera's software ISP. No tuning yet, so expect poor colour. |
+| Front webcam | Partial | OV02C10 through libcamera's software ISP (the `libcamera` package in the omarchy-sl7 repository adds the sensor helper). Colour tuning is built on your machine from the Surface driver package you download (`sudo sl7-camera-tuning`); Microsoft's tuning is never redistributed. Not yet verified on the SL7. See the [webcam section](pkgs/omarchy-surface-sl7/README.md#8k-front-webcam-sl7-camera-tuning-sl7-camera-check) for browser setup. |
 | IR camera | Works | ST VD55G0, 644x604 greyscale, through `sl7-ir-bridge`, lit by the built-in IR emitter (verified 2026-10-07: self-test frames brighter than unlit, no black frames). |
 | Face unlock | Works | Verified on the SL7 (2026-10-07), on the normal boot (there is no IR test boot entry): face registered in the setup app, lock screen unlocked by face, no external IR source needed. howdy-next plus a setup app (Omarchy menu: Setup > Security > Face Unlock). The built-in IR emitter is driven by the sensor's own strobe (stage C found that GPIO 1 lights it), held by the kernel (linux-sl7 7.2.8-22) to Windows Hello's 100-line exposure and frame time, whatever user space asks: on the SL7 sensor clock that is 0.8 ms of light per 27.8 ms frame (2.9 % duty, Windows 5.7 %). `sl7-ir-bridge` lights it only while a scan streams, 10 s at most per session, with analog gain 24 for faster matches; `IR_EMITTER=off` in `/etc/sl7-ir-bridge.conf` keeps it dark. |
 | CPU frequency scaling | Works | All three clusters, `schedutil`, with the SCMI sustained-frequency fix. |
@@ -172,6 +172,8 @@ All ship in `omarchy-surface-sl7` unless noted.
 | `sl7-powertest` | Measures idle or video power from the battery gauge with a pinned brightness, and compares two runs. |
 | `sl7-sleepstats` | Prints SoC sleep counters (`cxsd`, `ddr`, `aosd`); `--trace` finds what blocks deep sleep, `--suspend-test` runs a measured suspend. |
 | `sl7-ir-probe` | Read-only camera probe: sensor binding, media topology and a 30-frame IR capture. |
+| `sl7-camera-tuning` | Builds the front webcam's libcamera tuning file from Microsoft's driver package, on your machine (`--blend`, `--dry-run`, `--status`, `--remove`). |
+| `sl7-camera-check` | Captures GPU and CPU frames at 1080p and 720p, raw and dark frames, logs and a CPU/power sample into `~/sl7-camera-<time>/` and tars it. |
 | `omarchy-sl7-powermode` | Applies or shows the AC or battery power mode (frequency caps, Wi-Fi power save). |
 | `omarchy-sl7-test-entry` | Adds optional boot entries for experiments (`psr`, `clk-unused`); off by default. |
 | `omarchy-sl7-faceunlock` | Face Unlock setup and face manager (Omarchy menu: Setup > Security > Face Unlock). Package `omarchy-sl7-faceunlock`. |

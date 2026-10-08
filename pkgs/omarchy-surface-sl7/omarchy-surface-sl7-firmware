@@ -69,6 +69,19 @@ die() {
 
 hash_of() { sha256sum "$1" | cut -d' ' -f1; }
 
+# The front camera tuning (Microsoft's Chromatix file) is not firmware and is not
+# installed anywhere the system reads. It is kept under /var/lib so that
+# sl7-camera-tuning can build the libcamera tuning file without the MSI. Local
+# only; best effort.
+camera_dir=${OMARCHY_SL7_CAMERA_DIR:-/var/lib/omarchy-surface-sl7/camera}
+keep_camera_tuning() {
+  local found
+  found=$(find "$1" -type f -name com.surface.tuned.ffc_ov02c10.bin -print -quit)
+  if [[ -n $found ]] && install -Dm644 "$found" "$camera_dir/com.surface.tuned.ffc_ov02c10.bin"; then
+    echo "kept the camera tuning for sl7-camera-tuning in $camera_dir"
+  fi
+}
+
 status() {
   local entry kind sum rel _dir missing=0 state
   for entry in "${manifest[@]}"; do
@@ -225,6 +238,8 @@ for i in "${!queue_src[@]}"; do
   install -Dm644 "${queue_src[$i]}" "$dest_root/${queue_rel[$i]}"
   echo "installed ${queue_rel[$i]}"
 done
+
+if [[ -n ${surface_update:-} ]]; then keep_camera_tuning "$surface_update" || true; fi
 
 echo
 status || true
