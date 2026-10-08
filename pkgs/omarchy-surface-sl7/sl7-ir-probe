@@ -708,7 +708,7 @@ if ((capture)); then
   section "IR capture"
   if ((debug)); then debug_on; trap debug_off EXIT; fi
   if [[ -n $media_dev ]]; then
-    capture_cam ir vd55g "$ir_dev" msm_csid0 msm_vfe0_rdi0 "$frames" 644 604
+    capture_cam ir vd55g "$ir_dev" msm_csid2 msm_vfe2_rdi0 "$frames" 644 604
   else
     info "IR capture skipped: no CAMSS media device"
   fi

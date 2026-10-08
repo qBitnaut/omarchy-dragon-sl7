@@ -45,7 +45,8 @@ Point howdy-next at `/dev/v4l/by-id/sl7-ir-camera` (it accepts `/dev/video*`,
    count is effectively 0 or 1.
 3. Count 1: the daemon opens the CAMSS media device (the one whose driver is
    `qcom-camss`), reads the topology, finds the path `vd55g* -> msm_csiphy ->
-   msm_csid0 -> msm_vfe0_rdi0 -> video node` by entity name, enables the links on
+   msm_csid2 -> msm_vfe2_rdi0 -> video node` by entity name (the CSID and VFE are
+   `IR_CSID` / `IR_VFE_RDI`, see below), enables the links on
    that path (only those not already enabled), sets `Y8_1X8` 644x604 on every pad
    of the path, sets GREY 644x604 on the video node (reading back the stride, 656
    today), maps 4 buffers and starts streaming. It never resets the media graph
@@ -61,6 +62,23 @@ Point howdy-next at `/dev/v4l/by-id/sl7-ir-camera` (it accepts `/dev/video*`,
 6. One log line per session start and end (journal: `journalctl -u
    sl7-ir-bridge`), for example `session end (consumer stopped): 312 frames in
    9.0 s (34.7 fps), 0 dropped`.
+
+CAMSS route: libcamera's simple pipeline wires the RGB camera through the first
+route it finds (`msm_csiphy4 -> msm_csid0 -> msm_vfe0_rdi0`, `/dev/video2`) and
+keeps those links and nodes open while the desktop session runs. A CSID sink
+accepts one enabled source link, so the IR camera cannot share `msm_csid0`:
+enabling `msm_csiphy0 -> msm_csid0` fails with EBUSY and face unlock times out.
+The bridge therefore defaults to `msm_csiphy0 -> msm_csid2 -> msm_vfe2_rdi0`
+(`/dev/video10` on the SL7 today; always resolved by entity name, never by
+number). `IR_CSID` and `IR_VFE_RDI` in `/etc/sl7-ir-bridge.conf` change it. The
+bridge touches only links on its own path (sources `msm_csiphy0`, its CSID and
+its RDI); it never changes anything involving `msm_csiphy4` or another camera's
+CSID/VFE. If the configured CSID sink or RDI is already enabled for another
+source (libcamera moved, or the setting was changed), it picks the next free
+CSID/VFE combination, highest numbers first, and logs `IR route: ...`. The start
+up cleanup of leftover links is limited to the same path. After an update and a
+reboot, `media-ctl -p` shows the IR sensor on `msm_csid2` / `msm_vfe2_rdi0` and
+the RGB camera on `msm_csid0` / `msm_vfe0_rdi0`; the journal has no EBUSY.
 
 Session cap: one CAMSS streaming session lasts at most 10 s (`IR_SESSION_MAX_MS`,
 clamped to 10000). After that the bridge stops the stream, logs it, and waits for

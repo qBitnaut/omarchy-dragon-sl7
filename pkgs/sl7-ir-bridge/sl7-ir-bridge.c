@@ -270,8 +270,8 @@ static int session_start(struct bridge *b)
 	b->frames = b->dropped = 0;
 	b->t_start = b->t_last_frame = ir_now_ms();
 	b->stop_at = -1;
-	ir_log(IR_LOG_INFO, "session start: consumer on %s, CAMSS %s -> %s GREY %ux%u stride %u",
-	       b->lb_path, b->cam.media_path, b->cam.video_path, b->cam.width, b->cam.height,
+	ir_log(IR_LOG_INFO, "session start: consumer on %s, CAMSS %s %s/%s -> %s GREY %ux%u stride %u",
+	       b->lb_path, b->cam.media_path, b->cam.csid_name, b->cam.rdi_name, b->cam.video_path, b->cam.width, b->cam.height,
 	       b->cam.stride);
 	return 0;
 }
@@ -480,6 +480,7 @@ static int run_daemon(void)
 	b.session_max_ms = env_ms("IR_SESSION_MAX_MS", IR_SESSION_MAX_MS, 1000, IR_SESSION_MAX_MS);
 	conf = getenv("IR_EMITTER");
 	ir_emitter_configure(conf);
+	ir_camss_configure(getenv("IR_CSID"), getenv("IR_VFE_RDI"));
 	b.tight = malloc(IR_FRAME_SIZE);
 	b.black = calloc(1, IR_FRAME_SIZE);
 	if (!b.tight || !b.black)

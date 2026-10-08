@@ -19,10 +19,14 @@
 #include <unistd.h>
 
 #define SENSOR_PREFIX "vd55g"
-/* The only CSID and VFE entities the IR path may use (the RGB camera uses
- * msm_csid1 / msm_vfe1_*). */
-#define IR_CSID "msm_csid0"
-#define IR_RDI "msm_vfe0_rdi0"
+/* Default IR route. libcamera's simple pipeline takes the first route for the
+ * RGB camera (msm_csiphy4 -> msm_csid0 -> msm_vfe0_rdi0) and keeps it enabled
+ * while the session runs, so the IR path starts on a CSID and VFE well away
+ * from that. IR_CSID and IR_VFE_RDI in /etc/sl7-ir-bridge.conf override it. */
+#define DEFAULT_IR_CSID "msm_csid2"
+#define DEFAULT_IR_RDI "msm_vfe2_rdi0"
+#define NAME_LEN 32
+#define MAX_ROUTES 32
 /* Enabling a link fails with EBUSY while a stream still runs through one of its
  * entities: the pipeline of a consumer that was just killed is torn down by the
  * kernel when its descriptors close, which can lag a little. Wait for it. */
@@ -122,16 +126,217 @@ static int is_video_entity(const struct media_v2_entity *e)
 	return e->function == MEDIA_ENT_F_IO_V4L;
 }
 
-/* The CSID and VFE entities other than the IR ones are off limits. */
-static int entity_usable(const struct media_v2_entity *e)
+/* One candidate IR route: the CSID and the VFE RDI entity the path may use. */
+struct route {
+	char csid[NAME_LEN];
+	char rdi[NAME_LEN];
+};
+
+static struct route pref = { DEFAULT_IR_CSID, DEFAULT_IR_RDI };
+
+/* Accepts "msm_csid2", "csid2" or "2" (the bare number) for the CSID, and
+ * "msm_vfe2_rdi0", "vfe2_rdi0" or "2" (rdi0 of that VFE) for the RDI. */
+static int normalize_name(const char *in, const char *pre, const char *bare_fmt, char *out)
+{
+	char tmp[NAME_LEN];
+	size_t i, n;
+
+	if (!in || !*in)
+		return 0;
+	n = strlen(in);
+	if (n >= sizeof(tmp) - 8)
+		return -1;
+	for (i = 0; i < n; i++)
+		if (!((in[i] >= '0' && in[i] <= '9') || (in[i] >= 'a' && in[i] <= 'z') ||
+		      in[i] == '_'))
+			return -1;
+	if (in[0] >= '0' && in[0] <= '9') {
+		for (i = 0; i < n; i++)
+			if (in[i] < '0' || in[i] > '9')
+				return -1;
+		snprintf(tmp, sizeof(tmp), bare_fmt, in);
+	} else if (!strncmp(in, "msm_", 4)) {
+		snprintf(tmp, sizeof(tmp), "%s", in);
+	} else {
+		snprintf(tmp, sizeof(tmp), "msm_%s", in);
+	}
+	if (strncmp(tmp, pre, strlen(pre)) != 0)
+		return -1;
+	snprintf(out, NAME_LEN, "%s", tmp);
+	return 1;
+}
+
+void ir_camss_configure(const char *csid, const char *rdi)
+{
+	char tmp[NAME_LEN];
+	int r;
+
+	r = normalize_name(csid, "msm_csid", "msm_csid%s", tmp);
+	if (r > 0)
+		snprintf(pref.csid, sizeof(pref.csid), "%s", tmp);
+	else if (r < 0)
+		ir_log(IR_LOG_WARN, "IR_CSID=%s is not a CSID entity name, using %s", csid, pref.csid);
+	r = normalize_name(rdi, "msm_vfe", "msm_vfe%s_rdi0", tmp);
+	if (r > 0)
+		snprintf(pref.rdi, sizeof(pref.rdi), "%s", tmp);
+	else if (r < 0)
+		ir_log(IR_LOG_WARN, "IR_VFE_RDI=%s is not a VFE RDI entity name, using %s", rdi,
+		       pref.rdi);
+}
+
+/* The CSID and VFE entities other than the route's are off limits. */
+static int entity_usable(const struct media_v2_entity *e, const struct route *r)
 {
 	if (is_video_entity(e))
 		return 1;
 	if (!strncmp(e->name, "msm_csid", 8))
-		return !strcmp(e->name, IR_CSID);
+		return !strcmp(e->name, r->csid);
 	if (!strncmp(e->name, "msm_vfe", 7))
-		return !strcmp(e->name, IR_RDI);
+		return !strcmp(e->name, r->rdi);
 	return 1;
+}
+
+static const struct media_v2_entity *ent_by_name(const struct topo *t, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < t->nents; i++)
+		if (!strcmp(t->ents[i].name, name))
+			return &t->ents[i];
+	return NULL;
+}
+
+/* The sensor entity and the CSIPHY its data link leads to. 0 or -ENOENT. */
+static int find_sensor(const struct topo *t, uint32_t *sensor_id, uint32_t *phy_id)
+{
+	unsigned i, k;
+
+	for (i = 0; i < t->nents; i++) {
+		if (strncmp(t->ents[i].name, SENSOR_PREFIX, strlen(SENSOR_PREFIX)) != 0)
+			continue;
+		for (k = 0; k < t->nlinks; k++) {
+			const struct media_v2_link *l = &t->links[k];
+			const struct media_v2_pad *sp, *dp;
+
+			if (!is_data_link(l))
+				continue;
+			sp = pad_by_id(t, l->source_id);
+			dp = pad_by_id(t, l->sink_id);
+			if (!sp || !dp || sp->entity_id != t->ents[i].id)
+				continue;
+			*sensor_id = t->ents[i].id;
+			*phy_id = dp->entity_id;
+			return 0;
+		}
+	}
+	return -ENOENT;
+}
+
+/* Is the route free of anybody else's enabled links? Looks at the CSID's sink
+ * and source links and at the RDI's sink. Links from the sensor's own CSIPHY
+ * are ours. Never true for a CSID libcamera has wired to the RGB camera. */
+static int route_free(const struct topo *t, uint32_t phy_id, const struct route *r)
+{
+	const struct media_v2_entity *csid = ent_by_name(t, r->csid);
+	const struct media_v2_entity *rdi = ent_by_name(t, r->rdi);
+	uint32_t sink_src = 0;
+	unsigned k;
+
+	if (!csid || !rdi)
+		return 0;
+	for (k = 0; k < t->nlinks; k++) {
+		const struct media_v2_link *l = &t->links[k];
+		const struct media_v2_pad *sp, *dp;
+
+		if (!is_data_link(l) || !(l->flags & MEDIA_LNK_FL_ENABLED))
+			continue;
+		sp = pad_by_id(t, l->source_id);
+		dp = pad_by_id(t, l->sink_id);
+		if (sp && dp && dp->entity_id == csid->id)
+			sink_src = sp->entity_id;
+	}
+	if (sink_src && sink_src != phy_id)
+		return 0;
+	for (k = 0; k < t->nlinks; k++) {
+		const struct media_v2_link *l = &t->links[k];
+		const struct media_v2_pad *sp, *dp;
+
+		if (!is_data_link(l) || !(l->flags & MEDIA_LNK_FL_ENABLED))
+			continue;
+		sp = pad_by_id(t, l->source_id);
+		dp = pad_by_id(t, l->sink_id);
+		if (!sp || !dp)
+			continue;
+		/* the CSID feeding some other VFE, with a source we do not own */
+		if (sp->entity_id == csid->id && dp->entity_id != rdi->id && !sink_src)
+			return 0;
+		/* another CSID already feeding this RDI */
+		if (dp->entity_id == rdi->id && sp->entity_id != csid->id)
+			return 0;
+	}
+	return 1;
+}
+
+static unsigned name_index(const char *name, const char *fmt)
+{
+	unsigned n = 0;
+
+	return sscanf(name, fmt, &n) == 1 ? n : 0;
+}
+
+/* Candidate routes, the configured one first, then every other CSID x VFE
+ * combination with the highest VFE and CSID numbers first (libcamera takes
+ * the lowest). The RDI suffix of the configured name (e.g. "_rdi0") is kept. */
+static unsigned build_routes(const struct topo *t, struct route *out, unsigned max)
+{
+	unsigned csids[16], vfes[16], nc = 0, nv = 0, i, j, n = 0;
+	char suffix[NAME_LEN] = "";
+	unsigned pv = 0;
+	int have_suffix = sscanf(pref.rdi, "msm_vfe%u_%15s", &pv, suffix) == 2;
+
+	snprintf(out[n].csid, NAME_LEN, "%s", pref.csid);
+	snprintf(out[n].rdi, NAME_LEN, "%s", pref.rdi);
+	n++;
+	if (!have_suffix)
+		return n;
+	for (i = 0; i < t->nents && (nc < 16 || nv < 16); i++) {
+		const char *nm = t->ents[i].name;
+		char suf[NAME_LEN];
+		unsigned v;
+
+		if (!strncmp(nm, "msm_csid", 8) && nc < 16) {
+			csids[nc++] = name_index(nm, "msm_csid%u");
+		} else if (sscanf(nm, "msm_vfe%u_%15s", &v, suf) == 2 && !strcmp(suf, suffix) &&
+			   nv < 16) {
+			vfes[nv++] = v;
+		}
+	}
+	for (i = 1; i < nc; i++) /* descending */
+		for (j = i; j > 0 && csids[j] > csids[j - 1]; j--) {
+			unsigned x = csids[j];
+
+			csids[j] = csids[j - 1];
+			csids[j - 1] = x;
+		}
+	for (i = 1; i < nv; i++)
+		for (j = i; j > 0 && vfes[j] > vfes[j - 1]; j--) {
+			unsigned x = vfes[j];
+
+			vfes[j] = vfes[j - 1];
+			vfes[j - 1] = x;
+		}
+	for (i = 0; i < nv; i++) {
+		for (j = 0; j < nc && n < max; j++) {
+			struct route r;
+
+			snprintf(r.csid, NAME_LEN, "msm_csid%u", csids[j]);
+			snprintf(r.rdi, NAME_LEN, "msm_vfe%u_%s", vfes[i], suffix);
+			if (!strcmp(r.csid, pref.csid) && !strcmp(r.rdi, pref.rdi))
+				continue;
+			out[n++] = r;
+		}
+	}
+	return n;
 }
 
 /* /dev node of an entity, through its interface link and sysfs. */
@@ -206,8 +411,8 @@ static int find_camss_media(char *path, size_t len)
 }
 
 /* Breadth-first walk from the sensor over data links to a video node. */
-static int plan_path(const struct topo *t, struct ir_camss *c, uint32_t *video_ent,
-		     uint32_t *sensor_ent)
+static int plan_path(const struct topo *t, struct ir_camss *c, const struct route *rt,
+		     uint32_t *video_ent, uint32_t *sensor_ent)
 {
 	int *parent_link = malloc(sizeof(int) * (t->nents + 1));
 	int *queue = malloc(sizeof(int) * (t->nents + 1));
@@ -252,7 +457,7 @@ static int plan_path(const struct topo *t, struct ir_camss *c, uint32_t *video_e
 			if (!sp || !dp || sp->entity_id != t->ents[cur].id)
 				continue;
 			de = ent_by_id(t, dp->entity_id);
-			if (!de || !entity_usable(de))
+			if (!de || !entity_usable(de, rt))
 				continue;
 			for (i = 0; i < t->nents; i++)
 				if (&t->ents[i] == de)
@@ -265,7 +470,7 @@ static int plan_path(const struct topo *t, struct ir_camss *c, uint32_t *video_e
 	}
 	if (found < 0) {
 		ir_log(IR_LOG_ERR, "no path from the IR sensor to a video node (allowed: %s, %s)",
-		       IR_CSID, IR_RDI);
+		       rt->csid, rt->rdi);
 		goto out;
 	}
 	/* walk back from the video node */
@@ -454,33 +659,59 @@ static int video_setup(struct ir_camss *c, unsigned w, unsigned h)
 	return 0;
 }
 
-int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h)
+/* Drop everything a failed route attempt set up (buffers, video node, links
+ * this session enabled), keeping the media device open for the next route. */
+static void route_reset(struct ir_camss *c)
 {
-	struct topo t;
+	unsigned i;
+
+	ir_camss_stop(c);
+	for (i = 0; i < c->nbuf; i++)
+		if (c->map[i])
+			munmap(c->map[i], c->maplen[i]);
+	if (c->video_fd >= 0) {
+		struct v4l2_requestbuffers rb;
+
+		memset(&rb, 0, sizeof(rb));
+		rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+		rb.memory = V4L2_MEMORY_MMAP;
+		ir_ioctl(c->video_fd, VIDIOC_REQBUFS, &rb);
+		close(c->video_fd);
+	}
+	/* undo only what this session switched on, last link first */
+	if (c->media_fd >= 0) {
+		for (i = c->nhops; i-- > 0;) {
+			if (c->hops[i].we_enabled && setup_link(c->media_fd, &c->hops[i], 0) < 0)
+				ir_log(IR_LOG_DEBUG, "could not disable link %u", i);
+		}
+	}
+	memset(c->map, 0, sizeof(c->map));
+	memset(c->maplen, 0, sizeof(c->maplen));
+	memset(c->hops, 0, sizeof(c->hops));
+	c->nbuf = 0;
+	c->nhops = 0;
+	c->video_fd = -1;
+	c->streaming = 0;
+}
+
+/* Plan, enable and configure one route. On failure the route is undone. */
+static int route_open(struct ir_camss *c, const struct topo *t, const struct route *rt,
+		      unsigned w, unsigned h)
+{
 	uint32_t video_ent = 0, sensor_ent = 0;
 	unsigned i;
 	int rc, tries;
 
-	rc = find_camss_media(c->media_path, sizeof(c->media_path));
-	if (rc < 0) {
-		ir_log(IR_LOG_ERR, "no qcom-camss media device (CAMSS not probed?)");
-		return rc;
-	}
-	c->media_fd = rc;
-	rc = topo_load(c->media_fd, &t);
-	if (rc < 0) {
-		ir_log(IR_LOG_ERR, "%s: read topology: %s", c->media_path, strerror(-rc));
-		goto fail;
-	}
-	rc = plan_path(&t, c, &video_ent, &sensor_ent);
+	rc = plan_path(t, c, rt, &video_ent, &sensor_ent);
 	if (rc < 0)
-		goto fail_topo;
-	if (entity_devnode(&t, video_ent, c->video_path, sizeof(c->video_path)) < 0 ||
-	    entity_devnode(&t, sensor_ent, c->sensor_node, sizeof(c->sensor_node)) < 0) {
+		return rc;
+	if (entity_devnode(t, video_ent, c->video_path, sizeof(c->video_path)) < 0 ||
+	    entity_devnode(t, sensor_ent, c->sensor_node, sizeof(c->sensor_node)) < 0) {
 		ir_log(IR_LOG_ERR, "cannot resolve the video or sensor device node");
-		rc = -ENODEV;
-		goto fail_topo;
+		return -ENODEV;
 	}
+	snprintf(c->csid_name, sizeof(c->csid_name), "%s", rt->csid);
+	snprintf(c->rdi_name, sizeof(c->rdi_name), "%s", rt->rdi);
 
 	/* links: only those on the IR path that are not already on */
 	for (i = 0; i < c->nhops; i++) {
@@ -496,28 +727,27 @@ int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h)
 			rc = setup_link(c->media_fd, hp, 1);
 		}
 		if (rc < 0) {
-			ir_log(IR_LOG_ERR, "enable link %u:%u -> %u:%u: %s", hp->src_ent, hp->src_pad,
-			       hp->sink_ent, hp->sink_pad, strerror(-rc));
+			ir_log(IR_LOG_ERR, "enable link %u:%u -> %u:%u (%s via %s): %s", hp->src_ent,
+			       hp->src_pad, hp->sink_ent, hp->sink_pad, rt->csid, rt->rdi,
+			       strerror(-rc));
 			if (rc == -EBUSY)
 				ir_log(IR_LOG_ERR,
 				       "the IR path is still streaming for another user (a test tool, or a "
 				       "consumer that has not finished stopping); links enabled so far are "
 				       "released and the session start is retried later");
-			goto fail_topo;
+			goto fail;
 		}
 		hp->we_enabled = 1;
 	}
 	/* formats, sensor side first */
 	for (i = 0; i < c->nhops; i++) {
-		rc = set_pad_format(&t, c->hops[i].src_ent, c->hops[i].src_pad, w, h);
+		rc = set_pad_format(t, c->hops[i].src_ent, c->hops[i].src_pad, w, h);
 		if (rc < 0)
-			goto fail_topo;
-		rc = set_pad_format(&t, c->hops[i].sink_ent, c->hops[i].sink_pad, w, h);
+			goto fail;
+		rc = set_pad_format(t, c->hops[i].sink_ent, c->hops[i].sink_pad, w, h);
 		if (rc < 0)
-			goto fail_topo;
+			goto fail;
 	}
-	topo_free(&t);
-
 	c->video_fd = open(c->video_path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	if (c->video_fd < 0) {
 		rc = -errno;
@@ -530,6 +760,60 @@ int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h)
 		goto fail;
 	}
 	return 0;
+fail:
+	route_reset(c);
+	return rc;
+}
+
+int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h)
+{
+	struct topo t;
+	struct route routes[MAX_ROUTES];
+	uint32_t sensor_id = 0, phy_id = 0;
+	unsigned nr, i, skipped = 0;
+	int rc = -EBUSY;
+
+	rc = find_camss_media(c->media_path, sizeof(c->media_path));
+	if (rc < 0) {
+		ir_log(IR_LOG_ERR, "no qcom-camss media device (CAMSS not probed?)");
+		return rc;
+	}
+	c->media_fd = rc;
+	rc = topo_load(c->media_fd, &t);
+	if (rc < 0) {
+		ir_log(IR_LOG_ERR, "%s: read topology: %s", c->media_path, strerror(-rc));
+		goto fail;
+	}
+	if (find_sensor(&t, &sensor_id, &phy_id) < 0) {
+		ir_log(IR_LOG_ERR, "no %s* sensor entity in the CAMSS graph", SENSOR_PREFIX);
+		rc = -ENOENT;
+		goto fail_topo;
+	}
+	nr = build_routes(&t, routes, MAX_ROUTES);
+	rc = -EBUSY;
+	for (i = 0; i < nr; i++) {
+		if (!route_free(&t, phy_id, &routes[i])) {
+			ir_log(IR_LOG_DEBUG, "route %s / %s is not free or not present, skipping",
+			       routes[i].csid, routes[i].rdi);
+			skipped++;
+			continue;
+		}
+		if (i > 0 || skipped)
+			ir_log(IR_LOG_INFO, "IR route: %s via %s (the configured %s / %s is taken)",
+			       routes[i].csid, routes[i].rdi, pref.csid, pref.rdi);
+		rc = route_open(c, &t, &routes[i], w, h);
+		if (rc == 0 || rc == -EBUSY || rc == -ENOMEM)
+			break;
+		ir_log(IR_LOG_WARN, "route %s / %s failed (%s), trying the next one", routes[i].csid,
+		       routes[i].rdi, strerror(-rc));
+	}
+	if (rc == -EBUSY && skipped == nr)
+		ir_log(IR_LOG_ERR, "no free CSID/VFE route for the IR camera: every candidate is "
+		       "already wired to another camera (EBUSY)");
+	topo_free(&t);
+	if (rc < 0)
+		goto fail;
+	return 0;
 fail_topo:
 	topo_free(&t);
 fail:
@@ -537,13 +821,17 @@ fail:
 	return rc;
 }
 
+/* At daemon start: disable links an earlier run left enabled. Only links on
+ * the bridge's own path qualify: a link whose source is the IR sensor's
+ * CSIPHY, and a CSID -> VFE link of a CSID that CSIPHY feeds. Everything else,
+ * the RGB camera's links above all, is left alone. */
 int ir_camss_release_stale(void)
 {
 	struct ir_camss c;
 	struct topo t;
-	uint32_t video_ent = 0, sensor_ent = 0;
-	unsigned i;
-	int rc, released = 0;
+	uint32_t sensor_id = 0, phy_id = 0, own_csid[16];
+	unsigned i, k, n_own = 0;
+	int rc, released = 0, pass;
 
 	ir_camss_init(&c);
 	rc = find_camss_media(c.media_path, sizeof(c.media_path));
@@ -553,23 +841,55 @@ int ir_camss_release_stale(void)
 	rc = topo_load(c.media_fd, &t);
 	if (rc < 0)
 		goto out;
-	rc = plan_path(&t, &c, &video_ent, &sensor_ent);
-	topo_free(&t);
+	rc = find_sensor(&t, &sensor_id, &phy_id);
 	if (rc < 0)
-		goto out;
-	for (i = c.nhops; i-- > 0;) {
-		const struct ir_hop *hp = &c.hops[i];
+		goto out_topo;
+	for (k = 0; k < t.nlinks && n_own < 16; k++) {
+		const struct media_v2_link *l = &t.links[k];
+		const struct media_v2_pad *sp = pad_by_id(&t, l->source_id);
+		const struct media_v2_pad *dp = pad_by_id(&t, l->sink_id);
 
-		if ((hp->flags & MEDIA_LNK_FL_IMMUTABLE) || !(hp->flags & MEDIA_LNK_FL_ENABLED))
-			continue;
-		if (setup_link(c.media_fd, hp, 0) == 0)
-			released++;
-		else
-			ir_log(IR_LOG_DEBUG, "stale link %u not released (in use)", i);
+		if (is_data_link(l) && (l->flags & MEDIA_LNK_FL_ENABLED) && sp && dp &&
+		    sp->entity_id == phy_id)
+			own_csid[n_own++] = dp->entity_id;
+	}
+	for (pass = 0; pass < 2; pass++) { /* downstream CSID -> VFE links first */
+		for (k = 0; k < t.nlinks; k++) {
+			const struct media_v2_link *l = &t.links[k];
+			const struct media_v2_pad *sp = pad_by_id(&t, l->source_id);
+			const struct media_v2_pad *dp = pad_by_id(&t, l->sink_id);
+			struct ir_hop h;
+			int ours = 0;
+
+			if (!is_data_link(l) || !sp || !dp || !(l->flags & MEDIA_LNK_FL_ENABLED) ||
+			    (l->flags & MEDIA_LNK_FL_IMMUTABLE))
+				continue;
+			if (pass == 0) {
+				for (i = 0; i < n_own; i++)
+					if (sp->entity_id == own_csid[i])
+						ours = 1;
+			} else {
+				ours = sp->entity_id == phy_id;
+			}
+			if (!ours)
+				continue;
+			memset(&h, 0, sizeof(h));
+			h.src_ent = sp->entity_id;
+			h.src_pad = sp->index;
+			h.sink_ent = dp->entity_id;
+			h.sink_pad = dp->index;
+			if (setup_link(c.media_fd, &h, 0) == 0)
+				released++;
+			else
+				ir_log(IR_LOG_DEBUG, "stale link %u:%u -> %u:%u not released (in use)",
+				       h.src_ent, h.src_pad, h.sink_ent, h.sink_pad);
+		}
 	}
 	if (released)
 		ir_log(IR_LOG_INFO, "released %d IR path link(s) left enabled by an earlier run", released);
 	rc = released;
+out_topo:
+	topo_free(&t);
 out:
 	close(c.media_fd);
 	return rc;
@@ -601,8 +921,9 @@ int ir_camss_find_holders(char *out, size_t len)
 	struct holder_node nodes[HOLDER_NODES];
 	struct ir_camss c;
 	struct topo t;
-	uint32_t video_ent = 0, sensor_ent = 0;
-	unsigned nn = 0, i, found = 0, denied = 0;
+	uint32_t video_ent = 0, sensor_ent = 0, phy_id = 0, sensor_id = 0;
+	struct route routes[MAX_ROUTES], *rt;
+	unsigned nn = 0, i, nr, found = 0, denied = 0;
 	char node[128];
 	DIR *proc;
 	struct dirent *pe;
@@ -622,7 +943,18 @@ int ir_camss_find_holders(char *out, size_t len)
 		close(c.media_fd);
 		return rc;
 	}
-	rc = plan_path(&t, &c, &video_ent, &sensor_ent);
+	rc = find_sensor(&t, &sensor_id, &phy_id);
+	if (rc == 0) {
+		/* the route the bridge would use: the first free one, else the configured */
+		nr = build_routes(&t, routes, MAX_ROUTES);
+		rt = &routes[0];
+		for (i = 0; i < nr; i++)
+			if (route_free(&t, phy_id, &routes[i])) {
+				rt = &routes[i];
+				break;
+			}
+		rc = plan_path(&t, &c, rt, &video_ent, &sensor_ent);
+	}
 	if (rc == 0) {
 		holder_add(nodes, &nn, c.media_path, "CAMSS media device, shared with the RGB camera");
 		if (entity_devnode(&t, video_ent, node, sizeof(node)) == 0)
@@ -778,29 +1110,8 @@ void ir_camss_stop(struct ir_camss *c)
 
 void ir_camss_close(struct ir_camss *c)
 {
-	unsigned i;
-
-	ir_camss_stop(c);
-	for (i = 0; i < c->nbuf; i++)
-		if (c->map[i])
-			munmap(c->map[i], c->maplen[i]);
-	if (c->video_fd >= 0) {
-		struct v4l2_requestbuffers rb;
-
-		memset(&rb, 0, sizeof(rb));
-		rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-		rb.memory = V4L2_MEMORY_MMAP;
-		ir_ioctl(c->video_fd, VIDIOC_REQBUFS, &rb);
-		close(c->video_fd);
-	}
-	/* undo only what this session switched on, last link first */
-	if (c->media_fd >= 0) {
-		for (i = c->nhops; i-- > 0;) {
-			if (c->hops[i].we_enabled &&
-			    setup_link(c->media_fd, &c->hops[i], 0) < 0)
-				ir_log(IR_LOG_DEBUG, "could not disable link %u", i);
-		}
+	route_reset(c);
+	if (c->media_fd >= 0)
 		close(c->media_fd);
-	}
 	ir_camss_init(c);
 }

@@ -15,14 +15,17 @@ struct ir_hop {
 };
 
 /* One IR capture path through the qcom-camss media graph:
- * vd55g sensor -> msm_csiphy -> msm_csid0 -> msm_vfe0_rdi0 -> video node.
- * Nothing outside this path is touched (no media-ctl -r equivalent). */
+ * vd55g sensor -> msm_csiphy0 -> msm_csidN -> msm_vfeM_rdi0 -> video node,
+ * by default csid2 / vfe2 (libcamera's RGB route is csid0 / vfe0). Nothing
+ * outside this path is touched (no media-ctl -r equivalent). */
 struct ir_camss {
 	int media_fd;
 	int video_fd;
 	char media_path[128];
 	char video_path[128];
 	char sensor_node[128]; /* the sensor subdev, for the emitter hook */
+	char csid_name[32];    /* the route in use, for the log */
+	char rdi_name[32];
 	unsigned width, height, stride, sizeimage;
 	struct ir_hop hops[IR_MAX_HOPS];
 	unsigned nhops;
@@ -33,12 +36,19 @@ struct ir_camss {
 };
 
 void ir_camss_init(struct ir_camss *c);
+/* Set the preferred CSID and VFE RDI entity (IR_CSID, IR_VFE_RDI): a full
+ * entity name, or just the number. NULL or empty keeps the default
+ * (msm_csid2, msm_vfe2_rdi0). If the route is taken by another camera, the
+ * next free CSID/VFE combination is used. */
+void ir_camss_configure(const char *csid, const char *rdi);
 /* Find the CAMSS media device, enable the IR links, set Y8_1X8 w x h on every
  * pad of the path, set GREY on the video node and map the buffers.
  * 0 or -errno (a message is logged). */
 int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h);
 /* At daemon start: disable the IR path links an earlier run left enabled (a
- * killed bridge never undid them). Links that are in use stay. Returns the
+ * killed bridge never undid them): links whose source is the IR sensor's
+ * CSIPHY, and the CSID -> VFE links of a CSID that CSIPHY feeds. Links that
+ * are in use stay; the RGB camera's links are never touched. Returns the
  * number released, or -errno. */
 int ir_camss_release_stale(void);
 /* After a link enable kept failing with EBUSY: list the processes that hold
