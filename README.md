@@ -280,8 +280,9 @@ From the `linux-sl7` README (Power sections):
   external display, and still awake after 120 s, so it suspends again. After 3 failed
   suspends, or more than 60 degC for 60 s, it powers off. `omarchy-sl7-bag-guard --check`
   shows the decision without acting.
-- **USB-A** runtime power management is on by default. **USB-C** stays always on, because
-  of a wake-on-plug issue (future research).
+- **USB-A** runtime power management is opt-in and tested OK on the SL7:
+  `sudo sl7-usb-rpm enable a400000.usb --record`. **USB-C** stays always on, because of a
+  wake-on-plug issue (future research); `sl7-usb-rpm` refuses to record it without `--force`.
 - **USB-C reverse orientation** now runs at SuperSpeed (ps883x patch 0090, on by default).
 
 ### Known
