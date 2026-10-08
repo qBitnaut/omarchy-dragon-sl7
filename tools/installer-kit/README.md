@@ -6,6 +6,13 @@ data partition `SL7DATA` with the Microsoft/Qualcomm firmware from your local MS
 extraction, so the firmware never reaches git or CI. The installer wipes the disk
 you pick; this procedure does not keep Windows.
 
+**Use at your own risk.** Unofficial, experimental community project, no warranty, not
+affiliated with Microsoft, Qualcomm or Omarchy. The installer WIPES Windows and everything
+on the internal SSD. Back up your data, save the BitLocker recovery key
+(`tools/windows/Prepare-SL7.ps1`), keep the Surface driver MSI, and install all
+Windows/Surface firmware updates first (they only arrive through Windows Update). The full
+checklist is in the top-level README, Install section.
+
 Status: the pipeline is built and checked on the build host (scripts, patches,
 image-mode runs). A full ISO build and a boot on the SL7 are not verified yet.
 
@@ -39,6 +46,13 @@ The workflow takes the newest signed `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`,
 `repo-aarch64` release (`upstream.lock` only holds minimum versions), and builds
 `omarchy-surface-sl7` from the checkout. The CI artifact `omarchy-sl7-installer-iso`
 (ISO and `.sha256`, 14 days) is still produced for `--from-ci`.
+
+### From Windows
+
+Write the ISO with Rufus (DD Image mode) or balenaEtcher, and fill a second, FAT32 stick
+labelled `SL7DATA` with `tools/windows/Make-SL7DATA.ps1 -Drive E`. `sl7-firmware-stage.service`
+looks for `LABEL=SL7DATA` on any block device (`/dev/disk/by-label`), so the firmware does
+not have to be on the ISO stick. Steps in the top-level README, "From Windows".
 
 ## 2. Get the firmware
 

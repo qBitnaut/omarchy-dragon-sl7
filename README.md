@@ -34,6 +34,20 @@ Expect rough edges, and read [What works](#what-works) before you wipe a disk. S
 
 ## Install
 
+> **Use at your own risk.** This is an unofficial, experimental community project with no
+> warranty, and it is not affiliated with Microsoft, Qualcomm or Omarchy. **Installing WIPES
+> Windows and everything on the internal SSD.** Before you start:
+>
+> - [ ] Back up all personal data somewhere else.
+> - [ ] Save the BitLocker recovery key (`tools/windows/Prepare-SL7.ps1` can write it to a USB stick).
+> - [ ] Note your Windows licence and Microsoft account details.
+> - [ ] Install all Windows and Surface firmware updates first: Surface firmware only
+>       updates through Windows Update, so it will not update once Windows is gone.
+> - [ ] Keep Microsoft's Surface driver MSI (the firmware comes from it).
+> - [ ] Optional: create a Surface recovery USB from Microsoft's Surface recovery image
+>       download (you enter your device's serial number there) so Windows can be restored later.
+> - [ ] Check how a modified OS affects your warranty or support terms.
+
 Short version, for a 13.8" Surface Laptop 7. The installer **wipes the disk you pick** and
 does not keep Windows. Details for every step are in
 [Fresh install from the installer ISO](#fresh-install-from-the-installer-iso).
@@ -66,6 +80,57 @@ does not keep Windows. Details for every step are in
 6. **Updates** arrive through the signed `[omarchy-sl7]` repository: `omarchy-update`
    carries `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`, the face unlock packages and the
    add-on.
+
+### From Windows
+
+You do not need Linux to make the install sticks. You need two USB sticks: a 16 GB or
+larger one for the ISO, and a small one (any size, FAT32) for the firmware.
+
+1. **Download** every file of the
+   [installer-latest release](https://github.com/qBitnaut/omarchy-dragon-sl7/releases/tag/installer-latest)
+   into one folder (`NAME.iso.part-00`, `-01`, ..., `NAME.iso.parts.sha256`,
+   `NAME.iso.sha256`, and the `.sig` if present). Open PowerShell in that folder, and set
+   `$iso` to the ISO's name from the release page:
+   ```powershell
+   $iso = 'NAME.iso'
+   # 1. check each part
+   Get-Content "$iso.parts.sha256" | Where-Object { $_.Trim() } | ForEach-Object {
+       $h, $f = $_ -split '\s+', 2; $f = $f.Trim().TrimStart('*')
+       '{0}  {1}' -f $(if ((Get-FileHash $f -Algorithm SHA256).Hash -eq $h) { 'OK  ' } else { 'FAIL' }), $f }
+   # 2. join the parts
+   $out = [IO.File]::Create((Join-Path (Get-Location).Path $iso))
+   Get-ChildItem "$iso.part-*" | Sort-Object Name | ForEach-Object {
+       $in = [IO.File]::OpenRead($_.FullName); $in.CopyTo($out, 1MB); $in.Dispose() }
+   $out.Dispose()
+   # 3. check the ISO
+   (Get-FileHash $iso -Algorithm SHA256).Hash
+   Get-Content "$iso.sha256"        # the two hashes must be identical (case does not matter)
+   ```
+   (`cmd /c copy /b NAME.iso.part-00+NAME.iso.part-01+NAME.iso.part-02 NAME.iso` joins
+   them too.) The `.sig` can be checked with Gpg4win; the hashes above are the required check.
+2. **Write the ISO** to the large stick with [Rufus](https://rufus.ie) or
+   [balenaEtcher](https://etcher.balena.io). In Rufus choose the ISO, then **DD Image mode**
+   when it asks (not ISO Image mode: the ISO is a hybrid image and must be copied as is). Etcher
+   needs no options (Flash from file). Afterwards Windows may say the stick needs formatting
+   or cannot be read: **do not format it**; eject it.
+3. **Make the firmware stick** (the second one). Format it in File Explorer (right-click the
+   drive, Format) as **FAT32** with the volume label **SL7DATA**. Then download
+   [`Make-SL7DATA.ps1`](tools/windows/Make-SL7DATA.ps1) (repository page, Raw, save as) and run:
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass
+   .\Make-SL7DATA.ps1 -Drive E        # E = the SL7DATA stick; add -Msi FILE if you have the MSI
+   ```
+   It downloads Microsoft's public Surface Laptop 7 driver MSI (about 1 GB, pinned sha256),
+   unpacks it without installing, checks the firmware files, and copies firmware and camera
+   tuning to the stick. It refuses any drive that is not FAT32 labelled `SL7DATA`, never
+   formats, and verifies what it wrote. The live installer finds `SL7DATA` on any USB
+   stick, so the firmware can be on the second stick.
+4. **Optionally**, still in Windows, run `tools\windows\Prepare-SL7.ps1` on the Surface
+   (BitLocker recovery key, Secure Boot state), then turn Secure Boot off in the Surface UEFI.
+5. **Boot**: plug **both** sticks into the Surface (the ISO stick in the USB-A port; a USB
+   hub is fine) and continue with step 4 of the short version above.
+
+This path has not been tested on Windows yet; please report problems.
 
 ## What works
 
@@ -127,6 +192,8 @@ Set-ExecutionPolicy -Scope Process Bypass; .\Prepare-SL7.ps1          # add -Wha
 ```
 
 ### Fresh install from the installer ISO
+
+(Windows users: see [From Windows](#from-windows) above for the equivalent of steps 1 to 3.)
 
 > The ISO is the least-tested path. The kit's own README records a full ISO build
 > and a boot on the SL7 as not yet verified. If you already run Omarchy on the
