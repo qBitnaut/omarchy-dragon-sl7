@@ -65,7 +65,7 @@ iptsd version.
 ## Tap-to-click
 
 Not an iptsd option (`[Touchpad]` has only `Disable`, `DisableOnPalm`, `Overshoot`,
-`ButtonDebounceMs`, plus the patched-in keys below). It is a libinput setting that the
+`ButtonDebounceMs`, plus the patched-in keys below, among them `PalmMode`). It is a libinput setting that the
 compositor owns. Hyprland's default tapping gave false left clicks and repeated right
 clicks (a two-finger tap) during two-finger scrolls on the SL7, so `omarchy-surface-sl7`
 turns it off once per user (`tap_to_click = false` appended to `~/.config/hypr/input.lua`,
@@ -224,6 +224,30 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
 
   Whether the firmware keeps the values across its own resets that iptsd cannot see is
   untested; if the feel reverts, restart the unit.
+- `0010-daemon-windows-style-palm-handling.patch` (applied in `prepare()`, after 0009):
+  adds `[Touchpad] PalmMode` (`windows` or `freeze`, used with `DisableOnPalm = true`;
+  `92-iptsd-sl7-tuning.conf` ships `windows`). A palm is a contact failing the
+  `SizeMin` / `SizeMax` / `AspectMin` / `AspectMax` checks (unchanged). `freeze` is the old
+  behaviour: any palm freezes all output and masks the click. `windows` follows the Windows
+  touchpad stack (which keeps valid fingers and clicks working with a palm on the pad): the
+  palm contacts are removed from the frame, so they never become a pointer, scroll or gesture
+  finger and do not count as fingers (`BTN_TOOL_*`), while the valid fingers keep their
+  tracking ids (no pointer jump when a palm lands or lifts) and the firmware click bit works
+  as usual. The drag latch only sees valid contacts, so a palm next to a held drag does not
+  end it. Only when no valid finger is left is everything frozen and the click masked, as
+  before. A resting thumb at the bottom edge is not special cased: iptsd has no thumb or edge
+  zone concept, so that part of the Windows behaviour is not implemented. `DragDebug` logs
+  `palm-drop`, `palm-freeze` and `palm-end`. To switch back, put this in
+  `/etc/iptsd.d/94-local.conf` and run `sudo systemctl restart 'iptsd@*.service'`:
+
+  ```ini
+  [Device]
+  Vendor = 0x045E
+  Product = 0x0C77
+
+  [Touchpad]
+  PalmMode = freeze
+  ```
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset

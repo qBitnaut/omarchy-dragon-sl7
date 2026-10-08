@@ -1,0 +1,218 @@
+daemon: Windows-style palm handling, drop only the palm contact
+
+Chris: make our palm handling like Windows. DisableOnPalm = true froze all
+output and masked the click as soon as any contact failed the size / aspect
+check, so a palm resting on the pad stopped a finger that was working next to
+it, and a click with the palm down did nothing.
+
+The Windows touchpad stack (strings TouchpadFingerUnderPalm, Palm_with_fingers,
+TouchpadClickPlusPalmEventsNumber in the driver) keeps valid fingers and the
+click working while a palm is on the pad. New [Touchpad] PalmMode (only used
+with DisableOnPalm = true):
+
+ - windows (default): the palm contacts (the ones failing SizeMin / SizeMax /
+   AspectMin / AspectMax) are removed from the frame before anything else sees
+   it. They never become a pointer, scroll or gesture finger and do not count
+   towards the finger count (BTN_TOOL_*). The valid fingers keep their tracking
+   ids and slots, so a palm landing or lifting causes no pointer jump, and the
+   firmware click bit is processed as usual. The drag latch only looks at valid
+   contacts, so a palm next to a held drag does not end it. Only when no valid
+   finger is left is everything frozen and the click masked, as before.
+ - freeze: the old behaviour, any palm freezes all output.
+
+The size / aspect classification and the contact stability logic are
+unchanged. A resting thumb at the bottom edge is not special cased: iptsd has
+no thumb or edge zone concept, so that part is not implemented.
+
+With DragDebug (or IPTSD_SL7_DRAG_DEBUG=1) every palm decision is logged:
+palm-drop (palm contacts dropped, fingers and click stay active), palm-freeze
+(no valid finger left, or PalmMode = freeze) and palm-end.
+
+diff --git i/etc/iptsd.conf w/etc/iptsd.conf
+index e31df2b..21fc8a6 100644
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -40,6 +40,14 @@
+ ##
+ # DisableOnPalm = false
+
++##
++## What DisableOnPalm does when a palm (a contact failing the size / aspect checks) is on the
++## pad. windows: only the palm contacts are dropped, valid fingers and the physical click keep
++## working, and everything is frozen only while no valid finger is present (like the Windows
++## touchpad stack). freeze: any palm freezes all input and masks the click. (Default windows)
++##
++# PalmMode = windows
++
+ ##
+ ## How many centimeters a contact can be outside of the touchpad and still get registered.
+ ##
+diff --git i/src/apps/daemon/touch.hpp w/src/apps/daemon/touch.hpp
+index 5573408..4442081 100644
+--- i/src/apps/daemon/touch.hpp
++++ w/src/apps/daemon/touch.hpp
+@@ -87,6 +87,13 @@ private:
+ 	// Whether all inputs will be lifted once a palm is registered.
+ 	bool m_disable_on_palm = false;
+
++	// Whether a palm only drops its own contact while a valid finger is present (PalmMode
++	// windows), instead of freezing all input (PalmMode freeze).
++	bool m_palm_windows = false;
++
++	// What the palm check decided in the last frame, for the debug log.
++	i32 m_palm_log_key = 0;
++
+ 	// The indices of the contacts in the current frame.
+ 	std::set<usize> m_current {};
+
+@@ -280,6 +287,15 @@ public:
+
+ 			m_overshoot = config.touchpad_overshoot;
+ 			m_disable_on_palm = config.touchpad_disable_on_palm;
++
++			if (config.touchpad_palm_mode == "windows") {
++				m_palm_windows = true;
++			} else if (config.touchpad_palm_mode != "freeze") {
++				spdlog::warn("Unknown [Touchpad] PalmMode '{}', using 'windows'",
++				             config.touchpad_palm_mode);
++				m_palm_windows = true;
++			}
++
+ 			m_lift_grace_ms = config.touchpad_lift_grace_ms;
+ 			m_drag_start_mm = config.touchpad_drag_start_mm;
+ 			m_drag_release_still_ms = config.touchpad_drag_release_still_ms;
+@@ -340,12 +356,16 @@ public:
+ 		m_bridge_input = raw_contacts;
+
+ 		// Bridge short detection dropouts, so they do not show up as a lift and touch down.
+-		const std::vector<contacts::Contact<f64>> contacts = this->bridge_dropouts(raw_contacts);
++		const std::vector<contacts::Contact<f64>> bridged = this->bridge_dropouts(raw_contacts);
++
++		// Palm check: freeze all input, or drop only the palm contacts.
++		bool freeze = false;
++		const std::vector<contacts::Contact<f64>> contacts = this->palm_check(bridged, freeze);
+
+ 		// Find the inputs that need to be lifted
+ 		this->search_lifted(contacts);
+
+-		m_blocked = this->is_blocked(contacts);
++		m_blocked = freeze;
+
+ 		if (m_blocked) {
+ 			// A fast moving finger can smear into a blob that fails the size / aspect
+@@ -1449,19 +1469,82 @@ private:
+ 	}
+
+ 	/*!
+-	 * Checks if the touch device should be disabled because of a palm.
++	 * Applies the palm check (DisableOnPalm) to a frame.
+ 	 *
+-	 * @param[in] contacts All currently active contacts.
+-	 * @return true if all contacts should be lifted.
++	 * A palm is a contact that fails the size / aspect checks (not valid). With
++	 * PalmMode = freeze any palm freezes all output. With PalmMode = windows (like the Windows
++	 * touchpad stack) the palm contacts are dropped from the frame, so they never become a
++	 * pointer, scroll or gesture finger and do not count as fingers, while the valid fingers
++	 * and the physical click keep working. Output is frozen only if no valid finger is left.
++	 *
++	 * @param[in] frame All currently active contacts.
++	 * @param[out] freeze Whether all contacts should be lifted and the click masked.
++	 * @return The contacts to process.
+ 	 */
+-	[[nodiscard]] bool is_blocked(const std::vector<contacts::Contact<f64>> &contacts) const
++	[[nodiscard]] std::vector<contacts::Contact<f64>>
++	palm_check(const std::vector<contacts::Contact<f64>> &frame, bool &freeze)
+ 	{
+-		if (!m_disable_on_palm)
+-			return false;
++		freeze = false;
+
+-		return std::any_of(contacts.cbegin(), contacts.cend(), [&](const auto &c) {
+-			return !c.valid.value_or(true);
+-		});
++		usize palms = 0;
++		usize fingers = 0;
++
++		if (m_disable_on_palm) {
++			for (const contacts::Contact<f64> &c : frame) {
++				if (!c.valid.value_or(true))
++					palms++;
++				else if (c.index.has_value())
++					fingers++;
++			}
++		}
++
++		// 0 = no palm, 1 = frozen, 2 = palm contacts dropped.
++		i32 state = 0;
++
++		if (palms > 0)
++			state = (!m_palm_windows || fingers == 0) ? 1 : 2;
++
++		if (m_drag_debug) {
++			const i32 key = casts::to<i32>(state * 10000 + palms * 100 + fingers);
++
++			if (key != m_palm_log_key) {
++				if (state == 0)
++					this->drag_log("palm-end", "no palm contact");
++				else if (state == 1)
++					this->drag_log("palm-freeze",
++					               fmt::format("{} palm contact(s), {} valid finger(s), mode {}: "
++					                           "output frozen, click masked",
++					                           palms,
++					                           fingers,
++					                           m_palm_windows ? "windows" : "freeze"));
++				else
++					this->drag_log("palm-drop",
++					               fmt::format("{} palm contact(s) dropped, {} valid finger(s) "
++					                           "and the click stay active",
++					                           palms,
++					                           fingers));
++
++				m_palm_log_key = key;
++			}
++		}
++
++		if (state == 1) {
++			freeze = true;
++			return frame;
++		}
++
++		if (state == 0)
++			return frame;
++
++		std::vector<contacts::Contact<f64>> out {};
++		out.reserve(frame.size());
++
++		for (const contacts::Contact<f64> &c : frame) {
++			if (c.valid.value_or(true))
++				out.push_back(c);
++		}
++
++		return out;
+ 	}
+
+ 	/*!
+diff --git i/src/core/generic/config.hpp w/src/core/generic/config.hpp
+index 74a6dd4..d36e6aa 100644
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -33,6 +33,7 @@ public:
+ 	// [Touchpad]
+ 	bool touchpad_disable = false;
+ 	bool touchpad_disable_on_palm = false;
++	std::string touchpad_palm_mode = "windows";
+ 	f64 touchpad_overshoot = 0.5;
+ 	f64 touchpad_button_debounce_ms = 25;
+ 	f64 touchpad_button_hold_ms = 70;
+diff --git i/src/core/linux/config-loader.hpp w/src/core/linux/config-loader.hpp
+index 435c864..dfcfc37 100644
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -159,6 +159,7 @@ private:
+
+ 		this->get(ini, "Touchpad", "Disable", m_config.touchpad_disable);
+ 		this->get(ini, "Touchpad", "DisableOnPalm", m_config.touchpad_disable_on_palm);
++		this->get(ini, "Touchpad", "PalmMode", m_config.touchpad_palm_mode);
+ 		this->get(ini, "Touchpad", "Overshoot", m_config.touchpad_overshoot);
+ 		this->get(ini, "Touchpad", "ButtonDebounceMs", m_config.touchpad_button_debounce_ms);
+ 		this->get(ini, "Touchpad", "ButtonHoldMs", m_config.touchpad_button_hold_ms);
