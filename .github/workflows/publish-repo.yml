@@ -4,7 +4,7 @@ name: publish-repo
 # Release "repo-aarch64":
 #   Server = https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64
 # Inputs: the latest successful, unexpired artifacts of linux-sl7, iptsd-sl7,
-# omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge and omarchy-sl7-faceunlock on main, plus the packages already
+# omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock and libcamera-sl7 on main, plus the packages already
 # on the release. Releases cannot hold symlinks, so omarchy-sl7.db and
 # omarchy-sl7.files are real files (copies of the .tar.gz), with detached
 # signatures. Signing needs the secrets REPO_SIGNING_KEY (ASCII-armored private
@@ -14,7 +14,7 @@ name: publish-repo
 
 on:
   workflow_run:
-    workflows: [linux-sl7, iptsd-sl7, omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock]
+    workflows: [linux-sl7, iptsd-sl7, omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock, libcamera-sl7]
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -90,6 +90,7 @@ jobs:
           fetch howdy-next.yml '^howdy-next-aarch64$' 'howdy-next-aarch64'
           fetch sl7-ir-bridge.yml '^sl7-ir-bridge-aarch64$' 'sl7-ir-bridge-aarch64'
           fetch omarchy-sl7-faceunlock.yml '^omarchy-sl7-faceunlock-aarch64$' 'omarchy-sl7-faceunlock-aarch64'
+          fetch libcamera-sl7.yml '^libcamera-sl7-aarch64$' 'libcamera-sl7-aarch64'
           sums=$(find dl/linux-sl7.yml -name SHA256SUMS -print -quit 2>/dev/null || true)
           if [ -n "$sums" ]; then (cd "$(dirname "$sums")" && sha256sum -c --quiet SHA256SUMS); fi
           pkgs=$(find dl -name '*.pkg.tar.zst' ! -name '*-debug-*')
