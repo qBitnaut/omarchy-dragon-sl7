@@ -71,7 +71,7 @@ hdr "Versions"
     pacman -Q "$p" 2>/dev/null || echo "$p: not installed"
   done
 } | tee -a "$summary"
-if grep -q ov02c10 /usr/lib/libcamera/ipa_soft_simple.so 2>/dev/null; then
+if grep -q ov02c10 /usr/lib/libcamera/ipa/ipa_soft_simple.so 2>/dev/null; then
   say "OV02C10 sensor helper compiled into the software ISP: yes"
 else
   say "OV02C10 sensor helper compiled into the software ISP: NO (libcamera is not the omarchy-sl7 build)"
