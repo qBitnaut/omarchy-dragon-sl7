@@ -30,8 +30,10 @@ OMARCHY_PKGS_PR222_SHA=7762e4f46bafcbdd739fc09d844434ee752c6e10
 ARCHINSTALL_VERSION=4.4-1
 ARCHINSTALL_SHA256=6cb5da75c108ef2f5d25a7a20baf6c52cc927d5e06890dd10182e6eb4be815cb
 
-# Runs of this repository's own workflows whose artifacts the repo job consumes.
-# linux-sl7 (artifact linux-sl7-<sha>, expires 2026-10-22; re-run linux-sl7.yml
-# and update this ID after that). iptsd-sl7: latest successful run on main.
-LINUX_SL7_RUN_ID=37710055267
-IPTSD_SL7_RUN_ID=37816152500
+# The prebuilt SL7 packages (linux-sl7, iptsd-sl7, libcamera-sl7, howdy-next,
+# sl7-ir-bridge, omarchy-sl7-faceunlock) are not pinned: the installer-iso workflow
+# takes the newest signed version of each from the repo-aarch64 release, which does
+# not expire. These floors only stop it from building an older stack by mistake.
+# linux-sl7 7.2.8-23: 30 fps front camera; iptsd-sl7 17: Windows-style palm handling.
+SL7_MIN_LINUX_SL7=7.2.8-23
+SL7_MIN_IPTSD_SL7=3.1.0.r20260717-17

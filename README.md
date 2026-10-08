@@ -32,6 +32,41 @@ best-effort: the device trees and packages cover them, but nobody has booted the
 Expect rough edges, and read [What works](#what-works) before you wipe a disk. See
 [PLAN.md](PLAN.md) for the longer plan and research notes.
 
+## Install
+
+Short version, for a 13.8" Surface Laptop 7. The installer **wipes the disk you pick** and
+does not keep Windows. Details for every step are in
+[Fresh install from the installer ISO](#fresh-install-from-the-installer-iso).
+
+1. **Download the latest ISO** from the
+   [installer-latest release](https://github.com/qBitnaut/omarchy-dragon-sl7/releases/tag/installer-latest),
+   rebuilt on every change. It is over GitHub's 2 GiB asset limit, so it comes in parts:
+   ```
+   cat NAME.iso.part-* > NAME.iso     # NAME = the ISO's file name on the release page
+   sha256sum -c NAME.iso.sha256
+   ```
+   `make-install-usb.sh` (step 2) does the download, reassembly and checksum for you.
+   The ISO contains no Microsoft or Qualcomm firmware.
+2. **Make the install stick** on any Linux machine (16 GB or larger USB stick):
+   ```
+   tools/installer-kit/get-sl7-firmware.sh        # fetches Microsoft's public Surface MSI, your own copy
+   tools/installer-kit/make-install-usb.sh --device /dev/sdX   # latest release ISO + SL7DATA firmware and camera staging
+   ```
+   `make-install-usb.sh` defaults to `--from-release`; use `--iso FILE` for a file you
+   already have or `--from-ci RUNID|latest` for a CI artifact. Run it as yourself, not
+   with `sudo`.
+3. **If Windows is still installed**, optionally run `tools/windows/Prepare-SL7.ps1`
+   (read-only): it confirms the model, shows the BitLocker status and can save the recovery
+   key to a USB stick, and reports Secure Boot. Then turn Secure Boot off in the Surface UEFI
+   (hold Volume Up, press Power; Security > Secure Boot: None).
+4. **Boot from the USB-A port** (Volume Down + Power, on AC power) and run the installer.
+   Pick the internal NVMe and set a LUKS passphrase.
+5. **First boot.** The webcam tuning is generated automatically from your own driver
+   package. Set up face unlock from the Omarchy menu: Setup > Security > Face Unlock.
+6. **Updates** arrive through the signed `[omarchy-sl7]` repository: `omarchy-update`
+   carries `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`, the face unlock packages and the
+   add-on.
+
 ## What works
 
 Measured on the 13.8" X1P. "Works" means used daily without known problems;
@@ -53,7 +88,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Battery percentage and charging | Works | `qcom_battmgr` patch for capacity; Omarchy's battery scripts are patched to see the Qualcomm gauge. |
 | USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s), in either plug orientation (SuperSpeed on the reversed orientation fixed by ps883x patch 0090, on by default since linux-sl7 7.2.8-18), with DisplayPort alt mode and docks. USB4 and Thunderbolt bandwidth is not available yet. |
 | Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume, about 0.35 W overnight. See [power results](#power-and-performance-results-so-far) for the drain. |
-| Front webcam | Works | OV02C10 through libcamera's GPU software ISP (Adreno, EGL); the hardware ISP is not used, because CAMSS delivers raw frames only. Our `libcamera-sl7` build (0.7.2-4.3) adds the sensor helper, a fast auto-exposure start, a fix for GPU-mode 720p metering, Adjust defaults read from the tuning file, and hides the IR camera from libcamera so PipeWire and `cam` can no longer hold the face unlock sensor. Colour tuning is generated at install from your own Surface driver package and never redistributed; defaults chosen on the SL7: set 1, blend 0.6, contrast 1.2, saturation 1.05 (`sl7-camera-tuning` adjusts them, `sl7-camera-check` collects diagnostics). Verified on the SL7: much better colour, no grey start. The sensor runs from a 12 MHz clock; `linux-sl7` 7.2.8-23 (patches 0099/0100) fixes the frame rate from 18.8 to 30 fps and the exposure timing (published, the on-device 30 fps check is pending). See the [webcam section](pkgs/omarchy-surface-sl7/README.md#8k-front-webcam-sl7-camera-tuning-sl7-camera-check) for browser setup. |
+| Front webcam | Works | OV02C10 through libcamera's GPU software ISP (Adreno, EGL); the hardware ISP is not used, because CAMSS delivers raw frames only. Our `libcamera-sl7` build (0.7.2-4.3) adds the sensor helper, a fast auto-exposure start, a fix for GPU-mode 720p metering, Adjust defaults read from the tuning file, and hides the IR camera from libcamera so PipeWire and `cam` can no longer hold the face unlock sensor. Colour tuning is generated at install from your own Surface driver package and never redistributed; defaults chosen on the SL7: set 1, blend 0.6, contrast 1.2, saturation 1.05 (`sl7-camera-tuning` adjusts them, `sl7-camera-check` collects diagnostics). Verified on the SL7: much better colour, no grey start. The sensor runs from a 12 MHz clock; `linux-sl7` 7.2.8-23 (patches 0099/0100) fixes the frame rate from 18.8 to 30 fps and the exposure timing (verified on the SL7: 30 fps on `linux-sl7` 7.2.8-23). See the [webcam section](pkgs/omarchy-surface-sl7/README.md#8k-front-webcam-sl7-camera-tuning-sl7-camera-check) for browser setup. |
 | IR camera | Works | ST VD55G0, 644x604 greyscale, through `sl7-ir-bridge`, lit by the built-in IR emitter (verified 2026-10-07: self-test frames brighter than unlit, no black frames). Known issue: libcamera/PipeWire can grab the IR camera and block face unlock; workaround `systemctl --user restart pipewire wireplumber && sudo systemctl restart sl7-ir-bridge`. A package update that hides the IR camera from libcamera and PipeWire is in progress (not yet published). |
 | Face unlock | Works | Verified on the SL7 (2026-10-07), on the normal boot (there is no IR test boot entry): face registered in the setup app, lock screen and `sudo` unlocked by face, no external IR source needed. howdy-next plus a setup app (Omarchy menu: Setup > Security > Face Unlock). The built-in IR emitter is driven by the sensor's own strobe (stage C found that GPIO 1 lights it), held by the kernel (linux-sl7 7.2.8-22) to Windows Hello's 100-line exposure and frame time, whatever user space asks: on the SL7 sensor clock that is 0.8 ms of light per 27.8 ms frame (2.9 % duty, Windows 5.7 %). `sl7-ir-bridge` lights it only while a scan streams, 10 s at most per session, with analog gain 24 as the default; `howdy-next` 2 silences a harmless OpenCV warning; `IR_EMITTER=off` in `/etc/sl7-ir-bridge.conf` keeps it dark. |
 | CPU frequency scaling | Works | All three clusters, `schedutil`, with the SCMI sustained-frequency fix. |
@@ -70,11 +105,11 @@ Set in `/etc/iptsd.d/94-local.conf` (restart `iptsd` after editing). Full list i
 |---|---|---|
 | `[Touchpad] HapticIntensity` | 0 to 100 (Windows semantics) | Applied on the SL7 (patch 0009, iptsd-sl7 16) |
 | `[Touchpad] ClickForce` | `low`, `medium`, `high` (Windows semantics) | Applied on the SL7 (patch 0009, iptsd-sl7 16) |
-| `[Touchpad] PalmMode` | `windows` (default), `freeze` | Published, not yet verified (patch 0010, iptsd-sl7 17) |
+| `[Touchpad] PalmMode` | `windows` (default), `freeze` | Verified on the SL7: palm rejection works as expected (patch 0010, iptsd-sl7 17) |
 
 `PalmMode = windows` ignores a resting palm while the other fingers and the click keep
-working; `freeze` is the older behaviour. It is published, and the feel test on the SL7 is
-pending.
+working; `freeze` is the older behaviour. Verified on the SL7: palm rejection works as
+expected.
 
 ## Install
 
@@ -99,13 +134,14 @@ Set-ExecutionPolicy -Scope Process Bypass; .\Prepare-SL7.ps1          # add -Wha
 
 The installer **wipes the disk you pick** and does not keep Windows.
 
-1. **Get the ISO.** It is not published as a release asset (it is larger than
-   GitHub's 2 GiB asset limit). Build it with the `installer-iso` workflow: push a
-   change under `installer/` or `upstream.lock` to your fork, or run
-   `gh workflow run installer-iso.yml`. The artifact `omarchy-sl7-installer-iso`
-   holds the ISO and its `.sha256` and expires after 14 days. It consumes the
-   `linux-sl7` build named in `upstream.lock`, which also expires: re-run
-   `linux-sl7.yml` and update `LINUX_SL7_RUN_ID` if the download step fails.
+1. **Get the ISO.** Download it from the
+   [installer-latest release](https://github.com/qBitnaut/omarchy-dragon-sl7/releases/tag/installer-latest)
+   (built by the `installer-iso` workflow on every change to `main`; parts of 1900 MiB
+   because of GitHub's 2 GiB asset limit, with a `.sha256` and, when signing is
+   configured, a signature). `make-install-usb.sh` fetches and checks it itself. The build
+   takes the newest signed packages from the `repo-aarch64` release, so nothing needs
+   re-pinning. To build your own ISO instead, fork the repository and run
+   `gh workflow run installer-iso.yml`.
 2. **Get the firmware.** On any Linux machine (x86 or arm) or macOS, run
    `tools/installer-kit/get-sl7-firmware.sh`. It downloads Microsoft's Surface Laptop 7
    driver MSI, checks its pinned sha256, extracts it with `msiextract` (`msitools`) and
@@ -119,7 +155,8 @@ The installer **wipes the disk you pick** and does not keep Windows.
 3. **Write the stick** (16 GB or larger) from an Arch-based host:
    ```
    sudo pacman -S --needed dosfstools mtools util-linux python github-cli
-   tools/installer-kit/make-install-usb.sh --device /dev/sdX --from-ci latest
+   tools/installer-kit/make-install-usb.sh --device /dev/sdX                  # latest release ISO
+   tools/installer-kit/make-install-usb.sh --device /dev/sdX --from-ci latest # newest CI artifact
    tools/installer-kit/make-install-usb.sh --device /dev/sdX --iso FILE   # FILE.sha256 next to it
    ```
    Check the device with `lsblk -o NAME,MODEL,SIZE,TRAN,RM`. Run it as yourself, not
@@ -296,8 +333,6 @@ From the `linux-sl7` README (Power sections):
   libcamera/PipeWire from grabbing the IR camera (package update in progress), check
   recognition in daylight and darkness, the bridge delivering 18 of the sensor's 36 fps, and
   Windows' runtime gain (not decoded).
-- **Front webcam:** confirm 30 fps on the device after `linux-sl7` 7.2.8-23.
-- **Touchpad:** feel test of `PalmMode = windows`.
 - **Awake power:** re-run the Windows comparison with the latest fixes.
 - **USB-C runtime power management** (wake-on-plug issue) and **hibernation**.
 - **Runtime power tuning** with a per-rail power meter.

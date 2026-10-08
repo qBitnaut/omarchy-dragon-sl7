@@ -4,8 +4,8 @@
 # Runs on the build host (x86_64 Arch is fine). Needs sudo only for the steps
 # that touch a real device (dd, sfdisk, mkfs, mount).
 #
-#   1. take the installer ISO from a CI run (--from-ci) or a file (--iso) and
-#      verify its sha256
+#   1. take the installer ISO from the latest GitHub release (default, or
+#      --from-release), a CI run (--from-ci) or a file (--iso) and verify its sha256
 #   2. write it to a removable device (or an image file with --image)
 #   3. relocate the backup GPT, add partition SL7DATA (FAT32, Microsoft basic
 #      data) in the free space
@@ -14,6 +14,7 @@
 #   5. verify, sync, unmount
 #
 # usage:
+#   make-install-usb.sh --device /dev/sdX [--from-release] [--no-firmware]
 #   make-install-usb.sh --device /dev/sdX --from-ci RUNID|latest [--no-firmware]
 #   make-install-usb.sh --device /dev/sdX --iso FILE [--sha256 HEX] [--no-firmware]
 #   make-install-usb.sh --image FILE --iso FILE [--size 8G] [--loop]   (test, no root)
@@ -32,6 +33,7 @@ FW_BASE="$MSI_ROOT/extracted/ProgramFiles64Folder/SurfaceUpdate"
 GH_REPO="${SL7_REPO:-qBitnaut/omarchy-dragon-sl7}"
 CI_WORKFLOW="installer-iso.yml"
 CI_ARTIFACT="omarchy-sl7-installer-iso"
+RELEASE_TAG="installer-latest"
 
 # Microsoft basic data: the partition is only read by the installer's live system.
 DATA_TYPE_GUID="EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
@@ -47,6 +49,7 @@ FORCE_LARGE=0
 ISO=""
 ISO_SHA256=""
 CI_RUN=""
+FROM_RELEASE=0
 LOOPDEV=""
 MNT=""
 
@@ -56,11 +59,14 @@ MNT=""
 source "$KIT_DIR/../lib/usb.sh"
 
 usage() {
-	sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	cat <<'USAGE'
 
 options:
   --device DEV     write to this removable device (asks you to type its path)
+  --from-release   download the ISO of the "installer-latest" GitHub release
+                   (the default when no ISO source is given) into $SL7_WORK/release;
+                   needs curl and python3, no GitHub login
   --from-ci RUN    download the ISO of that installer-iso.yml run (run id, or
                    "latest" successful run) with gh into $SL7_WORK/ci
   --iso FILE       use this ISO; its sha256 comes from FILE.sha256 or --sha256
@@ -79,6 +85,7 @@ while [ $# -gt 0 ]; do
 	--device) DEVICE="${2:?--device needs a path}"; shift 2 ;;
 	--image) IMAGE="${2:?--image needs a path}"; shift 2 ;;
 	--size) IMAGE_SIZE="${2:?--size needs a value}"; shift 2 ;;
+	--from-release) FROM_RELEASE=1; shift ;;
 	--from-ci) CI_RUN="${2:?--from-ci needs a run id or latest}"; shift 2 ;;
 	--iso) ISO="${2:?--iso needs a file}"; shift 2 ;;
 	--sha256) ISO_SHA256="${2:?--sha256 needs a hex digest}"; shift 2 ;;
@@ -93,8 +100,9 @@ done
 
 [ -n "$DEVICE" ] || [ -n "$IMAGE" ] || { usage >&2; die "give --device /dev/sdX or --image FILE"; }
 [ -z "$DEVICE" ] || [ -z "$IMAGE" ] || die "use either --device or --image, not both"
-[ -n "$ISO" ] || [ -n "$CI_RUN" ] || { usage >&2; die "give --from-ci RUNID or --iso FILE"; }
-[ -z "$ISO" ] || [ -z "$CI_RUN" ] || die "use either --from-ci or --iso, not both"
+if [ -z "$ISO" ] && [ -z "$CI_RUN" ]; then FROM_RELEASE=1; fi
+n_src=$((FROM_RELEASE + (${#ISO} > 0 ? 1 : 0) + (${#CI_RUN} > 0 ? 1 : 0)))
+[ "$n_src" = 1 ] || die "use only one of --from-release, --from-ci and --iso"
 [ -z "$ISO" ] || ISO="$(realpath -e "$ISO")" || die "--iso: no such file"
 [ "$USE_LOOP" = 0 ] || [ -n "$IMAGE" ] || die "--loop needs --image"
 if [ -n "$ISO_SHA256" ] && ! [[ $ISO_SHA256 =~ ^[0-9a-fA-F]{64}$ ]]; then
@@ -107,6 +115,9 @@ trap cleanup EXIT
 
 check_tools() {
 	local t missing=()
+	[ "$FROM_RELEASE" = 0 ] || for t in curl python3; do
+		command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+	done
 	for t in sha256sum sfdisk mkfs.fat python3 blkid lsblk cmp find; do
 		command -v "$t" >/dev/null 2>&1 || missing+=("$t")
 	done
@@ -129,6 +140,51 @@ check_tools() {
 }
 
 # ---------------------------------------------------------------- 1. the ISO
+# The ISO is larger than GitHub's 2 GiB asset limit, so the release holds it in
+# parts (NAME.iso.part-00, -01, ...) plus NAME.iso.sha256 and NAME.iso.parts.sha256.
+fetch_release_iso() {
+	local dest="$WORK/release" api list name url iso
+	api="https://api.github.com/repos/$GH_REPO/releases/tags/$RELEASE_TAG"
+	info "Looking up release $RELEASE_TAG of $GH_REPO"
+	list="$(curl -fsSL --retry 3 "$api" | python3 -c '
+import json, sys
+for a in json.load(sys.stdin)["assets"]:
+    print(a["name"], a["browser_download_url"])
+')" || die "cannot read $api"
+	[ -n "$list" ] || die "release $RELEASE_TAG has no assets"
+	mkdir -p "$dest"
+	while read -r name url; do
+		case "$name" in
+		*.iso.part-* | *.iso.sha256 | *.iso.parts.sha256 | *.iso.sha256.sig | omarchy-sl7.pub.asc)
+			if [ ! -f "$dest/$name" ] || [[ $name == *.sha256* ]]; then
+				info "Downloading $name"
+				curl -fL --retry 3 -C - -o "$dest/$name" "$url" || die "download of $name failed"
+			fi ;;
+		*) ;;
+		esac
+	done <<<"$list"
+	iso="$(find "$dest" -maxdepth 1 -name '*.iso.sha256' ! -name '*.parts.sha256' -print -quit)"
+	[ -n "$iso" ] || die "release has no ISO checksum"
+	iso="${iso%.sha256}"
+	info "Checking the parts and reassembling $(basename "$iso")"
+	(cd "$dest" && sha256sum -c --quiet "$(basename "$iso").parts.sha256") || die "a release part is corrupt: delete $dest and retry"
+	cat "$iso".part-* >"$iso.tmp" && mv "$iso.tmp" "$iso"
+	if [ -f "$iso.sha256.sig" ] && [ -f "$dest/omarchy-sl7.pub.asc" ] && command -v gpg >/dev/null 2>&1; then
+		local gh
+		gh="$(mktemp -d)"
+		if GNUPGHOME="$gh" gpg --batch -q --import "$dest/omarchy-sl7.pub.asc" 2>/dev/null &&
+			GNUPGHOME="$gh" gpg --batch --verify "$iso.sha256.sig" "$iso.sha256" 2>&1 | grep -q "Good signature"; then
+			echo "    checksum signature OK"
+		else
+			rm -rf "$gh"
+			die "the signature of $(basename "$iso").sha256 does not verify"
+		fi
+		rm -rf "$gh"
+	fi
+	ISO="$iso"
+	CI_FETCHED_RUN="release $RELEASE_TAG"
+}
+
 fetch_ci_iso() {
 	local run="$CI_RUN" concl dest found n
 	if [ "$run" = latest ]; then
@@ -215,6 +271,7 @@ main() {
 	check_tools
 	mkdir -p "$WORK"
 	[ -z "$CI_RUN" ] || fetch_ci_iso
+	[ "$FROM_RELEASE" = 0 ] || fetch_release_iso
 	verify_iso
 	stage_data
 	iso_bytes="$(stat -c %s "$ISO")"

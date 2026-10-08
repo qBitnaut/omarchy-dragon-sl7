@@ -1,7 +1,7 @@
 # Installer USB kit
 
 Writes the Omarchy installer for the Surface Laptop 7 13.8" (model 2036) to a USB
-stick. The ISO comes from CI (`.github/workflows/installer-iso.yml`); this kit adds a
+stick. The ISO comes from the `installer-latest` release (built by `.github/workflows/installer-iso.yml`); this kit adds a
 data partition `SL7DATA` with the Microsoft/Qualcomm firmware from your local MSI
 extraction, so the firmware never reaches git or CI. The installer wipes the disk
 you pick; this procedure does not keep Windows.
@@ -26,11 +26,19 @@ which is gone after the disk is wiped.
 
 ## 1. Get the ISO
 
-Push to `installer/**` or `upstream.lock`, or run the workflow by hand
-(`gh workflow run installer-iso.yml`). The artifact `omarchy-sl7-installer-iso`
-holds the ISO and its `.sha256`; it expires after 14 days. The linux-sl7 artifact it
-consumes (run id in `upstream.lock`) expires after 14 days too: re-run `linux-sl7.yml`
-and update `LINUX_SL7_RUN_ID` when the workflow's download step fails.
+The default is the `installer-latest` release
+(https://github.com/qBitnaut/omarchy-dragon-sl7/releases/tag/installer-latest), which
+`installer-iso.yml` recreates after every successful build on `main`. The ISO is larger
+than GitHub's 2 GiB asset limit, so it is split into 1900 MiB parts
+(`NAME.iso.part-00`, ...); `make-install-usb.sh --from-release` downloads them, checks
+`NAME.iso.parts.sha256`, reassembles the ISO and checks `NAME.iso.sha256` (and its
+signature, when published). By hand: `cat NAME.iso.part-* > NAME.iso; sha256sum -c NAME.iso.sha256`.
+
+The workflow takes the newest signed `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`,
+`howdy-next`, `sl7-ir-bridge` and `omarchy-sl7-faceunlock` from the non-expiring
+`repo-aarch64` release (`upstream.lock` only holds minimum versions), and builds
+`omarchy-surface-sl7` from the checkout. The CI artifact `omarchy-sl7-installer-iso`
+(ISO and `.sha256`, 14 days) is still produced for `--from-ci`.
 
 ## 2. Get the firmware
 
@@ -53,6 +61,7 @@ Microsoft's is in the ISO, the packages or the repository. Restart pipewire/wire
 Packages on the build host (once): `sudo pacman -S --needed dosfstools mtools util-linux python github-cli`.
 
 ```
+tools/installer-kit/make-install-usb.sh --device /dev/sdX                    # latest release ISO (--from-release)
 tools/installer-kit/make-install-usb.sh --device /dev/sdX --from-ci RUNID    # or "latest"
 tools/installer-kit/make-install-usb.sh --device /dev/sdX --iso FILE         # FILE.sha256 next to it, or --sha256 HEX
 tools/installer-kit/make-install-usb.sh --device /dev/sdX --from-ci RUNID --no-firmware

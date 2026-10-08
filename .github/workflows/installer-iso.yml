@@ -14,8 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  actions: read # download linux-sl7 / iptsd-sl7 artifacts of earlier runs
+  contents: read # the iso job raises this to write for the release upload
 
 concurrency:
   group: installer-iso-${{ github.ref }}
@@ -51,22 +50,50 @@ jobs:
       - name: Load upstream.lock
         run: installer/scripts/lock-env.sh >> "$GITHUB_ENV"
 
-      # The artifacts of the pinned runs are consumed as built: the kernel
-      # takes 30 to 70 minutes, so it is not rebuilt here. linux-sl7 artifacts
-      # expire after 14 days; if this step fails, re-run linux-sl7.yml and
-      # update LINUX_SL7_RUN_ID in upstream.lock.
-      - name: Download linux-sl7 and iptsd-sl7 artifacts
+      # The prebuilt SL7 packages (linux-sl7, iptsd-sl7, libcamera-sl7, howdy-next,
+      # sl7-ir-bridge, omarchy-sl7-faceunlock) come from the signed rolling release
+      # repo-aarch64, which publish-repo.yml keeps current and which does not
+      # expire (CI artifacts do, after 14 days). The newest version of each package
+      # is taken and its signature is checked against the key in
+      # pkgs/omarchy-sl7-keyring. omarchy-surface-sl7 and omarchy-sl7-keyring are
+      # built from this checkout below, so they are always the current source.
+      - name: Download the newest SL7 packages from the repo-aarch64 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p dl/linux-sl7 dl/iptsd-sl7
-          gh run download "$LINUX_SL7_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'linux-sl7-*' -D dl/linux-sl7
-          gh run download "$IPTSD_SL7_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'iptsd-sl7-*' -D dl/iptsd-sl7
-          sums="$(find dl/linux-sl7 -name SHA256SUMS -print -quit)"
-          [ -n "$sums" ] || { echo "linux-sl7 artifact has no SHA256SUMS" >&2; exit 1; }
-          (cd "$(dirname "$sums")" && sha256sum -c --quiet SHA256SUMS)
-          find dl -name '*.pkg.tar.*' | sort
+          mkdir -p rel dl/release
+          gh release download repo-aarch64 -R "$GITHUB_REPOSITORY" -D rel \
+            --pattern '*.pkg.tar.zst' --pattern '*.pkg.tar.zst.sig'
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import pkgs/omarchy-sl7-keyring/omarchy-sl7.gpg
+          declare -A best bestv
+          for f in rel/*.pkg.tar.zst; do
+            b="$(basename "$f")"
+            [[ $b =~ ^(.+)-([^-]+-[^-]+)-[^-]+\.pkg\.tar\.zst$ ]] || { echo "cannot parse $b" >&2; exit 1; }
+            n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
+            case "$n" in omarchy-surface-sl7 | omarchy-sl7-keyring | *-debug) continue ;; esac
+            if [ -z "${best[$n]:-}" ] || [ "$(printf '%s\n%s\n' "${bestv[$n]}" "$v" | sort -V | tail -n 1)" = "$v" ]; then
+              best[$n]="$f"; bestv[$n]="$v"
+            fi
+          done
+          for n in "${!best[@]}"; do
+            f="${best[$n]}"
+            [ -f "$f.sig" ] || { echo "$f has no signature" >&2; exit 1; }
+            gpg --batch --verify "$f.sig" "$f"
+            cp "$f" dl/release/
+          done
+          # Floors, from upstream.lock: refuse to build an older stack by accident.
+          at_least() { # name floor
+            local got
+            got="${bestv[$1]:-}"
+            [ -n "$got" ] || { echo "release has no $1" >&2; exit 1; }
+            [ "$(printf '%s\n%s\n' "$2" "$got" | sort -V | tail -n 1)" = "$got" ] || { echo "$1 $got is older than $2" >&2; exit 1; }
+          }
+          at_least linux-sl7 "$SL7_MIN_LINUX_SL7"
+          at_least iptsd-sl7 "$SL7_MIN_IPTSD_SL7"
+          for n in "${!best[@]}"; do echo "$n ${bestv[$n]}"; done | sort | tee dl-versions.txt
 
       - name: Fetch pinned omarchy-pkgs and the #221 / #222 PKGBUILDs
         run: |
@@ -99,11 +126,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-versions
+          path: dl-versions.txt
+          if-no-files-found: error
+          retention-days: 14
+
   iso:
     name: Installer ISO (aarch64/snapdragon)
     needs: repo
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 330
+    permissions:
+      contents: write # release upload (installer-latest)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -138,6 +174,11 @@ jobs:
         with:
           name: omarchy-sl7-repo
           path: ${{ runner.temp }}/build/repo
+
+      - name: Download the package versions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: package-versions
 
       - name: Apply installer/iso-patches
         run: |
@@ -194,12 +235,11 @@ jobs:
             echo "| omarchy | \`$OMARCHY_SHA\` |"
             echo "| omarchy-iso | \`$OMARCHY_ISO_SHA\` |"
             echo "| omarchy-pkgs | \`$OMARCHY_PKGS_SHA\` (+ #221 \`$OMARCHY_PKGS_PR221_SHA\`, #222 \`$OMARCHY_PKGS_PR222_SHA\`) |"
-            echo "| linux-sl7 run | $LINUX_SL7_RUN_ID |"
-            echo "| iptsd-sl7 run | $IPTSD_SL7_RUN_ID |"
+            echo '| SL7 package (repo-aarch64) | version |'
+            echo '|---|---|'
+            while read -r n v; do echo "| $n | $v |"; done < dl-versions.txt
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Longer retention: GitHub release assets are limited to 2 GiB each and
-      # this ISO is larger, so it stays a 14-day artifact. Re-run to refresh.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: omarchy-sl7-installer-iso
@@ -207,6 +247,72 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      # GitHub release assets are limited to 2 GiB each and this ISO is larger,
+      # so the release carries it as parts of 1900 MiB (cat them back together;
+      # the README and make-install-usb.sh do). The release is recreated on every
+      # successful main build, so the tag always points at the commit that built
+      # it and https://github.com/<repo>/releases/tag/installer-latest is stable.
+      - name: Publish the ISO to the installer-latest release
+        if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SIGNING_KEY: ${{ secrets.REPO_SIGNING_KEY }}
+          REPO_SIGNING_KEY_ID: ${{ secrets.REPO_SIGNING_KEY_ID }}
+          TAG: installer-latest
+        run: |
+          set -euo pipefail
+          iso="$(basename "$(ls out/*.iso)")"
+          mkdir -p rel
+          split -b 1900M -d -a 2 "out/$iso" "rel/$iso.part-"
+          cp "out/$iso.sha256" rel/
+          (cd rel && sha256sum "$iso".part-* > "$iso.parts.sha256")
+          ls -l rel
+          size="$(stat -c %s "out/$iso")"
+          signed="no (REPO_SIGNING_KEY not set)"
+          if [ -n "$REPO_SIGNING_KEY" ] && [ -n "$REPO_SIGNING_KEY_ID" ]; then
+            export GNUPGHOME="$RUNNER_TEMP/gnupg-sign"
+            mkdir -m 700 "$GNUPGHOME"
+            printf '%s\n' "$REPO_SIGNING_KEY" | gpg --batch --import
+            gpg --batch --yes --pinentry-mode loopback --passphrase '' -u "$REPO_SIGNING_KEY_ID" \
+              --detach-sign --output "rel/$iso.sha256.sig" "rel/$iso.sha256"
+            gpg --batch --yes --armor --export "$REPO_SIGNING_KEY_ID" > rel/omarchy-sl7.pub.asc
+            gpg --batch --verify "rel/$iso.sha256.sig" "rel/$iso.sha256"
+            signed="yes (detached signature of the .sha256 file, key $REPO_SIGNING_KEY_ID)"
+          else
+            echo "::warning title=installer-iso::REPO_SIGNING_KEY not set: the ISO checksum is published unsigned"
+          fi
+          pkgs="$(while read -r n v; do echo "- $n $v"; done < dl-versions.txt)"
+          cat > notes.md <<NOTES
+          Omarchy installer ISO for the Surface Laptop 7 13.8" (Snapdragon X, aarch64), rebuilt by
+          .github/workflows/installer-iso.yml on every change. This release is replaced by each build.
+
+          Built from commit ${GITHUB_SHA} (workflow run ${GITHUB_RUN_ID}), $(date -u +%Y-%m-%d).
+
+          **Firmware: this ISO contains NO Microsoft or Qualcomm firmware** (checked in the build by
+          installer/scripts/assert-iso.sh and the repository firmware guard). The install stick gets it
+          from your own copy of Microsoft's public Surface driver package, extracted on your machine
+          by tools/installer-kit/get-sl7-firmware.sh and written to the stick's SL7DATA partition by
+          tools/installer-kit/make-install-usb.sh.
+
+          The ISO is $size bytes, over GitHub's 2 GiB asset limit, so it is published in parts.
+          Reassemble and check:
+
+              cat ${iso}.part-* > ${iso}
+              sha256sum -c ${iso}.sha256
+
+          Or let tools/installer-kit/make-install-usb.sh --from-release do it. Signed checksum: $signed.
+
+          SL7 packages on this ISO (newest signed builds from the repo-aarch64 release):
+          $pkgs
+          NOTES
+          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Surface Laptop 7 installer ISO (latest)" --notes-file notes.md rel/*
+          {
+            echo
+            echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Disk at end
         if: ${{ !cancelled() }}
