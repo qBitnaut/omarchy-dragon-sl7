@@ -1,14 +1,14 @@
 pkgbase = omarchy-sl7-faceunlock
 	pkgdesc = Omarchy-styled Face Unlock setup and face manager for the Surface Laptop 7 (howdy-next, IR bridge, PAM, lock screen)
 	pkgver = 0.1.0
-	pkgrel = 2
+	pkgrel = 3
 	url = https://github.com/qBitnaut/omarchy-dragon-sl7
 	install = omarchy-sl7-faceunlock.install
 	arch = any
 	license = MIT
 	depends = bash
 	depends = howdy-next
-	depends = sl7-ir-bridge
+	depends = sl7-ir-bridge>=0.1.0-2
 	depends = gum
 	depends = jq
 	depends = sudo

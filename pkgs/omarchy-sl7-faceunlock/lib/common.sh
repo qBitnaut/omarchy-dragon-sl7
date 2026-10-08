@@ -34,9 +34,13 @@ BRIDGE_UNIT=${SL7_BRIDGE_UNIT:-sl7-ir-bridge.service}
 DRY_RUN=${SL7_DRY_RUN:-0}
 
 # Defaults the wizard applies to howdy-next (README: tune on the device). The
-# timeout stays at 4 s or less so a scan never streams longer than 5 s.
+# timeout stays at 4 s or less so a scan never streams longer than 5 s, well
+# inside the bridge's 10 s session cap. The dark threshold is howdy's limit for
+# the share of a frame in the darkest histogram bin: IR frames lit at Windows'
+# 100 line exposure are dim (mean about 20 of 255), so the limit is set near
+# its maximum; frames with no light at all still fail it.
 CFG_DEVICE=$CAMERA
-CFG_DARK_THRESHOLD=90
+CFG_DARK_THRESHOLD=99
 CFG_TIMEOUT=4
 
 SL7_BEGIN='# sl7-faceunlock BEGIN (managed by omarchy-sl7-faceunlock; do not edit)'

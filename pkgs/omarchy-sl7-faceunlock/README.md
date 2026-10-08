@@ -33,7 +33,8 @@ The app uses the active Omarchy theme's gum colours.
   reachable by your user (the lock screen runs PAM as you, so the loopback
   node must be openable by the logged-in user), enrolled faces, which stacks
   are on (sudo, polkit, lock), lock plugin state, lid, and
-  `IR emitter: not yet available (recognition works best in daylight until then)`.
+  the IR emitter (`on` while the bridge streams, `off` if `IR_EMITTER=off`
+  is set in `/etc/sl7-ir-bridge.conf`, `not yet available` without the bridge).
 - **Manage faces**: a table of id, label and enrolment time, then Add a
   variation, Remove one, Remove all, Refresh list. Adding offers No glasses,
   Glasses, Sunglasses, Low light, Bright light, Hat or a custom label (24
@@ -71,8 +72,8 @@ future panel can call with `pkexec`.
 | Key | Value | Reason |
 |---|---|---|
 | `device_path` | `/dev/v4l/by-id/sl7-ir-camera` | howdy-next only accepts `/dev/video*`, `by-id` and `by-path` |
-| `dark_threshold` | 90 (upstream 75) | the Y8 stream starts with 3-5 dim frames; do not let them abort an attempt |
-| `timeout` | 4 s (hard cap) | a scan never streams longer than 5 s; the lock screen watchdog is 5 s |
+| `dark_threshold` | 99 (upstream 75) | the share of a frame in the darkest histogram bin that howdy tolerates. IR frames lit at Windows' 100 line exposure are dim (stage C: mean 20 of 255, p99 38), and the first frames of a stream are dimmer still; unlit frames (flat, no face) still fail |
+| `timeout` | 4 s (hard cap) | a scan never streams longer than 5 s; the lock screen watchdog is 5 s; the bridge allows 10 s per session including sensor start |
 | `abort_if_ssh` | true | lets the password-only sudo path skip the camera (below) |
 
 These are starting values. Tune `dark_threshold` and `sface_threshold` on the
@@ -161,9 +162,11 @@ screen returns.
   recognition` shows a live window and saves nothing.
 - Keep a root shell open (`sudo -i`) while changing PAM. Omarchy's root account
   usually has no password, so `su` will not rescue you.
-- IR emitter: not available yet. Until it is, dark rooms fail with "too dark";
-  recognition works best in daylight. The app does not drive any LED; the
-  bridge will set the sensor's `led_mode` before streaming.
+- IR emitter: the bridge lights it (sensor strobe, led_mode flash, Windows'
+  exposure and frame length, held by the kernel) only while a scan streams, at
+  most 10 s per session, and sets `led_mode` back to none first when the stream
+  ends. The app does not drive any LED. `IR_EMITTER=off` in
+  `/etc/sl7-ir-bridge.conf` keeps it dark; dark rooms then fail with "too dark".
 
 ## Rollback and emergency off
 

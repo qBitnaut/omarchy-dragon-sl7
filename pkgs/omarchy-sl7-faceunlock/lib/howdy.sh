@@ -36,10 +36,21 @@ camera_state() {
   fi
 }
 
-# The emitter is not available yet. Later the bridge sets the sensor's
-# led_mode before it streams; this app never drives the emitter itself.
+# on | off | unavailable. The bridge lights the IR emitter itself (the sensor's
+# led_mode, at Windows' timing, for each camera session) unless
+# IR_EMITTER=off is set in its config; this app never drives the emitter.
 emitter_state() {
-  printf 'unavailable'
+  local conf=${SL7_BRIDGE_CONF:-/etc/sl7-ir-bridge.conf} v
+  if [[ $(bridge_state) == missing ]]; then
+    printf 'unavailable'
+    return
+  fi
+  v=$(awk -F= '/^[[:space:]]*IR_EMITTER[[:space:]]*=/ { v = $2; gsub(/[[:space:]"]/, "", v) } END { print v }' "$conf" 2>/dev/null)
+  if [[ $v == off ]]; then
+    printf 'off'
+  else
+    printf 'on'
+  fi
 }
 
 # closed | open | unknown

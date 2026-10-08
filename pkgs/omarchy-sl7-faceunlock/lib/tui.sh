@@ -92,7 +92,11 @@ status_text() {
   fi
   s=$(lid_state)
   mark good "lid (logind): $s"
-  mark warn "IR emitter: not yet available (recognition works best in daylight until then)"
+  case $(emitter_state) in
+  on) mark good "IR emitter: lit by the bridge while the camera streams (Windows timing, at most 10 s per scan)" ;;
+  off) mark warn "IR emitter: off (IR_EMITTER=off in /etc/sl7-ir-bridge.conf); recognition works best in daylight" ;;
+  *) mark warn "IR emitter: not yet available (recognition works best in daylight until then)" ;;
+  esac
   mark good "login and SDDM: never touched"
 }
 
@@ -103,7 +107,7 @@ face_guidance() {
   "No glasses") say "Take your glasses off. Face the camera, about 40 cm away, neutral expression, head level." ;;
   "Glasses") say "Put on the glasses you wear most. Face the camera about 40 cm away; tilt your head a little so lamp reflections leave your eyes clear." ;;
   "Sunglasses") say "Face the camera about 40 cm away with the sunglasses on. Many sunglasses block infrared; if the test fails, remove this look rather than lowering security." ;;
-  "Low light") say "Dim the room, face the camera about 40 cm away. Until the IR emitter exists, dark scans usually fail with 'too dark'; this look helps most once it does." ;;
+  "Low light") say "Dim the room, face the camera about 40 cm away. The IR emitter lights your face at any room brightness; this look matters most when the room is dim." ;;
   "Bright light") say "Face a window or daylight, about 40 cm away, no strong sun directly behind you." ;;
   "Hat") say "Wear the hat or cap you use most. Face the camera about 40 cm away with your forehead and eyes visible." ;;
   *) say "Face the camera about 40 cm away, in the conditions this label describes." ;;
@@ -320,10 +324,14 @@ ui_wizard() {
   say ""
   say "Step 2 of 3: configure howdy-next"
   say "  device_path     $CFG_DEVICE"
-  say "  dark_threshold  $CFG_DARK_THRESHOLD   (tolerates the dim first frames of an IR stream)"
-  say "  timeout         $CFG_TIMEOUT s per attempt (never longer than 5 s of camera time)"
+  say "  dark_threshold  $CFG_DARK_THRESHOLD   (IR frames lit at Windows' short exposure are dim; this keeps them)"
+  say "  timeout         $CFG_TIMEOUT s per attempt (the bridge allows 10 s per session; a scan never streams past 5 s)"
   say "  abort_if_ssh    true   (lets password-only sudo skip the camera)"
-  note "No IR emitter yet: expect recognition to work best in daylight."
+  if [[ $(emitter_state) == on ]]; then
+    note "The IR emitter is lit by the bridge during each attempt (at most 10 s)."
+  else
+    note "No IR emitter: expect recognition to work best in daylight."
+  fi
   ui_confirm "Apply these settings? (asks for your password)" || return 0
   sl7_priv_pw configure "$CFG_DEVICE" "$CFG_DARK_THRESHOLD" "$CFG_TIMEOUT" || {
     err "configuration failed"

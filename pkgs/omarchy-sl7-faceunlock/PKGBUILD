@@ -8,12 +8,12 @@
 
 pkgname=omarchy-sl7-faceunlock
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Omarchy-styled Face Unlock setup and face manager for the Surface Laptop 7 (howdy-next, IR bridge, PAM, lock screen)'
 arch=('any')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT')
-depends=('bash' 'howdy-next' 'sl7-ir-bridge' 'gum' 'jq' 'sudo' 'systemd' 'pam'
+depends=('bash' 'howdy-next' 'sl7-ir-bridge>=0.1.0-2' 'gum' 'jq' 'sudo' 'systemd' 'pam'
          'gawk' 'sed' 'grep' 'diffutils' 'coreutils' 'util-linux' 'patch' 'git')
 optdepends=('omarchy: the floating terminal launcher, menu and plugin manager'
             'v4l-utils: the one-frame camera check in the wizard'

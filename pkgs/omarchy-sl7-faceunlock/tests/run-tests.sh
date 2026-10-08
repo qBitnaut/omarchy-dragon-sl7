@@ -204,6 +204,22 @@ check "cli: faces list json" bash -c "'$APP' faces list --json | jq -e '.[0].lab
 check "cli: faces list cached" bash -c "'$APP' faces list --json --cached | jq -e 'length == 1'"
 check "cli: status json" bash -c "'$APP' status --json | jq -e '.emitter == \"unavailable\" and .faces[0].label == \"Glasses\" and .stacks.sudo == \"enabled\"'"
 check "cli: status text mentions emitter" bash -c "'$APP' status | grep -q 'not yet available'"
+printf '# comment\nIR_EMITTER=off\n' >"$T/env/bridge-off.conf"
+printf 'IR_EMITTER=on\n' >"$T/env/bridge-on.conf"
+emitter_with() ( # conf file: the state with an active bridge
+  # shellcheck source=../lib/common.sh
+  source "$LIB/common.sh"
+  # shellcheck source=../lib/howdy.sh
+  source "$LIB/howdy.sh"
+  bridge_state() { printf active; }
+  SL7_BRIDGE_CONF=$1 emitter_state
+)
+em_none=$(emitter_with "$T/env/none.conf")
+em_on=$(emitter_with "$T/env/bridge-on.conf")
+em_off=$(emitter_with "$T/env/bridge-off.conf")
+check "emitter: on when no conf is readable" bash -c "[[ '$em_none' == on ]]"
+check "emitter: on from the conf" bash -c "[[ '$em_on' == on ]]"
+check "emitter: off from the conf" bash -c "[[ '$em_off' == off ]]"
 check "cli: --off" "$APP" --off
 check "cli: --off removed the lines" bash -c "! grep -rq sl7-faceunlock '$SL7_PAM_DIR'"
 check "cli: sudo restored" cmp "$SL7_PAM_DIR/sudo" "$T/env/sudo.orig"
