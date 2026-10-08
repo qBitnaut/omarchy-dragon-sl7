@@ -498,10 +498,10 @@ sl7-camera-check                  # frames, logs and a CPU/power sample into ~/s
 
 | Option | Meaning |
 |---|---|
-| `--blend X` | Strength of Microsoft's colour matrices, 0 (none) to 1 (full). Default 0.7. Full strength gave a green tint and noise with libcamera's grey-world white balance on a comparable Dell sensor; 70% was the usable setting there. |
+| `--blend X` | Strength of Microsoft's colour matrices, 0 (none) to 1 (full). Default 0.6, chosen on the SL7 (0.7 left skin slightly reddish). Full strength gave a green tint and noise with libcamera's grey-world white balance on a comparable Dell sensor; 70% was the usable setting there. |
 | `--set N` | Which illuminant set to use (default 1). `--list` shows what the file holds. |
 | `--contrast X` | Default contrast, 0 to 2 (1 = none). Default 1.2. Written to the `Adjust` block; needs libcamera 0.7.2-4.2 or later (older versions ignore it). Applications that set the contrast control still win. |
-| `--saturation X` | Default saturation, 0 to 2 (1 = none). Default 1.15. Same rules as `--contrast`. |
+| `--saturation X` | Default saturation, 0 to 2 (1 = none). Default 1.05, chosen on the SL7 with blend 0.6. Same rules as `--contrast`. |
 | `--black-level N` | Override the black level (16-bit scale, 4096 = 64 of 1023). Default: the sensor helper's (4096). See below before changing it. |
 | `--dry-run` | Print the tuning file to your terminal instead of writing it. |
 | `--list` | Print the sets found with their colour temperature ranges and matrices. |

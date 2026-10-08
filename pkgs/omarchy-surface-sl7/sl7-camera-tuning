@@ -352,8 +352,8 @@ def main():
         prog=PROG,
         description="Write a libcamera tuning file for the Surface Laptop 7 front camera from Microsoft's "
                     "driver package, on this machine. Needs root, except with --dry-run, --list and --status.")
-    ap.add_argument("--blend", type=float, default=0.7, metavar="X",
-                    help="strength of Microsoft's matrices, 0 (none) to 1 (full); default 0.7")
+    ap.add_argument("--blend", type=float, default=0.6, metavar="X",
+                    help="strength of Microsoft's matrices, 0 (none) to 1 (full); default 0.6 (chosen on the SL7)")
     ap.add_argument("--set", type=int, default=1, metavar="N",
                     help="which illuminant set to use (see --list); default 1")
     ap.add_argument("--black-level", type=int, default=None, metavar="N",
@@ -361,9 +361,9 @@ def main():
     ap.add_argument("--contrast", type=float, default=1.2, metavar="X",
                     help="default contrast, 0 to 2 (1 = none); needs libcamera 0.7.2-4.2 or later, "
                          "applications can still override it; default 1.2")
-    ap.add_argument("--saturation", type=float, default=1.15, metavar="X",
+    ap.add_argument("--saturation", type=float, default=1.05, metavar="X",
                     help="default saturation, 0 to 2 (1 = none); needs libcamera 0.7.2-4.2 or later, "
-                         "applications can still override it; default 1.15")
+                         "applications can still override it; default 1.05 (chosen on the SL7)")
     ap.add_argument("--bin", metavar="FILE", help="the extracted %s" % BIN_NAME)
     ap.add_argument("--from-msi", metavar="FILE", help="the Surface Laptop 7 driver MSI (needs msitools)")
     ap.add_argument("--list", action="store_true", help="print the sets found, with their matrices, and exit")
