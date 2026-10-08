@@ -71,9 +71,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libarchive-tools
           for n in libcamera libcamera-ipa libcamera-tools gst-plugin-libcamera python-libcamera; do
-            ls out/"$n"-0.7.2-4.1-aarch64.pkg.tar.zst
+            ls out/"$n"-0.7.2-4.2-aarch64.pkg.tar.zst
           done
-          mkdir x && bsdtar -C x -xf out/libcamera-ipa-0.7.2-4.1-aarch64.pkg.tar.zst
+          mkdir x && bsdtar -C x -xf out/libcamera-ipa-0.7.2-4.2-aarch64.pkg.tar.zst
           ls -l x/usr/lib/libcamera x/usr/lib/libcamera/ipa
           # every IPA module is signed
           for so in x/usr/lib/libcamera/ipa/*.so; do test -s "$so.sign"; done
@@ -81,7 +81,7 @@ jobs:
           grep -c ov02c10 x/usr/lib/libcamera/ipa/ipa_soft_simple.so
           grep -q ov02c10 x/usr/lib/libcamera/ipa/ipa_soft_simple.so
           # the default tuning file is still shipped
-          bsdtar -tf out/libcamera-0.7.2-4.1-aarch64.pkg.tar.zst | grep -E 'share/libcamera/ipa/simple/uncalibrated.yaml$'
+          bsdtar -tf out/libcamera-0.7.2-4.2-aarch64.pkg.tar.zst | grep -E 'share/libcamera/ipa/simple/uncalibrated.yaml$'
 
       - uses: actions/upload-artifact@v4
         with:

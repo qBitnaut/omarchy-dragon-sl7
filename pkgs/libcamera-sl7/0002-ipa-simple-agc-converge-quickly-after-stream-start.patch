@@ -1,0 +1,151 @@
+From 55280fd1ba062947514b0b1c31a6c26908d821de Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 12:15:46 -0500
+Subject: [PATCH] ipa: simple: agc: converge quickly after stream start
+
+The software ISP AGC corrected the exposure by at most about 10% per
+statistics update, so a stream starting far from the target needed
+several seconds to settle. For the first six updates, scale the total
+exposure (exposure time times analogue gain) by the squared ratio of
+the optimal and the measured MSV, limited to 0.25..4, and split the
+result between exposure time and gain in a single update. Afterwards
+keep the proportional step, capped at +-15%.
+
+Signed-off-by: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+---
+ src/ipa/simple/algorithms/agc.cpp | 83 ++++++++++++++++++++++++-------
+ src/ipa/simple/ipa_context.h      |  1 +
+ 2 files changed, 67 insertions(+), 17 deletions(-)
+
+diff --git a/src/ipa/simple/algorithms/agc.cpp b/src/ipa/simple/algorithms/agc.cpp
+index a13a755..3cc60bb 100644
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -61,6 +61,17 @@ static constexpr float kExpProportionalGain = 0.04;
+  */
+ static constexpr float kExpMaxStep = 0.15;
+
++/*
++ * The first few statistics updates after the stream starts use a much larger
++ * correction, so that the exposure gets close to the target within a handful
++ * of frames instead of crawling there at a few percent per frame. The step is
++ * the square of the ratio between the optimal and the measured MSV, limited to
++ * kFastStartMinFactor..kFastStartMaxFactor.
++ */
++static constexpr unsigned int kFastStartUpdates = 6;
++static constexpr float kFastStartMinFactor = 0.25;
++static constexpr float kFastStartMaxFactor = 4.0;
++
+ Agc::Agc()
+ {
+ }
+@@ -70,27 +81,57 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, dou
+ 	int32_t &exposure = frameContext.sensor.exposure;
+ 	double &again = frameContext.sensor.gain;
+
++	if (!std::isfinite(exposureMSV))
++		return;
++
+ 	double error = kExposureOptimal - exposureMSV;
++	float factor;
++
++	const bool fastStart = context.activeState.agc.updates < kFastStartUpdates;
++	if (fastStart)
++		context.activeState.agc.updates++;
+
+ 	if (std::abs(error) <= kExposureSatisfactory)
+ 		return;
+
+-	/*
+-	 * Compute a proportional correction factor. The sign of the error
+-	 * determines the direction: positive error means too dark (increase),
+-	 * negative means too bright (decrease).
+-	 */
+-	float step = std::clamp(static_cast<float>(error) * kExpProportionalGain,
+-				-kExpMaxStep, kExpMaxStep);
+-	float factor = 1.0f + step;
++	if (fastStart) {
++		/* An MSV of zero means that the frame is black. */
++		if (exposureMSV <= 0.0)
++			factor = kFastStartMaxFactor;
++		else
++			factor = std::clamp(static_cast<float>(std::pow(kExposureOptimal / exposureMSV, 2.0)),
++					    kFastStartMinFactor, kFastStartMaxFactor);
++	} else {
++		/*
++		 * Compute a proportional correction factor. The sign of the
++		 * error determines the direction: positive error means too
++		 * dark (increase), negative means too bright (decrease).
++		 */
++		float step = std::clamp(static_cast<float>(error) * kExpProportionalGain,
++					-kExpMaxStep, kExpMaxStep);
++		factor = 1.0f + step;
++	}
+
++	/*
++	 * Apply the factor to the total exposure (exposure time times gain)
++	 * and split it between the two in one go.
++	 */
+ 	if (factor > 1.0f) {
+ 		/* Scene too dark: increase exposure first, then gain. */
++		double remaining = factor;
++
+ 		if (exposure < context.configuration.agc.exposureMax) {
+ 			int32_t next = static_cast<int32_t>(exposure * factor);
+-			exposure = std::max(next, exposure + 1);
+-		} else {
+-			double next = again * factor;
++			next = std::clamp(std::max(next, exposure + 1),
++					  context.configuration.agc.exposureMin,
++					  context.configuration.agc.exposureMax);
++			remaining = static_cast<double>(factor) * exposure / next;
++			exposure = next;
++		}
++
++		/* Only the part the exposure time could not deliver goes to the gain. */
++		if (exposure >= context.configuration.agc.exposureMax && remaining > 1.0) {
++			double next = again * remaining;
+ 			if (next - again < context.configuration.agc.againMinStep)
+ 				again += context.configuration.agc.againMinStep;
+ 			else
+@@ -98,14 +139,22 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, dou
+ 		}
+ 	} else {
+ 		/* Scene too bright: decrease gain first, then exposure. */
++		double remaining = factor;
++
+ 		if (again > context.configuration.agc.again10) {
+-			double next = again * factor;
++			double next = std::max(again * factor,
++					       context.configuration.agc.again10);
+ 			if (again - next < context.configuration.agc.againMinStep)
+-				again -= context.configuration.agc.againMinStep;
+-			else
+-				again = next;
+-		} else {
+-			int32_t next = static_cast<int32_t>(exposure * factor);
++				next = std::max(again - context.configuration.agc.againMinStep,
++						context.configuration.agc.again10);
++			remaining = next > 0.0 ? std::min(static_cast<double>(factor) * again / next, 1.0)
++					       : factor;
++			again = next;
++		}
++
++		/* Only the part the gain could not deliver goes to the exposure time. */
++		if (again <= context.configuration.agc.again10 && remaining < 0.999) {
++			int32_t next = static_cast<int32_t>(exposure * remaining);
+ 			exposure = std::min(next, exposure - 1);
+ 		}
+ 	}
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index 8ccfacb..3f7f695 100644
+--- a/src/ipa/simple/ipa_context.h
++++ b/src/ipa/simple/ipa_context.h
+@@ -40,6 +40,7 @@ struct IPAActiveState {
+ 		int32_t exposure;
+ 		double again;
+ 		bool valid;
++		unsigned int updates;
+ 	} agc;
+
+ 	struct {

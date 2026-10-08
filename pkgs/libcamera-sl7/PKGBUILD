@@ -2,11 +2,14 @@
 #
 # libcamera 0.7.2 for the Surface Laptop 7 (aarch64), rebuilt from the Arch
 # Linux ARM PKGBUILD (extra/libcamera, pkgrel 4, Kevin Mihelich / David Runge /
-# Carl Smedstad) with one addition: a camera sensor helper for the OV02C10
-# front camera (0001-...). Without it the software ISP cannot run AGC for that
-# sensor. Differences from the ALARM package:
-#   - pkgrel 4.1 sorts above ALARM's 4, so the omarchy-sl7 repository wins
+# Carl Smedstad) with a camera sensor helper for the OV02C10 front camera
+# (0001-...), without which the software ISP cannot run AGC for that sensor, and
+# three software ISP fixes for it (0002-0004). Differences from the ALARM package:
+#   - pkgrel 4.2 sorts above ALARM's 4, so the omarchy-sl7 repository wins
 #   - 0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch
+#   - 0002-ipa-simple-agc-converge-quickly-after-stream-start.patch
+#   - 0003-libcamera-software_isp-debayer_egl-compute-stats-on-the-displayed-area.patch
+#   - 0004-ipa-simple-adjust-read-default-gamma-contrast-saturation-from-tuning.patch
 #   - -Dwerror=false: ALARM's GCC 16 reports a false -Warray-bounds in libcamera's
 #     logger (std::make_shared<LogOutput>) that libcamera's -Werror turns fatal
 #   - no libcamera-docs package (documentation disabled: it needs TeX Live),
@@ -26,7 +29,7 @@ pkgname=(
   python-libcamera
 )
 pkgver=0.7.2
-pkgrel=4.1
+pkgrel=4.2
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS"
 arch=(aarch64)
 url="https://libcamera.org/"
@@ -61,10 +64,16 @@ source=(
   "git+$_url#tag=v$pkgver"
   "$pkgbase-fix-python3.14-macro-redefinition.patch"
   "0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch"
+  "0002-ipa-simple-agc-converge-quickly-after-stream-start.patch"
+  "0003-libcamera-software_isp-debayer_egl-compute-stats-on-the-displayed-area.patch"
+  "0004-ipa-simple-adjust-read-default-gamma-contrast-saturation-from-tuning.patch"
 )
 sha256sums=('SKIP'
             '8e8b99ff804ffd75d9bbc845dd4616edf0e0cea7c0eb175e47583b8488f33368'
-            '9e01e2cb82c120b5140345e00527c1b9362b322f79e471ba42d1bda2b5d55a13')
+            '9e01e2cb82c120b5140345e00527c1b9362b322f79e471ba42d1bda2b5d55a13'
+            'd519f2180bf297357b5c56ea3d9152e3f96e35f976dc6e60ae1f20705722aaf9'
+            '5e8ab7f0e4f373c9b7f296d89ecc72b6b0bd3a3e8c77b2a2aa4b5e6aff51c2e3'
+            'efe0c1ca05644f1884cca210e292374b5e9a21cd3b5ae5af466b2a51041eda45')
 
 _pick() {
   local p="$1" f d; shift
@@ -80,6 +89,9 @@ prepare() {
   cd $pkgbase
   patch -Np1 < ../$pkgbase-fix-python3.14-macro-redefinition.patch
   patch -Np1 < ../0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch
+  patch -Np1 < ../0002-ipa-simple-agc-converge-quickly-after-stream-start.patch
+  patch -Np1 < ../0003-libcamera-software_isp-debayer_egl-compute-stats-on-the-displayed-area.patch
+  patch -Np1 < ../0004-ipa-simple-adjust-read-default-gamma-contrast-saturation-from-tuning.patch
 
   # add version, so that utils/gen-version.sh may rely on it
   printf "%s\n" "$pkgver" > .tarball-version

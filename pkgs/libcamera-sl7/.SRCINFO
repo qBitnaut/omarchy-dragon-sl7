@@ -1,7 +1,7 @@
 pkgbase = libcamera
 	pkgdesc = A complex camera support library for Linux, Android, and ChromeOS
 	pkgver = 0.7.2
-	pkgrel = 4.1
+	pkgrel = 4.2
 	url = https://libcamera.org/
 	arch = aarch64
 	makedepends = cmake
@@ -31,9 +31,15 @@ pkgbase = libcamera
 	source = git+https://git.libcamera.org/libcamera/libcamera.git#tag=v0.7.2
 	source = libcamera-fix-python3.14-macro-redefinition.patch
 	source = 0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch
+	source = 0002-ipa-simple-agc-converge-quickly-after-stream-start.patch
+	source = 0003-libcamera-software_isp-debayer_egl-compute-stats-on-the-displayed-area.patch
+	source = 0004-ipa-simple-adjust-read-default-gamma-contrast-saturation-from-tuning.patch
 	sha256sums = SKIP
 	sha256sums = 8e8b99ff804ffd75d9bbc845dd4616edf0e0cea7c0eb175e47583b8488f33368
 	sha256sums = 9e01e2cb82c120b5140345e00527c1b9362b322f79e471ba42d1bda2b5d55a13
+	sha256sums = d519f2180bf297357b5c56ea3d9152e3f96e35f976dc6e60ae1f20705722aaf9
+	sha256sums = 5e8ab7f0e4f373c9b7f296d89ecc72b6b0bd3a3e8c77b2a2aa4b5e6aff51c2e3
+	sha256sums = efe0c1ca05644f1884cca210e292374b5e9a21cd3b5ae5af466b2a51041eda45
 
 pkgname = libcamera
 	license = Apache-2.0

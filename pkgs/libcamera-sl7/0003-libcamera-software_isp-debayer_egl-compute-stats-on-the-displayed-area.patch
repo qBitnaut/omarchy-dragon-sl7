@@ -1,0 +1,40 @@
+From 8c4acd1bb4207d327be405adaea4f4e62e623622 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 12:15:58 -0500
+Subject: [PATCH] libcamera: software_isp: debayer_egl: compute stats on
+ the displayed area
+
+DebayerEGL::process() passes the whole input buffer to
+SwStatsCpu::processFrame(), but configure() set the stats window to
+Rectangle(window_.size()), which starts at 0,0. When the output is
+smaller than the sensor output (cropped, e.g. 720p from a larger mode)
+the statistics were then taken from the top left corner instead of the
+area that is displayed, which skews AGC and AWB. Pass window_ with its
+offset, as the buffer is not pre-cropped on this path.
+
+Signed-off-by: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 02651fe..70202da 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -340,10 +340,13 @@ int DebayerEGL::configure(const StreamConfiguration &inputCfg,
+ 	window_.height = outputCfg.size.height;
+
+ 	/*
+-	 * Don't pass x,y from window_ since process() already adjusts for it.
+-	 * But crop the window to 2/3 of its width and height for speedup.
++	 * Unlike the CPU debayer, which hands the stats only the part of the
++	 * frame it processes, process() passes the whole input buffer to
++	 * SwStatsCpu::processFrame(). Pass x,y from window_ as well, so that
++	 * the stats cover the displayed area and not the top left corner of
++	 * the input.
+ 	 */
+-	stats_->setWindow(Rectangle(window_.size()));
++	stats_->setWindow(window_);
+
+ 	inputBufferCount_ = inputCfg.bufferCount;
+ 	outputBufferCount_ = outputCfg.bufferCount;
