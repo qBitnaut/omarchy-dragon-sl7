@@ -1,0 +1,337 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-dragon-sl7 <noreply@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 16:00:00 -0500
+Subject: [PATCH] SL7 local: media: i2c: vd55g: Windows IR strobe timing, illuminator on by default
+
+Stage C result: the IR emitter is lit by the sensor's GPIO 1 strobe alone
+(led_mode = flash with the PMIC not armed made the frames brighter). The PMIC
+current limits therefore do not apply; the only safety control is the strobe
+duration, which is the exposure, and its repetition, which is the frame length.
+
+Whenever the led_mode control is not "off" the driver now holds both to what
+Windows Hello programs, whatever user space asks for:
+
+ - exposure <= 100 lines (Windows 0x044e = 100), 1.587 ms at 1200 pixels per
+   line and 75.6 MHz;
+ - frame length >= 1750 lines (Windows 0x0458/9 = 1750), 27.78 ms, 36 fps,
+   a strobe duty of 5.71 % at most.
+
+The limits are scaled by the real pixel clock and line length (a slower clock
+or a longer line can only tighten them) and are enforced
+ - when a control is set: the exposure and vblank control ranges, the frame
+   length actually written, the exposure ceiling register, and the manual
+   exposure value;
+ - when led_mode changes: vblank and exposure ranges, then the registers,
+   before the GPIO strobe is configured;
+ - at stream start, after every control has been applied and before the
+   stream starts, so no control ordering or stale value can get around them;
+   a failure to write them fails the stream start.
+
+Auto exposure is replaced by manual exposure while the strobe is on (the
+sensor's auto exposure is not known to honour a ceiling), as Windows' init
+does. The gains are written from the controls (their defaults are the sensor's
+power-on values, which Windows' init does not change either). The tighter of
+these limits and the 0040 flash-mode cap (half a frame) wins. The effective
+timing is logged at stream start and on every led_mode change.
+
+The illuminator module parameter (0094) now defaults to on, so the led_mode
+control exists on normal boots; illuminator=0 disables the strobe entirely.
+
+Origin: ours
+Upstream-Status: Not submitted
+---
+diff --git i/drivers/media/i2c/vd55g.c w/drivers/media/i2c/vd55g.c
+index 73ccf6a165d1..932877698946 100644
+--- i/drivers/media/i2c/vd55g.c
++++ w/drivers/media/i2c/vd55g.c
+@@ -10,6 +10,7 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/iopoll.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/pinctrl/consumer.h>
+@@ -594,6 +595,65 @@ static s32 vd55g_get_pixel_rate(struct vd55g *sensor,
+ 	return sensor->mipi_rate / vd55g_get_fmt_bpp(format->code);
+ }
+
++/*
++ * SL7 local: the IR emitter is lit by the sensor's GPIO 1 strobe alone, which
++ * is high for the whole exposure. The only safety control is therefore the
++ * strobe duration, i.e. the exposure, and how often it repeats, i.e. the frame
++ * length. Whenever the led_mode control is not "off" the driver limits both to
++ * what Windows Hello programs, whatever user space asks for:
++ *
++ *   exposure     <= 100 lines of 1200 pixels (1.587 ms at 75.6 MHz)
++ *   frame length >= 1750 lines of 1200 pixels (27.78 ms, 36 fps, duty 5.71 %)
++ *
++ * Source: the Windows sensor module file (regSetting 37): 0x044e = 100,
++ * 0x0458/9 = 1750, 0x0300 = 1200 (EMITTER-PLAN E7). The limits are also
++ * scaled by the real pixel clock and line length, so a slower clock or a
++ * longer line can only tighten them. Auto exposure is replaced by manual
++ * exposure while the strobe is on.
++ */
++#define VD55G_IR_WIN_EXPO_LINES 100
++#define VD55G_IR_WIN_FRAME_LINES 1750
++#define VD55G_IR_WIN_LINE_LENGTH 1200
++#define VD55G_IR_WIN_PIXEL_CLOCK 75600000ULL
++
++static bool vd55g_ir_active(struct vd55g *sensor)
++{
++	return sensor->led_ctrl &&
++	       sensor->led_ctrl->val != V4L2_FLASH_LED_MODE_NONE;
++}
++
++static unsigned int vd55g_ir_line_length(struct vd55g *sensor,
++					 struct v4l2_rect *crop)
++{
++	return max_t(unsigned int, VD55G_LINE_LENGTH_MIN,
++		     crop->width + sensor->hblank_ctrl->val);
++}
++
++/* Longest exposure, in lines, that keeps the pulse within Windows' */
++static unsigned int vd55g_ir_expo_cap(struct vd55g *sensor,
++				      struct v4l2_rect *crop)
++{
++	u64 lines = div64_u64((u64)VD55G_IR_WIN_EXPO_LINES *
++			      VD55G_IR_WIN_LINE_LENGTH * sensor->pixel_clock,
++			      (u64)vd55g_ir_line_length(sensor, crop) *
++			      VD55G_IR_WIN_PIXEL_CLOCK);
++
++	return clamp_t(u64, lines, 1, VD55G_IR_WIN_EXPO_LINES);
++}
++
++/* Shortest frame length, in lines, that keeps the rate within Windows' */
++static unsigned int vd55g_ir_frame_min(struct vd55g *sensor,
++				       struct v4l2_rect *crop)
++{
++	u64 lines = DIV64_U64_ROUND_UP((u64)VD55G_IR_WIN_FRAME_LINES *
++				       VD55G_IR_WIN_LINE_LENGTH *
++				       sensor->pixel_clock,
++				       (u64)vd55g_ir_line_length(sensor, crop) *
++				       VD55G_IR_WIN_PIXEL_CLOCK);
++
++	return clamp_t(u64, lines, VD55G_IR_WIN_FRAME_LINES, U16_MAX);
++}
++
+ static unsigned int vd55g_get_hblank_min(struct vd55g *sensor,
+ 					 struct v4l2_mbus_framefmt *format,
+ 					 struct v4l2_rect *crop)
+@@ -628,6 +688,14 @@ static void vd55g_get_vblank_limits(struct vd55g *sensor,
+ 	limits->min = VD55G_VBLANK_MIN;
+ 	limits->def = VD55G_FRAME_LENGTH_DEF - crop->height;
+ 	limits->max = VD55G_VBLANK_MAX - crop->height;
++
++	/* SL7 local: Windows' frame length floor while the strobe is on */
++	if (vd55g_ir_active(sensor)) {
++		limits->min = max_t(unsigned int, limits->min,
++				    vd55g_ir_frame_min(sensor, crop) -
++					    crop->height);
++		limits->def = max(limits->def, limits->min);
++	}
+ }
+
+ static void vd55g_get_frame_timings(struct vd55g *sensor,
+@@ -636,12 +704,23 @@ static void vd55g_get_frame_timings(struct vd55g *sensor,
+ {
+ 	timings->frame_length = crop->height + sensor->vblank_ctrl->val;
+
++	/* SL7 local: never shorter than Windows' frame while the strobe is on */
++	if (vd55g_ir_active(sensor))
++		timings->frame_length = max_t(unsigned int,
++					      timings->frame_length,
++					      vd55g_ir_frame_min(sensor, crop));
++
+ 	timings->expo_max = timings->frame_length - VD55G_EXPO_MAX_TERM;
+
+ 	if (sensor->info->limit_flash_duty_cycle && sensor->led_ctrl &&
+ 	    sensor->led_ctrl->val == V4L2_FLASH_LED_MODE_FLASH) {
+ 		timings->expo_max = timings->expo_max / 2;
+ 	}
++
++	/* SL7 local: the tighter of the half-frame cap and Windows' pulse */
++	if (vd55g_ir_active(sensor))
++		timings->expo_max = min_t(unsigned int, timings->expo_max,
++					  vd55g_ir_expo_cap(sensor, crop));
+ }
+
+ #define vd55g_read(sensor, reg, val, err) \
+@@ -869,7 +948,9 @@ static int vd55g_update_patgen(struct vd55g *sensor, u32 patgen_index)
+
+ static int vd55g_update_expo_cluster(struct vd55g *sensor, bool is_auto)
+ {
+-	enum vd55g_expo_state expo_state = is_auto ? VD55G1_EXP_AUTO :
++	/* SL7 local: no auto exposure while the IR strobe is on */
++	bool hw_auto = is_auto && !vd55g_ir_active(sensor);
++	enum vd55g_expo_state expo_state = hw_auto ? VD55G1_EXP_AUTO :
+ 						     VD55G1_EXP_MANUAL;
+ 	int ret = 0;
+
+@@ -890,15 +971,16 @@ static int vd55g_update_expo_cluster(struct vd55g *sensor, bool is_auto)
+ 		}
+ 	}
+
+-	if (!is_auto && sensor->expo_ctrl->is_new)
++	if (!hw_auto && sensor->expo_ctrl->is_new)
+ 		vd55g_cci_write(sensor, REG_MANUAL_COARSE_EXPOSURE,
+-				sensor->expo_ctrl->val, &ret);
++				min_t(s32, sensor->expo_ctrl->val,
++				      sensor->expo_ctrl->maximum), &ret);
+
+-	if (!is_auto && sensor->again_ctrl->is_new)
++	if (!hw_auto && sensor->again_ctrl->is_new)
+ 		vd55g_cci_write(sensor, REG_MANUAL_ANALOG_GAIN,
+ 				sensor->again_ctrl->val, &ret);
+
+-	if (!is_auto && sensor->dgain_ctrl->is_new)
++	if (!hw_auto && sensor->dgain_ctrl->is_new)
+ 		vd55g_cci_write(sensor, REG_MANUAL_DIGITAL_GAIN,
+ 				sensor->dgain_ctrl->val, &ret);
+
+@@ -954,6 +1036,60 @@ static int vd55g_update_frame_length(struct vd55g *sensor,
+ 	return ret;
+ }
+
++/*
++ * SL7 local: put the Windows timing on the sensor whenever the IR strobe is
++ * on, whatever user space has set: frame length, exposure ceiling, manual
++ * exposure and gain. Called at stream start (after every control has been
++ * applied, before the stream starts) and when led_mode changes.
++ */
++static int vd55g_ir_apply_limits(struct vd55g *sensor, struct v4l2_rect *crop)
++{
++	struct vd55g_frame_timings timings;
++	unsigned int line_length, expo;
++	u64 line_ns, expo_us, frame_us, fps_x100, duty_x100;
++	int ret = 0;
++
++	if (!vd55g_ir_active(sensor))
++		return 0;
++
++	vd55g_get_frame_timings(sensor, crop, &timings);
++	expo = min_t(unsigned int, sensor->expo_ctrl->val, timings.expo_max);
++
++	/* The frame length first: the exposure ceiling follows from it */
++	ret = vd55g_update_frame_length(sensor, timings.frame_length);
++	vd55g_cci_write(sensor, REG_EXPOSURE_MAX_COARSE, timings.expo_max,
++			&ret);
++	vd55g_write(sensor, VD55G_REG_EXP_MODE(sensor, 0), VD55G1_EXP_MANUAL,
++		    &ret);
++	vd55g_cci_write(sensor, REG_MANUAL_COARSE_EXPOSURE, expo, &ret);
++	vd55g_cci_write(sensor, REG_MANUAL_ANALOG_GAIN, sensor->again_ctrl->val,
++			&ret);
++	vd55g_cci_write(sensor, REG_MANUAL_DIGITAL_GAIN,
++			sensor->dgain_ctrl->val, &ret);
++	if (ret)
++		return ret;
++
++	line_length = vd55g_ir_line_length(sensor, crop);
++	line_ns = div64_u64((u64)line_length * NSEC_PER_SEC,
++			    sensor->pixel_clock);
++	expo_us = div_u64(expo * line_ns, 1000);
++	frame_us = div_u64(timings.frame_length * line_ns, 1000);
++	fps_x100 = div64_u64(100ULL * NSEC_PER_SEC,
++			     (u64)timings.frame_length * line_ns);
++	duty_x100 = div_u64(10000ULL * expo, timings.frame_length);
++
++	dev_info(sensor->dev,
++		 "IR strobe timing: exposure %u lines = %llu us (limit %u, Windows %u), frame length %u lines = %llu us = %llu.%02llu fps (minimum %u, Windows %u), duty %llu.%02llu %% (Windows 5.71), line length %u px, gain a=%d d=%d, auto exposure off\n",
++		 expo, expo_us, vd55g_ir_expo_cap(sensor, crop),
++		 VD55G_IR_WIN_EXPO_LINES, timings.frame_length, frame_us,
++		 div_u64(fps_x100, 100), fps_x100 % 100,
++		 vd55g_ir_frame_min(sensor, crop), VD55G_IR_WIN_FRAME_LINES,
++		 div_u64(duty_x100, 100), duty_x100 % 100, line_length,
++		 sensor->again_ctrl->val, sensor->dgain_ctrl->val);
++
++	return 0;
++}
++
+ static int vd55g_update_exposure_target(struct vd55g *sensor, int index)
+ {
+ 	/*
+@@ -1224,6 +1360,17 @@ static int vd55g_enable_streams(struct v4l2_subdev *sd,
+ 		goto err_rpm_put;
+ 	}
+
++	/*
++	 * SL7 local: Windows' exposure and frame length for the IR strobe,
++	 * whatever the controls above asked for. Stream start fails if they
++	 * cannot be written.
++	 */
++	ret = vd55g_ir_apply_limits(sensor, crop);
++	if (ret) {
++		step = "IR strobe timing limits";
++		goto err_rpm_put;
++	}
++
+ 	/* Start streaming */
+ 	vd55g_write(sensor, VD55G_REG_STBY, VD55G_STBY_START_STREAM, &ret);
+ 	if (ret) {
+@@ -1461,7 +1608,8 @@ static int vd55g_new_format_change_controls(struct vd55g *sensor,
+ 	/* Max exposure changes with vblank */
+ 	vd55g_get_frame_timings(sensor, crop, &timings);
+ 	ret = __v4l2_ctrl_modify_range(sensor->expo_ctrl, 0, timings.expo_max,
+-				       1, VD55G_EXPO_DEF);
++				       1, min_t(unsigned int, VD55G_EXPO_DEF,
++						timings.expo_max));
+ 	if (ret)
+ 		return ret;
+
+@@ -1638,9 +1786,21 @@ static int vd55g_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	case V4L2_CID_VBLANK:
+ 	case V4L2_CID_FLASH_LED_MODE:
+ 		vd55g_get_frame_timings(sensor, crop, &timings);
++		/* the default must stay inside the range (IR cap is 100) */
+ 		ret = __v4l2_ctrl_modify_range(sensor->expo_ctrl, 0,
+ 					       timings.expo_max, 1,
+-					       VD55G_EXPO_DEF);
++					       min_t(unsigned int,
++						     VD55G_EXPO_DEF,
++						     timings.expo_max));
++		if (!ret && ctrl->id == V4L2_CID_FLASH_LED_MODE) {
++			/* SL7 local: the frame length floor follows led_mode */
++			struct vd55g_vblank_limits vblank;
++
++			vd55g_get_vblank_limits(sensor, crop, &vblank);
++			ret = __v4l2_ctrl_modify_range(sensor->vblank_ctrl,
++						       vblank.min, vblank.max,
++						       1, vblank.def);
++		}
+ 		break;
+ 	case V4L2_CID_EXPOSURE_AUTO:
+ 		is_auto = (ctrl->val == V4L2_EXPOSURE_AUTO);
+@@ -1695,7 +1855,10 @@ static int vd55g_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		ret = vd55g_update_frame_length(sensor, timings.frame_length);
+ 		break;
+ 	case V4L2_CID_FLASH_LED_MODE:
+-		ret = vd55g_update_gpios(sensor, sensor->ext_leds_mask);
++		/* SL7 local: Windows timing first, then the strobe */
++		ret = vd55g_ir_apply_limits(sensor, crop);
++		if (!ret)
++			ret = vd55g_update_gpios(sensor, sensor->ext_leds_mask);
+ 		break;
+ 	case V4L2_CID_HDR_SENSOR_MODE:
+ 		ret = vd55g_update_hdr_mode(sensor);
+@@ -2014,10 +2177,10 @@ static int vd55g_parse_dt_gpios_array(struct vd55g *sensor, char *prop_name,
+  * started. A change while streaming is written at once, but start-up
+  * ordering is what the IR emitter test relies on.
+  */
+-static bool illuminator;
++static bool illuminator = true;
+ module_param(illuminator, bool, 0444);
+ MODULE_PARM_DESC(illuminator,
+-		 "SL7 local: honour the st,leds strobe GPIO and expose the led_mode control (default off; set only by the sl7.ir_test=1 modprobe gate)");
++		 "SL7 local: honour the st,leds strobe GPIO and expose the led_mode control (default on; exposure and frame length are held to Windows' values while the strobe is on; illuminator=0 disables it)");
+
+ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
+ {
+@@ -2039,7 +2202,7 @@ static int vd55g_parse_dt_gpios(struct vd55g *sensor)
+
+ 	if (nb_gpios_leds && !illuminator) {
+ 		dev_info(sensor->dev,
+-			 "st,leds ignored: illuminator=0 (IR test boot only)\n");
++			 "st,leds ignored: illuminator=0\n");
+ 		nb_gpios_leds = 0;
+ 	} else if (nb_gpios_leds) {
+ 		dev_warn(sensor->dev,

@@ -84,6 +84,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0095 | SL7 local: leds-qcom-flash strobe instrumentation: registers 0x4f, 0x55, 0x67, 0x68, a +1 ms moment (key registers at t0 and +1 ms), STATUS3 read on its own at +15 ms, absolute-time waits, and the monotonic time of every snapshot | ours; IR plan stage C | not submitted (debug only) |
 | 0096 | SL7 local: leds-qcom-flash IR hardware strobe arm: `hw_strobe_arm` attribute on the IR LEDs (`ir_test=1`, 4ch): CHAN_STROBE 0x05 (hardware, level, active high, source bits 6:4 = 0), 10 ms timer, at most 25 mA per channel whatever `ir_max_ua` says, auto disarm after 1 s, disarm on remove, shutdown and suspend, 30 ms back-to-back status poll logged afterwards. Torch still refused | ours; EMITTER-LOCATE.md section 7 | not submitted (SL7 specific) |
 | 0097 | SL7 local: romulus13 `st,leds = <1>` on the IR sensor (GPIO 1 strobe, gated by 0094) and a second ganged IR LED `ir:flash-23` (channels 2 and 3, same limits) for the T0b decode check | ours | not submitted (SL7 specific) |
+| 0098 | SL7 local: vd55g holds exposure (at most 100 lines) and frame length (at least 1750 lines) to the values Windows Hello programs whenever `led_mode` is not off, at control set time, on `led_mode` change and at stream start, auto exposure replaced by manual while the strobe is on; the `illuminator` parameter (0094) now defaults to 1 (`illuminator=0` disables the strobe) | ours; IR plan stage C result | not submitted (SL7 specific) |
 
 Notes on the DT patches:
 
@@ -709,6 +710,41 @@ emitter path, and Windows arms the PMIC for a hardware strobe (`CHAN_STROBE = 0x
 Tool: omarchy-surface-sl7 39, `sl7-ir-emitter-test --stage c0a|c0b|c1-sw|c1-hw|t0b` and the Stage C
 section of `sl7-ir-lab` (see that README, section 11c). Checked as `git apply --check` against the
 series on v7.2 only; CI compiles the driver (now in `fast-check.sh`) and runs dtbs_check. Never run.
+
+### IR emitter, stage C result (7.2.8-22)
+
+**Patch 0098.** Stage C found the emitter: **sensor GPIO 1 drives it.** With `led_mode` = flash and
+the PMIC not armed (stage C0b) the frames got brighter: at exposure 100 lines the mean went from
+15.7 to 20.1 and p99 from 16 to 38; at exposure 6268 lines the mean was 81.9 with p99 255. The PMIC
+flash channels are not in the path, so their current caps and timers do not apply, and nothing in
+the PMIC limits how long or how often the emitter is lit.
+
+**Safety rule.** The strobe is high for the whole exposure, so the only safety control is the
+strobe duration (the exposure) and its repetition (the frame length). Whenever `led_mode` is not
+off, the vd55g driver holds both to what Windows Hello programs, whatever user space asks for:
+
+| | Windows | Source |
+|---|---|---|
+| exposure | 100 lines (`0x044e` = 100, manual exposure `0x044c` = 2), 1.587 ms | regSetting 37 of `com.surface.sensormodule.aux_vd55g0_MSHW0472.bin` (EMITTER-PLAN E7) |
+| frame length | 1750 lines (`0x0458/9` = 214, 6), 27.78 ms, 36 fps | same |
+| line length | 1200 px (`0x0300/1` = 176, 4) at 75.6 MHz | same, pixel clock from E11 |
+| strobe duty | 100 / 1750 = 5.71 % | derived |
+
+- The limits are scaled by the real pixel clock and line length, so a slower clock or a longer
+  line can only tighten them. The tighter of these and the 0040 flash-mode cap (half a frame) wins.
+- Enforced when the exposure or vblank control is set (ranges and the values written), when
+  `led_mode` changes (registers first, GPIO strobe second) and at stream start after every control
+  has been applied and before the stream starts. Failing to write them fails the stream start.
+- Auto exposure is replaced by manual exposure while the strobe is on, as in Windows' init. Gains
+  are the controls' values, whose defaults are the sensor's power-on values (Windows' init writes
+  no gain register; its runtime gain is not decoded).
+- The effective timing is logged ("IR strobe timing: ...") at stream start and on every
+  `led_mode` change.
+- `illuminator` now defaults to 1, so `led_mode` exists on a normal boot. `vd55g.illuminator=0`
+  removes the strobe and the control entirely. `led_mode` still defaults to off; user space
+  (sl7-ir-bridge) turns it on for a session.
+
+Checked as `patch --dry-run` against the series on v7.2 only; CI compiles the driver. Never run.
 
 ## USB-C reverse plug (7.2.8-18): fixed PHY orientation, on by default
 
