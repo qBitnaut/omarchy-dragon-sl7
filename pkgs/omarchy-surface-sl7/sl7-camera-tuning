@@ -165,11 +165,11 @@ def ct_entries(sset, blend):
     return pts
 
 
-def render(sset, blend, black_level, meta):
+def render(sset, blend, black_level, contrast, saturation, meta):
     lines = [
         MARKER,
         "# Derived on this machine from Microsoft's tuning for the Surface Laptop 7 camera.",
-        "# Do not redistribute. Regenerate with: sudo sl7-camera-tuning [--blend X] [--set N]",
+        "# Do not redistribute. Regenerate with: sudo sl7-camera-tuning [--blend X] [--set N] [--contrast X] [--saturation X]",
         "# sl7-camera-tuning: set=%d blend=%.2f source-sha256=%s" % (meta["set"], blend, meta["sha256"]),
         "%YAML 1.1",
         "---",
@@ -186,7 +186,8 @@ def render(sset, blend, black_level, meta):
         lines.append("          ccm: [ %s," % ", ".join("%.6f" % x for x in m[0:3]))
         lines.append("                 %s," % ", ".join("%.6f" % x for x in m[3:6]))
         lines.append("                 %s ]" % ", ".join("%.6f" % x for x in m[6:9]))
-    lines += ["  - Adjust:", "  - Agc:", "..."]
+    lines += ["  - Adjust:", "      contrast: %.2f" % contrast, "      saturation: %.2f" % saturation]
+    lines += ["  - Agc:", "..."]
     return "\n".join(lines) + "\n"
 
 
@@ -357,6 +358,12 @@ def main():
                     help="which illuminant set to use (see --list); default 1")
     ap.add_argument("--black-level", type=int, default=None, metavar="N",
                     help="override the black level, 16-bit scale (4096 = 64 of 1023); default: the libcamera sensor helper's")
+    ap.add_argument("--contrast", type=float, default=1.2, metavar="X",
+                    help="default contrast, 0 to 2 (1 = none); needs libcamera 0.7.2-4.2 or later, "
+                         "applications can still override it; default 1.2")
+    ap.add_argument("--saturation", type=float, default=1.15, metavar="X",
+                    help="default saturation, 0 to 2 (1 = none); needs libcamera 0.7.2-4.2 or later, "
+                         "applications can still override it; default 1.15")
     ap.add_argument("--bin", metavar="FILE", help="the extracted %s" % BIN_NAME)
     ap.add_argument("--from-msi", metavar="FILE", help="the Surface Laptop 7 driver MSI (needs msitools)")
     ap.add_argument("--list", action="store_true", help="print the sets found, with their matrices, and exit")
@@ -370,6 +377,10 @@ def main():
 
     if not (0.0 <= args.blend <= 1.0):
         die("--blend must be between 0 and 1")
+    if not (0.0 <= args.contrast <= 2.0):
+        die("--contrast must be between 0 and 2")
+    if not (0.0 <= args.saturation <= 2.0):
+        die("--saturation must be between 0 and 2")
     if args.black_level is not None and not (0 <= args.black_level <= 32767):
         die("--black-level must be between 0 and 32767")
 
@@ -388,7 +399,8 @@ def main():
             return 0
         if not (1 <= args.set <= len(sets)):
             die("--set must be between 1 and %d" % len(sets))
-        text = render(sets[args.set - 1], args.blend, args.black_level, {"set": args.set, "sha256": digest})
+        text = render(sets[args.set - 1], args.blend, args.black_level, args.contrast, args.saturation,
+                      {"set": args.set, "sha256": digest})
         if args.dry_run:
             print("--- would write %s ---" % args.output)
             sys.stdout.write(text)

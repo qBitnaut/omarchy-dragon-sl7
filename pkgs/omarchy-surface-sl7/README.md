@@ -477,11 +477,13 @@ package you downloaded and writes a libcamera tuning file on your machine only.
 
 Two parts:
 
-1. **libcamera 0.7.2-4.1 or later from the omarchy-sl7 repository** (package `libcamera-sl7`
+1. **libcamera 0.7.2-4.2 or later from the omarchy-sl7 repository** (package `libcamera-sl7`
    builds the usual `libcamera`, `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera` and
    `python-libcamera`). It adds the OV02C10 camera sensor helper (analogue gain in 1/16 steps,
    10-bit black level 64, from upstream patch 28362), without which AGC does not run. It is a
-   plain update: `sudo pacman -Syu`.
+   plain update: `sudo pacman -Syu`. 4.2 adds a faster AGC start, a statistics window fix for the
+   GPU path and reading the contrast and saturation defaults from the tuning file (see
+   `pkgs/libcamera-sl7`); 4.1 is enough for colour correction alone.
 2. **The tuning file**, built from the Microsoft driver package:
 
 ```
@@ -498,11 +500,21 @@ sl7-camera-check                  # frames, logs and a CPU/power sample into ~/s
 |---|---|
 | `--blend X` | Strength of Microsoft's colour matrices, 0 (none) to 1 (full). Default 0.7. Full strength gave a green tint and noise with libcamera's grey-world white balance on a comparable Dell sensor; 70% was the usable setting there. |
 | `--set N` | Which illuminant set to use (default 1). `--list` shows what the file holds. |
-| `--black-level N` | Override the black level (16-bit scale, 4096 = 64 of 1023). Default: the sensor helper's. |
+| `--contrast X` | Default contrast, 0 to 2 (1 = none). Default 1.2. Written to the `Adjust` block; needs libcamera 0.7.2-4.2 or later (older versions ignore it). Applications that set the contrast control still win. |
+| `--saturation X` | Default saturation, 0 to 2 (1 = none). Default 1.15. Same rules as `--contrast`. |
+| `--black-level N` | Override the black level (16-bit scale, 4096 = 64 of 1023). Default: the sensor helper's (4096). See below before changing it. |
 | `--dry-run` | Print the tuning file to your terminal instead of writing it. |
 | `--list` | Print the sets found with their colour temperature ranges and matrices. |
 | `--status` | What is installed, the blend used, whether libcamera has the sensor helper. |
 | `--remove` | Delete the tuning file (libcamera falls back to no correction); `--purge` also deletes the kept copy of Microsoft's file. |
+
+Black level: dark frames from this sensor measured about 66 on the green and blue channels at
+10 bits, a little above the helper's 64 (4096). Raising it to 4352 (68) would lift the blacks
+slightly, but only do it after you have measured your own unit: run `sl7-camera-check` and cover
+the lens with something opaque when it asks (tape works; a partly covered lens measures a scene,
+not the black level). It prints the per-site mean of the dark raw frames at 10 bits (the `raw-dark`
+lines in its summary). If the dark means sit at 66 or more on every site, then
+`sudo sl7-camera-tuning --black-level 4352` is reasonable; otherwise leave the default.
 
 Where it writes: `/etc/libcamera/ipa/simple/ov02c10.yaml`. libcamera 0.7.2 looks for
 `<sensor model>.yaml` in `$LIBCAMERA_IPA_CONFIG_PATH`, then `/etc/libcamera/ipa/<ipa>/`, then
