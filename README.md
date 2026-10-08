@@ -54,8 +54,8 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s), in either plug orientation (linux-sl7 7.2.8-18 or later), with DisplayPort alt mode and docks. USB4 and Thunderbolt bandwidth is not available yet. |
 | Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume. See [power results](#power-and-performance-results-so-far) for the drain. |
 | Front webcam | Partial | OV02C10 through libcamera's software ISP. No tuning yet, so expect poor colour. |
-| IR camera | Partial | Raw capture works (ST VD55G0, 644x604 greyscale) through `sl7-ir-bridge`. |
-| Face unlock | Experimental | howdy-next plus a setup app. The IR emitter is not enabled yet, so recognition needs daylight or an external IR source. |
+| IR camera | Partial | Capture works (ST VD55G0, 644x604 greyscale) through `sl7-ir-bridge`, lit by the IR emitter (see Face unlock). |
+| Face unlock | Experimental | howdy-next plus a setup app. The IR emitter is driven by the sensor's own strobe (stage C found that GPIO 1 lights it), at Windows Hello's timing: exposure at most 100 lines (1.6 ms), frame length at least 1750 lines (36 fps, 5.7 % duty), enforced in the kernel (linux-sl7 7.2.8-22) whatever user space asks. `sl7-ir-bridge` lights it only while a scan streams, 10 s at most per session; `IR_EMITTER=off` in `/etc/sl7-ir-bridge.conf` keeps it dark. Untested on hardware: recognition quality with the lit frames is still to be measured. |
 | CPU frequency scaling | Works | All three clusters, `schedutil`, with the SCMI sustained-frequency fix. |
 | Power mode on AC/battery | Works | Caps CPU and GPU frequency and enables Wi-Fi power save on battery; restores everything on AC. 60 Hz switching on battery is opt-in. |
 | Firmware | Works | Fetched from Microsoft's Surface Laptop 7 driver MSI, never shipped here. |
@@ -255,8 +255,9 @@ From the `linux-sl7` README (Power sections):
 
 ## Roadmap
 
-- **IR emitter:** staged and safety-gated. Stage A (nothing fires) is in; the channel
-  test stays disabled until reviewed.
+- **IR emitter:** in use for face unlock at Windows' timing (kernel-enforced). Still to do:
+  measure recognition with the lit frames, tune the gain and `dark_threshold`, and find
+  Windows' runtime gain (not decoded).
 - **Runtime power tuning** with a per-rail power meter.
 - **Rebase on Linux 7.3** when it is released, dropping the patches that land in it.
 - **USB4** once a host-router driver is posted upstream.
