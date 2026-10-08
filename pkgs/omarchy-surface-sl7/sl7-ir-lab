@@ -1,53 +1,27 @@
 #!/usr/bin/python3
-"""sl7-ir-lab: one window with the live Surface Laptop 7 IR camera and the
-IR emitter test buttons. Run it as your normal user on the Omarchy desktop, on
-the "linux-sl7 (IR test)" boot entry:
+"""sl7-ir-lab: a simple live view of the Surface Laptop 7 IR camera. Run it as
+your normal user on the Omarchy desktop, on the normal boot:
 
     sl7-ir-lab
 
 The window shows the camera live the whole time: raw GREY 644x604 frames read
 from the sl7-ir-bridge loopback (/dev/v4l/by-id/sl7-ir-camera) through
 `v4l2-ctl --stream-mmap --stream-to=-`, reopened whenever the bridge ends its
-10 s session. Under the image: the mean and maximum of every frame and a 10 s
-graph of the mean with a marker for each pulse.
+10 s session. Under the image: the mean and maximum of every frame, LIT or
+dark, what the bridge reported for the emitter ("emitter ON: ..."), and a 10 s
+graph of the mean.
 
-Pulse 12.5 / 25 / 50 mA ask "Fire IR pulse at NN mA per channel?" and then run
+The frames are lit by sl7-ir-bridge (linux-sl7 7.2.8-22 and sl7-ir-bridge
+0.1.0-2 or later), which strobes the IR emitter with the sensor's GPIO 1 for
+every session at Windows' timing (exposure 100 lines, frame length 1750
+lines). LIT / dark is a hint from the frame maximum.
 
-    pkexec /usr/bin/sl7-ir-emitter-test --i-have-read-the-plan --led ir \
-        max_ma_per_channel=NN --pulse-delay 2 --confirmed
-
-without blocking the window (the camera keeps streaming). --confirmed replaces
-the typed phrase for 12.5, 25 and 50 mA per channel only; the approval file, the
-IR test boot, the per-boot pulse limit, the hardware timer and the ir_max_ua cap
-all still apply, and there is no 100 mA button. The emitter test sets the IR
-sensor to manual maximum exposure itself and restores it on every exit path.
-The frames are lit: sl7-ir-bridge (linux-sl7 7.2.8-22 and sl7-ir-bridge 0.1.0-2 or later) strobes
-the IR emitter with the sensor's GPIO 1 for every session, at Windows' timing (exposure 100
-lines, frame length 1750 lines), so the picture is no longer the flat dark noise of an unlit
-sensor. The readout shows what the bridge reported for the session ("emitter ON: ...") and a
-lit / dark hint from the frame maximum.
-Stage C section (linux-sl7 7.2.8-22 and omarchy-surface-sl7 41 or later): buttons C0a, C0b
-and T0b run `pkexec sl7-ir-emitter-test --i-have-read-the-plan --stage NAME --confirmed` after
-a Fire / Cancel dialog (C1 SW / HW are retired: C0b found that GPIO 1 drives the emitter, the
-PMIC current is not in the path). T0b is enabled only when C0a is recorded OK (read with
-`pkexec sl7-ir-emitter-test --status`, press Status). The stage tool starts the IR sensor
-itself with led_mode set before the stream starts, so the lab stops its own camera reader
-gracefully for the run (SIGTERM so the device is closed, then a wait for the bridge's stop
-grace; the live view freezes, the graph pauses, a banner says so) and reconnects when the
-tool ends; the result (OK or FAIL, STATUS bits decoded:
-"CH1 open", "ramp-up done", "timer expired") and the stage's frame means with the pulse or
-arm times are shown in the window afterwards.
-
-After the pulse the lab looks for a spike in the frames around the fire time
-(median and robust sd, as the old analyser did), shows the brightest frame next
-to a baseline frame for a few seconds in the window, and keeps the tool output
-(REGDUMP lines, kernel strobe snapshot) in the collapsible panel. Everything is
-saved under ~/sl7-ir-lab/<timestamp>/.
+Snapshot saves the current frame as a PNG under ~/sl7-ir-lab/<timestamp>/.
+Status shows `sl7-ir-emitter-test --status` (bridge, strobe parameter).
 """
 import collections
 import datetime
 import os
-import re
 import shutil
 import struct
 import subprocess
@@ -61,26 +35,8 @@ H = 604
 FRAME = W * H
 CAM = "/dev/v4l/by-id/sl7-ir-camera"
 TOOL = "/usr/bin/sl7-ir-emitter-test"
-MAX_PULSES = 12
-STAGE_MAX_PULSES = 24
 SPARK_S = 10.0
-BRIDGE_STOP_GRACE_S = 1.2  # the bridge keeps streaming 0.5 s after the last reader closes
 LIT_MAX = 24  # an unlit IR frame is flat dark noise (max about 17); lit ones reach 30 and more
-SPIKE_SD = 5.0
-SD_FLOOR = 0.02
-PULSE_DELAY_S = 2
-# (name, button label, what it does, previous stage)
-STAGES = [
-    ("c0a", "C0a", "Hardware strobe armed for about 0.7 s at 12.5 mA per channel with the sensor not streaming. "
-     "Pass: STATUS1 stays 0, no ramp or fault.", None),
-    ("c0b", "C0b", "The finding: the sensor strobes GPIO 1 with led_mode=1 at Windows' timing (exposure 100 lines, "
-     "frame 1750 lines) for about 1.3 s, the emitter current is NOT armed, compared with led_mode=0. Recorded OK "
-     "when the frames are brighter: GPIO 1 drives the emitter.", None),
-    ("t0b", "T0b", "One 12.5 mA per channel pulse on ir:flash-23 (channels 2 and 3). Expect STATUS1 0x28 "
-     "(CH2 and CH3 open).", "c0a"),
-]
-STAGE_LINE = re.compile(r"(STAGE_[A-Z_]+.*)$")
-INSET_SHOW_S = 10
 OUTROOT = os.environ.get("SL7_IR_LAB_DIR") or os.path.join(os.path.expanduser("~"), "sl7-ir-lab")
 ALPHA = b"\xff" * FRAME
 
@@ -101,14 +57,6 @@ try:
     import cairo
 except ImportError as exc:
     fail("pycairo is required (pacman -S python-cairo): %s" % exc)
-
-
-def med(values):
-    s = sorted(values)
-    n = len(s)
-    if not n:
-        return 0.0
-    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
 def write_png(path, data):
@@ -150,18 +98,14 @@ class Camera:
     """Reads GREY frames from the loopback in a thread, reopening on session end."""
 
     def __init__(self):
-        self.lock = threading.Lock()
         self.stop = threading.Event()
+        self.lock = threading.Lock()
         self.proc = None
         self.latest = None  # (seq, bytes, mean, max)
         self.seq = 0
         self.sessions = 0
         self.status = "starting"
         self.history = collections.deque(maxlen=35 * 40)  # (t, seq, mean, max)
-        self.ring = collections.deque(maxlen=12)  # (seq, bytes)
-        self.markers = collections.deque(maxlen=32)  # monotonic fire times
-        self.watch = None  # pulse tracking, see begin_watch
-        self.paused = threading.Event()
         self.emitter_note = ""  # the bridge's own report of the session, from its journal
 
     def start(self):
@@ -193,21 +137,6 @@ class Camera:
             except OSError:
                 pass
 
-    def pause(self):
-        """Release the camera (a stage test starts the sensor itself): close the reader
-        gracefully, wait until it is gone, then give the bridge time to stop its stream
-        and let the sensor power down. Blocks for up to about 3 s; run it off the UI thread."""
-        self.paused.set()
-        self.status = "paused: a Stage C test owns the camera"
-        p = self.proc
-        if p is not None:
-            self.release(p)
-        for _ in range(60):
-            if self.proc is None:
-                break
-            time.sleep(0.05)
-        time.sleep(BRIDGE_STOP_GRACE_S)
-
     def query_emitter(self):
         """What the bridge logged for the session that just started (needs journal access)."""
         time.sleep(1.5)
@@ -225,24 +154,8 @@ class Camera:
                 self.emitter_note = "bridge: emitter dark (" + line.strip()[:70] + ")"
                 return
 
-    def resume(self):
-        self.status = "reconnecting"
-        self.paused.clear()
-
-    def inject(self, series, events):
-        """Frame means measured by the stage tool (CLOCK_MONOTONIC like time.monotonic())."""
-        with self.lock:
-            for t, mean in series:
-                self.seq += 1
-                self.history.append((t, self.seq, mean, int(mean)))
-            for t, label in events:
-                self.markers.append(t)
-
     def run(self):
         while not self.stop.is_set():
-            if self.paused.is_set():
-                self.stop.wait(0.1)
-                continue
             if not os.path.exists(CAM):
                 self.status = "waiting for %s (is sl7-ir-bridge running?)" % CAM
                 self.stop.wait(1.0)
@@ -265,7 +178,7 @@ class Camera:
                 self.release(p)
                 p.wait()
                 self.proc = None
-            if not self.stop.is_set() and not self.paused.is_set():
+            if not self.stop.is_set():
                 self.status = "reopening the camera"
                 self.stop.wait(0.25)
 
@@ -293,35 +206,10 @@ class Camera:
                 seq = self.seq
                 self.latest = (seq, data, mean, mx)
                 self.history.append((t, seq, mean, mx))
-                self.ring.append((seq, data))
-                w = self.watch
-                if w is not None and w["t_fire"] is not None and w["t_fire"] - 0.1 <= t <= w["t_fire"] + 1.0:
-                    if w["best"] is None or mean > w["best"][2]:
-                        w["best"] = (seq, data, mean, mx)
-
-    def begin_watch(self):
-        with self.lock:
-            self.watch = {"t_fire": None, "best": None, "pre": None}
-
-    def mark_fire(self):
-        t = time.monotonic()
-        with self.lock:
-            if self.watch is not None:
-                self.watch["t_fire"] = t
-                if self.ring:
-                    self.watch["pre"] = self.ring[-3 if len(self.ring) >= 3 else -1]
-            self.markers.append(t)
-
-    def end_watch(self):
-        with self.lock:
-            w, self.watch = self.watch, None
-            return w, list(self.history)
 
 
 CSS = b"""
 .toast { background: rgba(30, 30, 30, 0.92); color: #ffffff; padding: 8px 16px; border-radius: 10px; }
-.verdict { font-weight: bold; }
-.caption { font-size: 11px; }
 """
 
 
@@ -332,16 +220,8 @@ class Lab(Gtk.Application):
         self.cur = None  # (surface, buffer) of the live frame
         self.shown_seq = 0
         self.ewma_max = None
-        self.pulses = None
         self.busy = False
-        self.out_lines = []
-        self.inset = None  # (base surface/buf, peak surface/buf, captions)
-        self.inset_gen = 0
         self.toast_gen = 0
-        self.stage_state = {}  # stage name -> OK / FAIL / none / stale (from --status)
-        self.stage_series = []  # (t, mean) of the last stage run
-        self.stage_events = []  # (t, label)
-        self.stage_lines = []
 
     # ---- window -------------------------------------------------------------
     def do_activate(self):
@@ -354,7 +234,7 @@ class Lab(Gtk.Application):
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         self.win = Gtk.ApplicationWindow(application=self, title="SL7 IR Lab")
-        self.win.set_default_size(900, 880)
+        self.win.set_default_size(800, 800)
         self.win.connect("close-request", self.on_close)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -363,11 +243,9 @@ class Lab(Gtk.Application):
         self.win.set_child(root)
 
         top = Gtk.Box(spacing=12)
-        title = Gtk.Label(label="SL7 IR Lab", xalign=0)
+        title = Gtk.Label(label="SL7 IR Lab", xalign=0, hexpand=True)
         title.add_css_class("title-3")
         top.append(title)
-        self.pulses_lbl = Gtk.Label(hexpand=True, xalign=1)
-        top.append(self.pulses_lbl)
         self.stretch = Gtk.CheckButton(label="Contrast stretch")
         top.append(self.stretch)
         root.append(top)
@@ -378,27 +256,6 @@ class Lab(Gtk.Application):
         self.live.set_content_height(450)
         self.live.set_draw_func(self.draw_live)
         overlay.set_child(self.live)
-
-        self.inset_box = Gtk.Box(spacing=8, halign=Gtk.Align.END, valign=Gtk.Align.END)
-        for side in ("bottom", "end"):
-            getattr(self.inset_box, "set_margin_" + side)(10)
-        self.inset_areas = []
-        self.inset_caps = []
-        for idx in (0, 1):
-            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            area = Gtk.DrawingArea()
-            area.set_content_width(200)
-            area.set_content_height(188)
-            area.set_draw_func(self.draw_inset, idx)
-            cap = Gtk.Label()
-            cap.add_css_class("caption")
-            col.append(area)
-            col.append(cap)
-            self.inset_box.append(col)
-            self.inset_areas.append(area)
-            self.inset_caps.append(cap)
-        self.inset_box.set_visible(False)
-        overlay.add_overlay(self.inset_box)
 
         self.toast = Gtk.Label(halign=Gtk.Align.CENTER, valign=Gtk.Align.START)
         self.toast.add_css_class("toast")
@@ -416,17 +273,7 @@ class Lab(Gtk.Application):
         self.spark.set_draw_func(self.draw_spark)
         root.append(self.spark)
 
-        self.verdict = Gtk.Label(xalign=0, wrap=True, label="No pulse fired yet.")
-        self.verdict.add_css_class("verdict")
-        root.append(self.verdict)
-
         buttons = Gtk.Box(spacing=8, homogeneous=True)
-        self.pulse_btns = []
-        for ma in ("12.5", "25", "50"):
-            b = Gtk.Button(label="Pulse %s mA" % ma)
-            b.connect("clicked", lambda _b, m=ma: self.ask_pulse(m))
-            buttons.append(b)
-            self.pulse_btns.append(b)
         self.snap_btn = Gtk.Button(label="Snapshot")
         self.snap_btn.connect("clicked", lambda _b: self.snapshot())
         buttons.append(self.snap_btn)
@@ -435,17 +282,14 @@ class Lab(Gtk.Application):
         buttons.append(self.status_btn)
         root.append(buttons)
 
-        self.build_stage_section(root)
-
-        self.expander = Gtk.Expander(label="Registers and tool output")
-        sw = Gtk.ScrolledWindow(min_content_height=170)
+        self.expander = Gtk.Expander(label="Status output")
+        sw = Gtk.ScrolledWindow(min_content_height=120)
         self.text = Gtk.TextView(editable=False, monospace=True, cursor_visible=False)
         self.text.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         sw.set_child(self.text)
         self.expander.set_child(sw)
         root.append(self.expander)
 
-        self.update_pulses()
         self.cam.start()
         GLib.timeout_add(33, self.tick)
         self.win.present()
@@ -455,16 +299,6 @@ class Lab(Gtk.Application):
         return False
 
     # ---- small helpers ------------------------------------------------------
-    def update_pulses(self):
-        n = "?" if self.pulses is None else str(self.pulses)
-        self.pulses_lbl.set_text("Pulses and arms this boot: %s (limit %d, %d for Stage C)" % (n, MAX_PULSES, STAGE_MAX_PULSES))
-
-    def set_busy(self, busy):
-        self.busy = busy
-        for b in self.pulse_btns + [self.status_btn]:
-            b.set_sensitive(not busy)
-        self.update_stage_buttons()
-
     def show_toast(self, text):
         self.toast_gen += 1
         gen = self.toast_gen
@@ -532,25 +366,6 @@ class Lab(Gtk.Application):
         cr.paint()
         cr.restore()
 
-    def draw_inset(self, _area, cr, w, h, idx):
-        cr.set_source_rgb(0, 0, 0)
-        cr.paint()
-        if self.inset is None:
-            return
-        surf = self.inset[idx][0]
-        s = min(w / W, h / H)
-        cr.save()
-        cr.translate((w - W * s) / 2, (h - H * s) / 2)
-        cr.scale(s, s)
-        cr.set_source_surface(surf, 0, 0)
-        cr.get_source().set_filter(cairo.FILTER_BILINEAR)
-        cr.paint()
-        cr.restore()
-        cr.set_source_rgb(1, 1, 1)
-        cr.set_line_width(1)
-        cr.rectangle(0.5, 0.5, w - 1, h - 1)
-        cr.stroke()
-
     def draw_spark(self, _area, cr, w, h):
         cr.set_source_rgb(0.07, 0.07, 0.09)
         cr.paint()
@@ -558,7 +373,6 @@ class Lab(Gtk.Application):
         t0 = now - SPARK_S
         with self.cam.lock:
             pts = [(x[0], x[2]) for x in self.cam.history if x[0] >= t0]
-            marks = [m for m in self.cam.markers if m >= t0]
         if len(pts) < 2:
             return
         lo = min(p[1] for p in pts)
@@ -574,12 +388,6 @@ class Lab(Gtk.Application):
         def py(v):
             return h - pad - (v - lo) / (hi - lo) * (h - 2 * pad)
 
-        cr.set_line_width(1.5)
-        for m in marks:
-            cr.set_source_rgba(1.0, 0.3, 0.3, 0.9)
-            cr.move_to(px(m), 0)
-            cr.line_to(px(m), h)
-            cr.stroke()
         cr.set_source_rgb(0.4, 0.85, 0.5)
         cr.set_line_width(1.2)
         cr.move_to(px(pts[0][0]), py(pts[0][1]))
@@ -591,7 +399,7 @@ class Lab(Gtk.Application):
         cr.move_to(4, 11)
         cr.show_text("mean %.1f" % hi)
         cr.move_to(4, h - 3)
-        cr.show_text("%.1f   (last %d s, red = pulse)" % (lo, SPARK_S))
+        cr.show_text("%.1f   (last %d s)" % (lo, SPARK_S))
 
     # ---- snapshot -----------------------------------------------------------
     def new_outdir(self):
@@ -614,465 +422,41 @@ class Lab(Gtk.Application):
             return
         self.show_toast("Saved " + path.replace(os.path.expanduser("~"), "~", 1))
 
-    # ---- pulse --------------------------------------------------------------
-    def ask_pulse(self, ma):
-        if self.busy:
-            return
-        self.confirm(
-            "Confirm IR pulse", "Fire IR pulse at %s mA per channel?" % ma,
-            "Nobody looks at the bezel. The emitter test asks for your password if needed.",
-            lambda: self.start_pulse(ma))
-
-    def start_pulse(self, ma):
-        if self.busy:
-            return
-        try:
-            outdir = self.new_outdir()
-        except OSError as exc:
-            self.show_toast("Cannot create the output directory: %s" % exc)
-            return
-        self.set_busy(True)
-        self.out_lines = []
-        self.text.get_buffer().set_text("")
-        self.verdict.set_text("Pulse %s mA: waiting for the emitter test (authenticate if asked)..." % ma)
-        self.inset_box.set_visible(False)
-        self.cam.begin_watch()
-        threading.Thread(target=self.pulse_worker, args=(ma, outdir), daemon=True).start()
-
+    # ---- status -------------------------------------------------------------
     def ui(self, fn, *args):
         GLib.idle_add(fn, *args)
 
-    def pulse_worker(self, ma, outdir):
-        cmd = ["pkexec", TOOL, "--i-have-read-the-plan", "--led", "ir", "max_ma_per_channel=" + ma,
-               "--pulse-delay", str(PULSE_DELAY_S), "--confirmed"]
-        rc = -1
-        try:
-            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
-            for line in p.stdout:
-                line = line.rstrip("\n")
-                self.out_lines.append(line)
-                self.ui(self.append_text, line)
-                if "flash_strobe <- 1" in line:
-                    self.cam.mark_fire()
-                    self.ui(self.verdict.set_text, "Pulse %s mA fired. Looking for a spike..." % ma)
-                elif "CONFIRMED" in line:
-                    self.ui(self.verdict.set_text, "Armed at %s mA: firing in about %d s..." % (ma, PULSE_DELAY_S))
-                mt = re.search(r"count this boot: (\d+)", line)
-                if mt:
-                    self.pulses = int(mt.group(1))
-                    self.ui(self.update_pulses)
-            rc = p.wait()
-        except OSError as exc:
-            self.out_lines.append("cannot run pkexec: %s" % exc)
-            self.ui(self.append_text, "cannot run pkexec: %s" % exc)
-        time.sleep(1.2)  # frames after the pulse
-        res = self.analyse(ma, outdir, rc)
-        self.ui(self.apply_result, res)
-
-    def analyse(self, ma, outdir, rc):
-        w, hist = self.cam.end_watch()
-        res = {"ma": ma, "rc": rc, "outdir": outdir, "text": "", "spike": False, "best": None}
-        t_fire = w["t_fire"] if w else None
-        extra = []
-        if t_fire is None:
-            last = self.out_lines[-1] if self.out_lines else "no output"
-            res["text"] = "No pulse was fired (emitter test exit code %d): %s" % (rc, last)
-        else:
-            win = [x for x in hist if t_fire - 1.6 <= x[0] <= t_fire + 1.6]
-            ref = [x for x in win if x[0] < t_fire - 0.3 or x[0] > t_fire + 1.0]
-            if len(ref) < 10:
-                ref = [x for x in win if x[0] < t_fire - 0.3]
-            if len(ref) < 5:
-                ref = win
-            best = w["best"]
-            if not ref or best is None:
-                res["text"] = "Pulse fired but no frames were read around it (is the bridge streaming?)"
-            else:
-                m = med([x[2] for x in ref])
-                sd = max(1.4826 * med([abs(x[2] - m) for x in ref]), SD_FLOOR)
-                z = (best[2] - m) / sd
-                pre = w["pre"]
-                base = pre[1] if pre else None
-                res["spike"] = z > SPIKE_SD
-                if res["spike"]:
-                    res["text"] = "SPIKE +%.1f sd at frame %d (mean %.1f vs median %.1f, max %d)" % (
-                        z, best[0], best[2], m, best[3])
-                else:
-                    res["text"] = "no spike (peak +%.1f sd at frame %d, below %.0f sd; mean %.1f vs median %.1f)" % (
-                        z, best[0], SPIKE_SD, best[2], m)
-                res["best"] = (best, base, pre[0] if pre else None)
-                try:
-                    with open(os.path.join(outdir, "frames.csv"), "w") as fh:
-                        fh.write("frame,t_rel_fire_s,mean,max\n")
-                        for x in win:
-                            fh.write("%d,%.3f,%.3f,%d\n" % (x[1], x[0] - t_fire, x[2], x[3]))
-                    write_png(os.path.join(outdir, "brightest.png"), best[1])
-                    if base:
-                        write_png(os.path.join(outdir, "baseline.png"), base)
-                except OSError as exc:
-                    extra.append("could not save everything: %s" % exc)
-        snap = self.strobe_snapshot()
-        if snap:
-            self.out_lines.append("---- kernel strobe snapshot ----")
-            self.out_lines.extend(snap)
-            self.ui(self.append_text, "---- kernel strobe snapshot ----\n" + "\n".join(snap))
-        else:
-            note = "(no 'SL7 IR strobe snapshot' kernel lines readable as this user; linux-sl7 7.2.8-20 or later logs them)"
-            self.ui(self.append_text, note)
-        try:
-            with open(os.path.join(outdir, "tool_output.txt"), "w") as fh:
-                fh.write("\n".join(self.out_lines) + "\n")
-            with open(os.path.join(outdir, "summary.txt"), "w") as fh:
-                fh.write("pulse %s mA per channel, exit code %d\n%s\n" % (ma, rc, res["text"]))
-        except OSError:
-            pass
-        if extra:
-            res["text"] += "  [" + "; ".join(extra) + "]"
-        return res
-
-    def strobe_snapshot(self):
-        try:
-            r = subprocess.run(["journalctl", "-k", "--since", "-2min", "--no-pager", "-o", "cat"],
-                               capture_output=True, text=True, errors="replace", timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return [ln for ln in r.stdout.splitlines() if "SL7 IR strobe snapshot" in ln]
-
-    def apply_result(self, res):
-        self.set_busy(False)
-        txt = "Pulse %s mA: %s" % (res["ma"], res["text"])
-        if res["rc"] not in (0, -1) and res["best"] is None:
-            self.expander.set_expanded(True)
-        self.verdict.set_text(txt + "   [%s]" % res["outdir"].replace(os.path.expanduser("~"), "~", 1))
-        if res["best"] is not None:
-            best, base, base_seq = res["best"]
-            g = self.gain()
-            self.inset = (
-                gray_surface(base if base else best[1], g),
-                gray_surface(best[1], g),
-            )
-            self.inset_caps[0].set_text("baseline" + (" (frame %d)" % base_seq if base_seq else ""))
-            self.inset_caps[1].set_text("brightest (frame %d)" % best[0])
-            self.inset_box.set_visible(True)
-            for a in self.inset_areas:
-                a.queue_draw()
-            self.inset_gen += 1
-            gen = self.inset_gen
-
-            def hide():
-                if gen == self.inset_gen:
-                    self.inset_box.set_visible(False)
-                return False
-
-            GLib.timeout_add_seconds(INSET_SHOW_S, hide)
-        self.show_toast(res["text"][:80])
-        return False
-
-    # ---- stage C --------------------------------------------------------------
-    def build_stage_section(self, root):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        head = Gtk.Label(
-            label="Stage C (IR emitter, at most 25 mA per channel, hardware timer always on). Each stage "
-                  "unlocks the next; press Status to read the records.", xalign=0, wrap=True)
-        head.add_css_class("caption")
-        box.append(head)
-        row = Gtk.Box(spacing=8, homogeneous=True)
-        self.stage_btns = {}
-        self.stage_state_lbls = {}
-        for name, label, _text, _prev in STAGES:
-            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            b = Gtk.Button(label=label)
-            b.connect("clicked", lambda _b, n=name: self.ask_stage(n))
-            lbl = Gtk.Label(label="?")
-            lbl.add_css_class("caption")
-            col.append(b)
-            col.append(lbl)
-            row.append(col)
-            self.stage_btns[name] = b
-            self.stage_state_lbls[name] = lbl
-        box.append(row)
-        self.stage_verdict = Gtk.Label(xalign=0, wrap=True, label="No stage run yet.")
-        self.stage_verdict.add_css_class("verdict")
-        box.append(self.stage_verdict)
-        sw = Gtk.ScrolledWindow(min_content_height=110)
-        self.stage_view = Gtk.TextView(editable=False, monospace=True, cursor_visible=False)
-        self.stage_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        sw.set_child(self.stage_view)
-        box.append(sw)
-        self.stage_graph = Gtk.DrawingArea()
-        self.stage_graph.set_content_height(70)
-        self.stage_graph.set_draw_func(self.draw_stage)
-        box.append(self.stage_graph)
-        root.append(box)
-        self.update_stage_buttons()
-
-    def update_stage_buttons(self):
-        for name, _label, _text, prev in STAGES:
-            ok = prev is None or self.stage_state.get(prev) == "OK"
-            self.stage_btns[name].set_sensitive(ok and not self.busy)
-            state = self.stage_state.get(name)
-            self.stage_state_lbls[name].set_text(state if state else "?")
-            if ok:
-                self.stage_btns[name].set_tooltip_text(None)
-            else:
-                self.stage_btns[name].set_tooltip_text("Needs %s recorded OK first" % prev)
-
-    def parse_stage_status(self, out):
-        found = False
-        for m in re.finditer(r"^stage-c (\S+): (\S+)", out, re.M):
-            self.stage_state[m.group(1)] = m.group(2)
-            found = True
-        if found:
-            self.update_stage_buttons()
-
-    def stage_text(self, line):
-        buf = self.stage_view.get_buffer()
-        buf.insert(buf.get_end_iter(), line if line.endswith("\n") else line + "\n")
-        mark = buf.create_mark(None, buf.get_end_iter(), False)
-        self.stage_view.scroll_to_mark(mark, 0.0, False, 0.0, 0.0)
-        buf.delete_mark(mark)
-        return False
-
-    def confirm(self, title, question, detail, on_fire):
-        dlg = Gtk.Window(title=title, transient_for=self.win, modal=True, resizable=False)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        for side in ("top", "bottom", "start", "end"):
-            getattr(box, "set_margin_" + side)(18)
-        box.append(Gtk.Label(label=question, wrap=True, max_width_chars=56))
-        box.append(Gtk.Label(label=detail, wrap=True, max_width_chars=56))
-        row = Gtk.Box(spacing=8, halign=Gtk.Align.END)
-        cancel = Gtk.Button(label="Cancel")
-        fire = Gtk.Button(label="Fire")
-        fire.add_css_class("destructive-action")
-        row.append(cancel)
-        row.append(fire)
-        box.append(row)
-        dlg.set_child(box)
-        dlg.set_default_widget(cancel)
-        cancel.connect("clicked", lambda _b: dlg.close())
-
-        def go(_b):
-            dlg.close()
-            on_fire()
-
-        fire.connect("clicked", go)
-        keys = Gtk.EventControllerKey()
-
-        def on_key(_c, keyval, _code, _state):
-            if keyval == Gdk.KEY_Escape:
-                dlg.close()
-                return True
-            return False
-
-        keys.connect("key-pressed", on_key)
-        dlg.add_controller(keys)
-        dlg.present()
-        cancel.grab_focus()
-
-    def ask_stage(self, name):
-        if self.busy:
-            return
-        label, text = next((l, t) for n, l, t, _p in STAGES if n == name)
-        self.confirm(
-            "Confirm Stage C", "Run stage %s?" % label,
-            text + "\n\nNobody looks at the bezel. The live view pauses while the test owns the "
-                   "camera. The test asks for your password if needed.",
-            lambda: self.start_stage(name))
-
-    def start_stage(self, name):
-        if self.busy:
-            return
-        try:
-            outdir = self.new_outdir()
-        except OSError as exc:
-            self.show_toast("Cannot create the output directory: %s" % exc)
-            return
-        self.set_busy(True)
-        self.out_lines = []
-        self.stage_lines = []
-        self.text.get_buffer().set_text("")
-        self.stage_view.get_buffer().set_text("")
-        self.stage_series = []
-        self.stage_events = []
-        self.stage_graph.queue_draw()
-        self.inset_box.set_visible(False)
-        self.stage_verdict.set_text("Stage %s: stopping the live view, then waiting for the emitter test (authenticate if asked)..." % name)
-        threading.Thread(target=self.stage_worker, args=(name, outdir), daemon=True).start()
-
-    def stage_worker(self, name, outdir):
-        cmd = ["pkexec", TOOL, "--i-have-read-the-plan", "--stage", name, "--confirmed"]
-        rc = -1
-        res = {"name": name, "rc": rc, "result": None, "summary": "", "csv": None, "outdir": outdir}
-        # close the live view's reader gracefully and let the bridge stop, before the tool starts the sensor
-        self.cam.pause()
-        self.ui(self.stage_verdict.set_text, "Stage %s: live view paused, waiting for the emitter test (authenticate if asked)..." % name)
-        try:
-            p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
-            for line in p.stdout:
-                line = line.rstrip("\n")
-                self.out_lines.append(line)
-                self.ui(self.append_text, line)
-                mt = STAGE_LINE.search(line)
-                if mt:
-                    sline = mt.group(1)
-                    self.ui(self.stage_text, sline)
-                    mr = re.match(r"STAGE_RESULT stage=\S+ result=(\S+)", sline)
-                    if mr:
-                        res["result"] = mr.group(1)
-                    ms = re.match(r"STAGE_SUMMARY (.*)", sline)
-                    if ms:
-                        res["summary"] = ms.group(1)
-                    mc = re.match(r"STAGE_FRAMES csv=(\S+)", sline)
-                    if mc:
-                        res["csv"] = mc.group(1)
-                if "FIRE " in line or "hw_strobe_arm <- 1" in line:
-                    self.ui(self.stage_verdict.set_text, "Stage %s: the emitter was fired / armed; reading the registers..." % name)
-                mt = re.search(r"count this boot: (\d+)", line)
-                if mt:
-                    self.pulses = int(mt.group(1))
-                    self.ui(self.update_pulses)
-            rc = p.wait()
-        except OSError as exc:
-            self.out_lines.append("cannot run pkexec: %s" % exc)
-            self.ui(self.append_text, "cannot run pkexec: %s" % exc)
-        res["rc"] = rc
-        if res["result"] is None:
-            last = self.out_lines[-1] if self.out_lines else "no output"
-            res["summary"] = "The stage did not run (exit code %d): %s" % (rc, last)
-        series, events = [], []
-        if res["csv"]:
-            try:
-                with open(res["csv"]) as fh:
-                    for ln in fh:
-                        f = ln.rstrip("\n").split(",")
-                        if len(f) >= 3 and f[0] == "F":
-                            series.append((float(f[1]), float(f[2])))
-                        elif len(f) >= 5 and f[0] == "E":
-                            events.append((float(f[1]), f[4]))
-            except (OSError, ValueError):
-                pass
-        res["series"], res["events"] = series, events
-        try:
-            with open(os.path.join(outdir, "tool_output.txt"), "w") as fh:
-                fh.write("\n".join(self.out_lines) + "\n")
-            with open(os.path.join(outdir, "summary.txt"), "w") as fh:
-                fh.write("stage %s, exit code %d, result %s\n%s\n" % (name, rc, res["result"], res["summary"]))
-        except OSError:
-            pass
-        self.ui(self.apply_stage_result, res)
-        # refresh the records for the buttons (pkexec keeps the authentication for a few minutes)
-        try:
-            r = subprocess.run(["pkexec", TOOL, "--status"], stdin=subprocess.DEVNULL, capture_output=True,
-                               text=True, errors="replace", timeout=120)
-            self.ui(self.parse_stage_status, r.stdout)
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    def apply_stage_result(self, res):
-        self.cam.resume()
-        self.set_busy(False)
-        self.stage_series = res["series"]
-        self.stage_events = res["events"]
-        if self.stage_series:
-            self.cam.inject(self.stage_series, self.stage_events)
-        self.stage_graph.queue_draw()
-        if res["result"] == "OK":
-            head = "Stage %s: PASS (OK)" % res["name"]
-        elif res["result"] == "FAIL":
-            head = "Stage %s: FAIL (STOP)" % res["name"]
-        else:
-            head = "Stage %s:" % res["name"]
-        self.stage_verdict.set_text("%s  %s   [%s]" % (head, res["summary"], res["outdir"].replace(os.path.expanduser("~"), "~", 1)))
-        if res["result"] == "FAIL":
-            self.expander.set_expanded(True)
-        self.show_toast(head)
-        return False
-
-    def draw_stage(self, _area, cr, w, h):
-        cr.set_source_rgb(0.07, 0.07, 0.09)
-        cr.paint()
-        cr.set_font_size(11)
-        if len(self.stage_series) < 2:
-            cr.set_source_rgb(0.75, 0.75, 0.75)
-            cr.move_to(4, 14)
-            cr.show_text("Frame means of the last stage run appear here (red = software pulse or arm, blue = disarm).")
-            return
-        t0 = self.stage_series[0][0]
-        t1 = self.stage_series[-1][0]
-        span = max(t1 - t0, 0.001)
-        lo = min(v for _t, v in self.stage_series)
-        hi = max(v for _t, v in self.stage_series)
-        if hi - lo < 1.0:
-            mid = (hi + lo) / 2
-            lo, hi = mid - 0.5, mid + 0.5
-        pad = 14
-
-        def px(t):
-            return (t - t0) / span * (w - 2)
-
-        def py(v):
-            return h - pad - (v - lo) / (hi - lo) * (h - 2 * pad)
-
-        cr.set_line_width(1.5)
-        for t, label in self.stage_events:
-            if t < t0 or t > t1:
-                continue
-            if label == "disarm":
-                cr.set_source_rgba(0.3, 0.55, 1.0, 0.9)
-            else:
-                cr.set_source_rgba(1.0, 0.3, 0.3, 0.9)
-            cr.move_to(px(t), 0)
-            cr.line_to(px(t), h)
-            cr.stroke()
-        cr.set_source_rgb(0.4, 0.85, 0.5)
-        cr.set_line_width(1.2)
-        cr.move_to(px(self.stage_series[0][0]), py(self.stage_series[0][1]))
-        for t, v in self.stage_series[1:]:
-            cr.line_to(px(t), py(v))
-        cr.stroke()
-        cr.set_source_rgb(0.75, 0.75, 0.75)
-        cr.move_to(4, 11)
-        cr.show_text("mean %.1f" % hi)
-        cr.move_to(4, h - 3)
-        cr.show_text("%.1f   (stage run, %.1f s)" % (lo, span))
-
-    # ---- status -------------------------------------------------------------
     def run_status(self):
         if self.busy:
             return
-        self.set_busy(True)
+        self.busy = True
+        self.status_btn.set_sensitive(False)
         self.text.get_buffer().set_text("")
         self.expander.set_expanded(True)
-        self.append_text("pkexec %s --status" % TOOL)
 
         def work():
             try:
-                r = subprocess.run(["pkexec", TOOL, "--status"], stdin=subprocess.DEVNULL,
-                                   capture_output=True, text=True, errors="replace", timeout=120)
+                r = subprocess.run([TOOL, "--status"], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, errors="replace", timeout=20)
                 out = (r.stdout + r.stderr).strip()
             except (OSError, subprocess.SubprocessError) as exc:
                 out = "status failed: %s" % exc
-            mt = re.search(r"pulses fired this boot: (\d+)", out)
-            if mt:
-                self.pulses = int(mt.group(1))
-                self.ui(self.update_pulses)
-            self.ui(self.parse_stage_status, out)
             self.ui(self.append_text, out)
-            self.ui(self.set_busy, False)
+            self.ui(self.status_done)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def status_done(self):
+        self.busy = False
+        self.status_btn.set_sensitive(True)
+        return False
 
 
 def main():
     if os.geteuid() == 0:
-        fail("run it as your normal user (it uses pkexec for the emitter test)")
-    for prog in ("v4l2-ctl", "pkexec"):
-        if shutil.which(prog) is None:
-            fail("%s is required (v4l-utils provides v4l2-ctl, polkit provides pkexec)" % prog)
-    if not os.path.exists(TOOL):
-        fail("%s is not installed (omarchy-surface-sl7)" % TOOL)
+        fail("run it as your normal user")
+    if shutil.which("v4l2-ctl") is None:
+        fail("v4l2-ctl is required (v4l-utils)")
     if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
         fail("no graphical session (WAYLAND_DISPLAY or DISPLAY is not set)")
     sys.exit(Lab().run(sys.argv[:1]))

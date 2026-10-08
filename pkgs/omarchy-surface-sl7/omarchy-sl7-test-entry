@@ -12,22 +12,15 @@
 #   omarchy-sl7-test-entry cleanup [--legacy]        remove ALL our entries and
 #                                                    state (--legacy: only the
 #                                                    r6 psr-entry and the retired
-#                                                    VRR test entry; the
-#                                                    enabled new-style entries
-#                                                    are regenerated)
+#                                                    VRR, USB-C flip and IR test
+#                                                    entries; the enabled new-style
+#                                                    entries are regenerated)
 #   omarchy-sl7-test-entry status [NAME]
 #
 # Presets (PARAMS default to the preset's own):
 #   psr   msm.psr_enabled=1   eDP Panel Self Refresh. KNOWN BROKEN on the
 #                             Sharp LQ138P1JX61: the panel goes black when
 #                             idle and only returns when something paints.
-#   ir-test  sl7.ir_test=1 panic=5
-#                             IR EMITTER TEST BOOT, entry "linux-sl7 (IR test)".
-#                             Lets leds-qcom-flash load (modprobe gate in
-#                             /usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf) so
-#                             the four PM8550 IR flash LEDs exist. Nothing fires
-#                             by itself. Fixed parameters: no custom PARAMS.
-#                             See the README, section 11c.
 #   clk-unused  -clk_ignore_unused -pd_ignore_unused clk_unused_defer
 #                             EXPERIMENTAL: boots without Omarchy's two
 #                             ignore flags, with linux-sl7 patches 0087/0088
@@ -43,6 +36,10 @@
 # usbc-flip (ps883x.fixed_phy_orientation=1) was a preset too. linux-sl7 patch 0090
 # now does that by default (ps883x.fixed_phy_orientation=0 disables it); `cleanup`
 # and `disable usbc-flip` remove a leftover "linux-sl7 (USBC-FLIP test)" entry.
+# ir-test (sl7.ir_test=1 panic=5, the IR emitter test boot) was a preset too. Face
+# unlock and the IR camera now work on the normal boot (sensor GPIO 1 strobe via
+# sl7-ir-bridge), the PMIC IR LED path is retired; `cleanup` and `disable ir-test`
+# remove a leftover "linux-sl7 (IR test)" entry.
 # Any other NAME (lowercase letters, digits, dashes) needs PARAMS.
 #
 # limine-entry-tool has no per-entry cmdline variants and rewrites limine.conf
@@ -65,14 +62,13 @@ export tag_new tag_old
 
 usage() {
   echo "usage: ${0##*/} enable NAME [PARAMS...] | disable NAME | list | status [NAME] | cleanup [--legacy]" >&2
-  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), ir-test (sl7.ir_test=1 panic=5, IR emitter test boot), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL)" >&2
+  echo "presets: psr (msm.psr_enabled=1, KNOWN BROKEN), clk-unused (no clk/pd_ignore_unused, clk_unused_defer, EXPERIMENTAL)" >&2
   exit 2
 }
 
 preset_params() {
   case $1 in
     psr) echo "msm.psr_enabled=1" ;;
-    ir-test) echo "sl7.ir_test=1 panic=5" ;;
     clk-unused) echo "-clk_ignore_unused -pd_ignore_unused clk_unused_defer" ;;
   esac
 }
@@ -80,28 +76,13 @@ preset_params() {
 preset_note() {
   case $1 in
     psr) echo "KNOWN BROKEN: the panel turns off when idle and returns only when something paints" ;;
-    ir-test) echo "IR EMITTER TEST BOOT: the PM8550 IR flash LEDs exist on this boot only; nothing fires by itself (README 11c)" ;;
     clk-unused) echo "EXPERIMENTAL: no clk_ignore_unused/pd_ignore_unused, unused clocks and domains disabled 30 s after boot; a boot may freeze (1 in 5 on the Dell without the deferral): choose the normal entry" ;;
   esac
 }
 
 valid_name() { [[ ${1:-} =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
 
-entry_title() {
-  case $1 in
-    ir-test) echo "linux-sl7 (IR test)" ;;
-    *) echo "linux-sl7 ($(tr '[:lower:]' '[:upper:]' <<<"$1") test)" ;;
-  esac
-}
-
-# Chris creates this by hand to allow the Stage B emitter test tool; this
-# script never creates it and never removes it, it only points it out.
-ir_approval=${OMARCHY_SL7_IR_APPROVAL:-/etc/omarchy-surface-sl7/ir-stage-b-approved}
-ir_approval_note() {
-  [[ -e $ir_approval ]] &&
-    echo "NOTE: $ir_approval exists: sl7-ir-emitter-test is ARMED for the IR test boot. Remove it by hand when Stage B is done." >&2
-  return 0
-}
+entry_title() { echo "linux-sl7 ($(tr '[:lower:]' '[:upper:]' <<<"$1") test)"; }
 
 find_conf() {
   local esp c
@@ -125,7 +106,7 @@ enabled_entries() {
         [[ -f $f ]] || continue
         n=${f##*/}
         valid_name "$n" || continue
-        [[ $n == vrr || $n == usbc-flip ]] && continue # retired presets: now on by default, never honoured
+        [[ $n == vrr || $n == usbc-flip || $n == ir-test ]] && continue # retired presets: now on by default, never honoured
         p=$(head -n 1 "$f")
         [[ -n $p ]] || p=$(preset_params "$n")
         [[ -n $p ]] && printf '%s\t%s\n' "$n" "$p"
@@ -302,6 +283,7 @@ retire_entry() {
 
 retire_vrr() { retire_entry vrr "linux-sl7 (VRR test)"; }
 retire_usbc_flip() { retire_entry usbc-flip "linux-sl7 (USBC-FLIP test)"; }
+retire_ir_test() { retire_entry ir-test "linux-sl7 (IR test)"; }
 
 need_root() {
   if ((EUID != 0)) && [[ -z ${OMARCHY_SL7_TEST_STATE_DIR:-} ]]; then
@@ -364,6 +346,11 @@ case $cmd in
       echo "  To turn it off, remove the msm.vrr_enabled=1 line from /etc/limine-entry-tool.d/omarchy-surface-sl7.conf and run: sudo limine-mkinitcpio" >&2
       exit 0
     fi
+    if [[ $name == ir-test ]]; then
+      echo "omarchy-sl7-test-entry: the IR test entry is no longer needed: face unlock and the IR camera work on the normal boot (sensor GPIO 1 strobe via sl7-ir-bridge); there is no ir-test entry any more." >&2
+      echo "  'sudo omarchy-sl7-test-entry disable ir-test' (or cleanup) removes a leftover entry." >&2
+      exit 0
+    fi
     if [[ $name == usbc-flip ]]; then
       echo "omarchy-sl7-test-entry: the USB-C reverse-plug fix is now on by default in linux-sl7 (patch 0090); there is no usbc-flip test entry any more." >&2
       echo "  To turn it off, add ps883x.fixed_phy_orientation=0 to the cmdline in /etc/limine-entry-tool.d/omarchy-surface-sl7.conf and run: sudo limine-mkinitcpio" >&2
@@ -373,12 +360,8 @@ case $cmd in
     valid_name "$name" || usage
     shift 2
     params=$*
-    if [[ $name == ir-test && -n $params && $params != "$(preset_params ir-test)" ]]; then
-      echo "omarchy-sl7-test-entry: ir-test has fixed parameters ($(preset_params ir-test)); no custom PARAMS" >&2
-      exit 2
-    fi
     [[ -n $params ]] || params=$(preset_params "$name")
-    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, ir-test, clk-unused); give PARAMS" >&2; exit 2; }
+    [[ -n $params ]] || { echo "omarchy-sl7-test-entry: '$name' is not a preset (psr, clk-unused); give PARAMS" >&2; exit 2; }
     [[ $params =~ ^[A-Za-z0-9._=:,/+-]+( [A-Za-z0-9._=:,/+-]+)*$ ]] || { echo "omarchy-sl7-test-entry: unsafe characters in PARAMS" >&2; exit 2; }
     mkdir -p "$state_dir"
     sf="${state_dir:?}/${name:?}"
@@ -391,7 +374,6 @@ case $cmd in
     reenroll
     note=$(preset_note "$name")
     [[ -n $note ]] && echo "NOTE: $note"
-    [[ $name == ir-test ]] && ir_approval_note
     echo "Reboot and choose '$(entry_title "$name")' in the Limine menu. The default entry is unchanged."
     ;;
   disable)
@@ -402,12 +384,12 @@ case $cmd in
     [[ $name == psr ]] && rm -f "${legacy_psr:?}"
     [[ $name == vrr ]] && { retire_vrr || exit 1; }
     [[ $name == usbc-flip ]] && { retire_usbc_flip || exit 1; }
+    [[ $name == ir-test ]] && { retire_ir_test || exit 1; }
     apply || true
     reenroll
-    if [[ $name == ir-test ]]; then ir_approval_note; fi
     ;;
   list)
-    for p in psr ir-test clk-unused; do
+    for p in psr clk-unused; do
       if is_enabled "$p"; then s=enabled; else s=disabled; fi
       printf '%-10s %-8s %s  [%s]\n' "$p" "$s" "$(preset_params "$p")" "$(preset_note "$p")"
     done
@@ -431,9 +413,9 @@ case $cmd in
     rm -f "${legacy_psr:?}" "${legacy_hook:?}"
     retire_vrr || exit 1
     retire_usbc_flip || exit 1
+    retire_ir_test || exit 1
     apply || true
     reenroll
-    [[ ${2:-} == --legacy ]] || ir_approval_note
     ;;
   status)
     if [[ -n ${2:-} ]]; then
@@ -443,7 +425,6 @@ case $cmd in
       status_one "$2" "${p:-}"
     else
       status_one psr "$(preset_params psr)"
-      status_one ir-test "$(preset_params ir-test)"
       status_one clk-unused "$(preset_params clk-unused)"
       while IFS=$'\t' read -r name params; do
         [[ -n $name && -z $(preset_params "$name") ]] && status_one "$name" "$params"

@@ -86,6 +86,13 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0097 | SL7 local: romulus13 `st,leds = <1>` on the IR sensor (GPIO 1 strobe, gated by 0094) and a second ganged IR LED `ir:flash-23` (channels 2 and 3, same limits) for the T0b decode check | ours | not submitted (SL7 specific) |
 | 0098 | SL7 local: vd55g holds exposure (at most 100 lines) and frame length (at least 1750 lines) to the values Windows Hello programs whenever `led_mode` is not off, at control set time, on `led_mode` change and at stream start, auto exposure replaced by manual while the strobe is on; the `illuminator` parameter (0094) now defaults to 1 (`illuminator=0` disables the strobe) | ours; IR plan stage C result | not submitted (SL7 specific) |
 
+PMIC IR LED patches (0080, 0081, 0091 to 0093, 0095, 0096): retired. The PM8550 flash LED path
+proved to have no load (open circuit); the IR emitter is lit by the sensor's GPIO 1 strobe (0094,
+0097, 0098) through sl7-ir-bridge on the normal boot, and the "IR test" boot entry is gone. These
+patches are inert without `sl7.ir_test=1` (the omarchy-surface-sl7 modprobe rule keeps
+`leds_qcom_flash` unloaded and the driver refuses the IR LEDs without `ir_test`) and are slated
+for removal at the 7.3 rebase. linux-sl7 is not changed for this.
+
 Notes on the DT patches:
 
 - Pins were cross-checked against the Surface Laptop 7 ACPI SSDT. The

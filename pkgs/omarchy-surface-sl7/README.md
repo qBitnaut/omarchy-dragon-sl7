@@ -26,8 +26,8 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
-| 8d | optional kernel test boot entries, PSR (known broken), the IR emitter test boot (`ir-test`), and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
-| 8g | IR emitter load gate (`leds_qcom_flash`, IR test boot only), the disabled Stage B and Stage C channel test tool and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
+| 8d | optional kernel test boot entries, PSR (known broken) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
+| 8g | `leds_qcom_flash` kept unloaded (the PMIC IR LED path is retired), read-only `sl7-ir-emitter-test --status` and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
 | 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
@@ -514,15 +514,14 @@ must not be in the normal command line. The default entry, `default_entry` and `
 never touched. All are disabled by default.
 
 ```
-sudo omarchy-sl7-test-entry enable psr|ir-test|clk-unused|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
+sudo omarchy-sl7-test-entry enable psr|clk-unused|NAME [PARAMS...]   # add "linux-sl7 (NAME test)"
 sudo omarchy-sl7-test-entry disable NAME                      # remove it
 omarchy-sl7-test-entry list                                   # presets, state, and what is in limine.conf
 sudo omarchy-sl7-test-entry cleanup                           # remove every test entry and its state
 omarchy-sl7-test-entry status [NAME]
 ```
 
-Presets: `psr` = `msm.psr_enabled=1`, `ir-test` = `sl7.ir_test=1 panic=5`
-(entry "linux-sl7 (IR test)", fixed parameters, section 11c), `clk-unused` = `-clk_ignore_unused
+Presets: `psr` = `msm.psr_enabled=1`, `clk-unused` = `-clk_ignore_unused
 -pd_ignore_unused clk_unused_defer` (a leading `-` removes the word from the entry's cmdline, see below).
 Any other NAME needs PARAMS.
 `omarchy-sl7-psr-entry enable|disable|status` still works (it calls the `psr` preset). The old r6
@@ -532,7 +531,10 @@ PSR is not carried over. The former `vrr` preset is gone: VRR is on by default n
 in `/etc/omarchy-surface-sl7/limine.conf.pre-vrr-entry-removal`). `enable vrr` only prints that. The former `usbc-flip` preset is gone the same way: linux-sl7
 7.2.8-18 makes the USB-C reverse-plug fix (patch 0090) the default, and an old "linux-sl7 (USBC-FLIP
 test)" entry is removed on upgrade (`cleanup --legacy`, copy of `limine.conf` in
-`/etc/omarchy-surface-sl7/limine.conf.pre-usbc-flip-entry-removal`). `enable usbc-flip` only prints that.
+`/etc/omarchy-surface-sl7/limine.conf.pre-usbc-flip-entry-removal`). `enable usbc-flip` only prints that. The former `ir-test` preset (IR emitter test boot) is gone
+too: face unlock works on the normal boot (section 11c), and an old "linux-sl7 (IR test)" entry is
+removed on upgrade (`cleanup --legacy`, copy of `limine.conf` in
+`/etc/omarchy-surface-sl7/limine.conf.pre-ir-test-entry-removal`). `enable ir-test` only prints that.
 
 How it works: limine-entry-tool has no per-entry command line variants, and it rewrites
 `limine.conf` on every UKI rebuild. So `omarchy-sl7-test-entry` copies the live linux-sl7 entry
@@ -625,212 +627,33 @@ entry after 10 minutes idle, alternating, then `sl7-powermeter --compare`; expec
 awake [estimate]. `sl7-sleepstats --suspend-test` covers the suspend side. Done: `sudo
 omarchy-sl7-test-entry disable clk-unused`.
 
-### 11c. IR emitter test boot and `sl7-ir-emitter-test` (Stage A and B of the IR emitter plan)
+### 11c. IR camera and emitter: `sl7-ir-lab`, `sl7-ir-emitter-test --status`
 
-Plan: `research/omarchy-dragon-sl7/ir/EMITTER-PLAN.md`. The IR illuminator is a PM8550 flash LED on
-an unknown channel. This is the build-only part: **nothing in this package fires the emitter.**
+Face unlock works on the **normal boot**; there is no IR test boot entry any more. The IR emitter
+is lit by the `vd55g` sensor's GPIO 1 strobe, driven through `sl7-ir-bridge` for every camera
+session at Windows' timing (linux-sl7 7.2.8-22, patch 0098: exposure at most 100 lines, frame
+length at least 1750 lines, whatever user space asks; the `illuminator` module parameter defaults
+to 1). The earlier PMIC flash LED path (`leds-qcom-flash`, `ir:flash-14` / `ir:flash-23`) proved
+to have no load (open circuit) and is retired.
 
-**What exists.** linux-sl7 patch 0080 (leds-qcom-flash IR safety) and 0081 (romulus13 DT) describe
-four IR LEDs, `ir:flash-1` to `ir:flash-4`, one per PM8550 flash channel, each limited to 12.5 mA
-flash and a 10 ms hardware timer, torch refused (from linux-sl7 7.2.8-19 patches 0091 and 0092
-replace them by the ganged `ir:flash-14`, see the Stage B paragraph below). They are in the DTB of every boot entry but can
-bind only on the IR test boot entry.
-
-**The gate (two independent layers).**
-
-1. `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf` has an `install leds_qcom_flash` rule. Without
-   `sl7.ir_test=1` on `/proc/cmdline` it exits 0 without loading the module (quiet for udev's alias
-   load, nothing binds). With it, it loads the module with `ir_test=1`.
-2. The driver itself refuses to bind to a node set that holds an IR LED unless its module
-   parameter `ir_test` is set (read-only at run time), before touching any register. So an
-   `insmod` or `modprobe --ignore-install` on a normal boot still binds nothing.
-
-The command line token comes from the entry: `sudo omarchy-sl7-test-entry enable ir-test` adds
-"linux-sl7 (IR test)" with `sl7.ir_test=1 panic=5` appended (`disable ir-test` and `cleanup` remove
-it). The normal entry never carries it. Kill switch at the Limine menu: `module_blacklist=leds_qcom_flash`.
-If the module was already loaded before the rule applied (initramfs), `modprobe -r leds_qcom_flash`
-then `modprobe leds_qcom_flash` on the test entry.
-
-**Stage A check (read-only, no approval needed).**
-
-```
-sl7-ir-emitter-test --status
-```
-
-Normal boot: approval absent, `sl7.ir_test=1: no`, `leds_qcom_flash: not loaded`, 0 `ir:flash-*`
-LEDs, and `ls /sys/class/leds | grep ir:` empty. IR test boot: `ir_test=Y` and 4 LEDs, each with
-`max_flash_brightness=12500` and `max_flash_timeout=10000`. `dmesg | grep 'SL7 snapshot'` shows the
-read-only PMIC register snapshot taken at probe. Note: `echo 255 > .../ir:flash-N/brightness`
-returns success (the LED core queues brightness writes), but the driver refuses it ("SL7: torch
-refused on the IR emitter LED") and the channel stays off.
-
-**Stage B tool, disabled.** `sl7-ir-emitter-test --i-have-read-the-plan --channel N [--repeat R]`
-fires one 12.5 mA x 10 ms pulse (R = 1..3, 1 s apart) on one channel through the LED class sysfs
-(`flash_strobe=0`, `flash_brightness=12500`, `flash_timeout=10000`, `flash_strobe=1`, 50 ms,
-`flash_strobe=0`, then `flash_fault`). It refuses unless **all** of these hold, checked in this
-order:
-
-1. **`/etc/omarchy-surface-sl7/ir-stage-b-approved` exists** (regular file, root-owned, not
-   writable by group or others, not a symlink). No package ships it, nothing creates it and the
-   tool never removes it. Only the owner creates it by hand, after reading the plan:
-   `sudo mkdir -p /etc/omarchy-surface-sl7 && echo "approved by the owner $(date -I)" | sudo tee /etc/omarchy-surface-sl7/ir-stage-b-approved`
-   and removes it when Stage B is done.
-2. It runs as root on the IR test entry (`sl7.ir_test=1` and `panic=5` on the command line,
-   `leds_qcom_flash` loaded with `ir_test=Y`), with `ir:flash-N` present and every `ir:flash-*`
-   at `flash_strobe=0`, `max_flash_brightness <= 12500`, `max_flash_timeout <= 10000` and no fault
-   other than `flash-timeout-exceeded`.
-3. It is the only run (lock), at most 12 pulses this boot (counter in `/run`), on an interactive
-   terminal, and the typed phrase `FIRE CHANNEL N` is entered after the safety checklist.
-
-Every action (each write, read back and fault read) is logged to
-`/var/log/sl7-ir-emitter-test.log` and the journal (tag `sl7-ir-emitter-test`). On any error,
-signal or exit it writes `flash_strobe=0` to every `ir:flash-*` LED. The limits are constants in
-the script: no option raises them. Without the approval file, as shipped, the tool exits 3 and
-touches nothing.
-
-**`--watch` (IR camera detector).** `sudo sl7-ir-emitter-test --i-have-read-the-plan --channel N
---repeat 3 --watch` adds the VD55G0 as a detector to the same run (every gate, the 3 pulses per run,
-the 12 per boot and the typed phrase are unchanged). It needs `sl7-ir-bridge` active (checked, clear
-error otherwise), `v4l-utils` and `python3`. After the confirmation it captures from
-`/dev/v4l/by-id/sl7-ir-camera` with `v4l2-ctl` into a private directory under `/run`, waits for the
-black frame and 35 real frames (about 1 s, auto-exposure settling), fires, keeps capturing 1 s, then
-computes the mean and 99th percentile of every frame (frame 0 is the bridge's black frame and is
-skipped). The baseline is the median of the lead frames; a frame is flagged when its mean or p99 is
-more than 5 robust SDs (MAD) above it, and flags are matched to the logged FIRE times (window from
-35 ms before to 150 ms after, since the loopback frame arrives after the exposure). Verdict per
-channel: `DETECTED` (every pulse spiked, 3 of 3), `WEAK` (some) or `NONE`. Setup: white paper about
-5 cm in front of the camera, angled so light from beside the lens bounces back, dim room, do not
-move. A 10 ms pulse can fall between exposures, so `NONE` is not proof that a channel is dark.
-No image is ever saved: only the per-frame statistics (a CSV next to the log, plus the summary lines
-in the log and journal) are kept, and the raw capture is deleted on exit. `--watch-only-test`
-captures with no pulses to check that the baseline is stable (`STABLE`/`UNSTABLE`); it touches no
-LED and needs no approval file, but still the root, IR test entry and bridge. Exit code 8 is a
-`--watch` problem (bridge, capture or analysis).
-
-**Stage B, ganged IR LED (omarchy-surface-sl7 36, with linux-sl7 7.2.8-19).** The 12.5 mA
-single-channel discovery test showed nothing. linux-sl7 patches 0091 and 0092 replace the four
-discovery LEDs by one LED, `ir:flash-14` (PM8550 flash channels 1 and 4 ganged, as the Windows
-driver does), and add the driver limit `ir_max_ua` (uA per channel, default 25000, run-time
-writable 12500 to 100000, hard cap 100 mA per channel in code). The tool gains `--led ir` and
-`max_ma_per_channel=`:
-
-```
-sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir --repeat 3 --watch
-sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir max_ma_per_channel=25 --repeat 3 --watch
-sudo sl7-ir-emitter-test --i-have-read-the-plan --led ir max_ma_per_channel=50 --repeat 3 --watch
-```
-
-`max_ma_per_channel=` is 12.5 (default), 25 or 50; 100 is accepted and asks for a second phrase.
-Every run needs its own typed phrase after the checklist: `FIRE IR 12.5MA`, `FIRE IR 25MA`,
-`FIRE IR 50MA` (`FIRE IR 100MA`, then `ACCEPT 100 MA PER CHANNEL`). After the confirmation the tool
-writes `ir_max_ua` (read back), then per pulse `flash_brightness` = 2 x the per-channel current and
-`flash_timeout=10000` (read back), and it sets `ir_max_ua` back to 25000 on exit. The pulse stays
-10 ms: 25 / 50 / 100 / 200 mA total are 0.25 / 0.5 / 1.0 / 2.0 mC (Windows 1.11 mC per lit frame).
-The approval file, IR test boot, 3 pulses per run, 12 per boot and fault checks are unchanged.
-`--channel N` remains for kernels that still have the discovery LEDs (7.2.8-18 or earlier).
-
-**Instrumentation (omarchy-surface-sl7 37, with linux-sl7 7.2.8-20).** The tool
-now copies everything it prints to `/var/tmp/sl7-ir-<time>.txt`, dumps the flash registers
-through regmap debugfs before arming, while the strobe is set (with `flash_fault`, before
-`flash_strobe=0`) and after the disarm, and for `--led ir` sets the IR sensor to manual exposure
-at its maximum for the run so a 10 ms pulse cannot miss a frame (`--no-manual-exposure` skips
-it). `sudo sl7-ir-emitter-test --remove-snapshot` fires nothing: it unloads leds_qcom_flash,
-prints the kernel's "remove, after all-off" register snapshot and loads it back.
-
-**`sl7-ir-lab` (omarchy-surface-sl7 38).** One GTK 4 window (Python, PyGObject), launched as your
-user on the IR test boot from the Omarchy launcher ("SL7 IR Lab") or with `sl7-ir-lab`. The live
-IR camera fills the window and never closes: raw GREY frames are read from the bridge loopback
-through `v4l2-ctl --stream-mmap --stream-to=-` and the stream is reopened whenever the bridge ends
-its 10 s session. Under the image: mean and max of every frame and a 10 s graph of the mean with a
-red marker per pulse; "Contrast stretch" brightens the dark frames (a pulse still saturates).
-Buttons: Pulse 12.5 / 25 / 50 mA (a dialog asks "Fire IR pulse at NN mA per channel?", Cancel is
-the default), Snapshot (PNG in `~/sl7-ir-lab/<timestamp>/`, with a toast) and Status. A pulse runs
-`pkexec /usr/bin/sl7-ir-emitter-test --i-have-read-the-plan --led ir max_ma_per_channel=NN
---pulse-delay 2 --confirmed` without blocking the window. `--confirmed` replaces the typed phrase
-for `--led ir` at 12.5, 25 and 50 mA per channel only and, with it, the tool no longer needs a
-terminal (100 mA and `--channel` still need the typed phrases in a terminal); every other gate
-(approval file, IR test boot, 3 per run, 12 per boot, `ir_max_ua`, hardware timer) stays. The tool
-sets the sensor to manual maximum exposure itself and restores it on every exit, with the stream
-open. After the pulse the lab compares the brightest frame near the fire time with the median and
-robust sd of the frames around it ("SPIKE +x.x sd at frame N" above 5 sd, else "no spike"), shows
-the brightest frame next to a baseline frame in the window for 10 s, and fills the collapsible
-"Registers and tool output" panel with the tool output (REGDUMP, EXPOSURE, FIRE lines) and the
-kernel's "SL7 IR strobe snapshot" lines. Per pulse it saves `frames.csv`, `baseline.png`,
-`brightest.png`, `tool_output.txt` and `summary.txt` under `~/sl7-ir-lab/<timestamp>/`. The polkit
-action `org.omarchy.sl7.ir-emitter-test` (`allow_active=auth_admin_keep`) means one authentication
-covers the pulses of the next few minutes; a polkit agent must be running in the session. Needs
-v4l-utils, gtk4, python-gobject, python-cairo and polkit (optional dependencies of the package).
-
-**Stage C (omarchy-surface-sl7 39 to 41, with linux-sl7 7.2.8-21 and -22): result, GPIO 1 drives the
-emitter.** Evidence going in: a software strobe gave STATUS1 `0x82` (CH1 and CH4 open circuit),
-INT_RT_STS `0x49` (fault and ramp-down, ramp-up never) and no current. Hypothesis H2: the sensor's
-GPIO 1 strobe output (Windows writes `0x0468 = 0x02`) enables the emitter path. **Stage C0b
-confirmed it:** with `led_mode=1` set before stream-on and the PMIC not armed, the frames were
-brighter (exposure 100 lines: mean 15.7 to 20.1, p99 16 to 38; exposure 6268 lines: mean 81.9, p99
-255). The emitter is lit by the sensor's strobe alone, so the PMIC current caps and timers do not
-apply and the only safety control is the strobe duration, which is the exposure, and its
-repetition, the frame length. Since linux-sl7 7.2.8-22 (patch 0098) the `vd55g` driver holds both
-to what Windows Hello programs whenever `led_mode` is on: exposure at most 100 lines (1.59 ms),
-frame length at least 1750 lines (27.8 ms, 36 fps, duty 5.7 %), at control set time, on `led_mode`
-change and at stream start, whatever user space asks. The `illuminator` parameter now defaults to 1,
-so this package no longer gates `vd55g` on the IR test boot (only `leds_qcom_flash`, the PMIC flash
-driver, keeps its gate), and `sl7-ir-bridge` lights the emitter for each camera session. Kernel side
-of the earlier stages (patches 0094 to 0097): `leds-qcom-flash` has a `hw_strobe_arm` attribute on
-the IR LEDs (write 1 to arm the PMIC for a hardware strobe, 0 to disarm; refuses above 25 mA per
-channel; disarms by itself after 1 s, on remove, shutdown and suspend), more registers and
-timestamps in the strobe snapshot, and a second ganged LED `ir:flash-23` (channels 2 and 3) for the
-T0b decode check.
-
-Stages `c1-sw` and `c1-hw` (PMIC current on top of the strobe) are **retired** (omarchy-surface-sl7
-41): the tool exits 2 with an explanation. `c0b` is recorded as the finding and needs no earlier
-stage; `t0b` needs `c0a`.
-
-```
-sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c0a
-sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c0b
-sudo sl7-ir-emitter-test --i-have-read-the-plan --stage t0b      # optional
-```
-
-| Stage | What it does | Result |
-|---|---|---|
-| `c0a` | PMIC armed for a hardware strobe, ir:flash-14 at 12.5 mA per channel for about 0.7 s, **sensor not streaming** (negative control: is the strobe input idle?) | PASS: STATUS1 0 and no ramp or fault bit in the kernel's 30 ms back-to-back poll and in the samples while armed. STOP and FAIL on `0x82` or any ramp-up or fault bit. |
-| `c0b` | Sensor streaming with `led_mode=1` set before stream-on, PMIC **not** armed, at Windows' timing (exposure 100 lines / frame 1750 lines), compared with `led_mode=0` at the same setup. While it runs the tool keeps `/run/sl7-ir-bridge.hands-off` fresh so the bridge does not set `led_mode` itself | Recorded OK as the finding "GPIO 1 drives the emitter" when the median frame mean and p99 are beyond 5 robust sd and 0.5 / 4 grey levels brighter than the baseline. FAIL if not brighter. The long-exposure phase of 7.2.8-21 is gone: the driver now refuses exposures above 100 lines while `led_mode` is on. |
-| `t0b` | `ir:flash-23` (channels 2 and 3), one software pulse at 12.5 mA per channel | Expect STATUS1 `0x28` (CH2 and CH3 open): confirms how the `0x82` of CH1 and CH4 is read. FAIL if different (still harmless). |
-
-Records: `/var/lib/omarchy-surface-sl7/ir-stage-c/<stage>`, written by the tool with the register
-evidence and a time-stamped copy; `sl7-ir-emitter-test --status` lists them as `stage-c NAME:
-OK|FAIL|none|stale`. All other gates stay: root, the IR test boot,
-`/etc/omarchy-surface-sl7/ir-stage-b-approved`, one run at a time, the per-boot counter (a hardware
-arm counts like a pulse; stage runs may use 24 per boot), `ir_max_ua` (restored to 25000), the typed
-phrase `FIRE STAGE C0A` (and so on) or `--confirmed` from the lab. The camera must be idle (close
-the lab's live view if you run the tool by hand). On every exit path, in order: strobe off,
-`led_mode` 0, stream off, exposure, blanking and auto exposure restored. Output lines for programs:
-`STAGE_REG` (with the bits decoded: "CH1 open", "ramp-up done", "timer expired"), `STAGE_PULSE`,
-`STAGE_CMP`, `STAGE_PULSE_FRAMES`, `STAGE_ARM_FRAMES`, `STAGE_ANALYSIS`, `STAGE_FRAMES csv=FILE`
-(per-frame means and event times), `STAGE_RESULT`, `STAGE_SUMMARY`. The INT_RT_STS bit names (bit 4
-ramp-up done, bit 3 ramp-down done, bit 0 fault) are assumptions from the first `0x49` read, not
-from a datasheet.
-
-`sl7-ir-lab` (omarchy-surface-sl7 41) shows the lit camera: the frames come through the bridge with
-the emitter strobing at Windows' timing, and the readout adds `LIT` or `dark` (frame maximum) and the
-bridge's own report for the session (`emitter ON: led_mode=flash exposure=100 ...`, read from its
-journal when your user may read it). Its Stage C section has C0a, C0b and T0b, behind a Fire / Cancel
-dialog (`--confirmed`). The stage tool starts the sensor itself, so the lab stops its own camera
-reader gracefully for the run (SIGTERM so the device closes, a wait for the reader to exit, then a
-1.2 s wait for the bridge's 0.5 s stop grace; never SIGKILL unless the reader hangs), the live view
-freezes and the readout says so, then it reconnects; the result (PASS or FAIL, the decoded STATUS
-bits, the per-pulse lines) is shown in the window, the stage's frame means with the pulse or arm
-times are drawn in a small graph and also fed to the 10 s graph, and the files go under
-`~/sl7-ir-lab/<timestamp>/`.
-
-**IR stage A safety fix (omarchy-surface-sl7 26, with linux-sl7 7.2.8-14).** The PMIC safety timer
-very likely counts (n + 1) x 10 ms while the stock driver writes n = timeout / 10, so a requested
-10 ms would have run about 20 ms. Patch 0080 now programs n - 1 for IR LEDs, so the hardware pulse
-equals the requested 10 ms. The tool's comments and confirmation text now state the effective
-charge: one pulse is 12.5 mA x 10 ms = 0.125 mC, about 11 % of Windows' 700 mA x 1.59 ms = 1.11 mC
-per lit frame (the old "1.8 %" is the current only). Limits (12.5 mA, 10 ms, 3 pulses per run, 12
-per boot) are unchanged. Needs linux-sl7 7.2.8-14 or later for the encoding fix; on 7.2.8-13 the
-same run is about 20 ms, 0.25 mC.
+- **`sl7-ir-lab`** (Omarchy launcher "SL7 IR Lab", run as your normal user): a simple live view of
+  the IR camera through the bridge loopback, with the frame mean and maximum, `LIT` or `dark`
+  (frame maximum), the bridge's own report for the session (`emitter ON: led_mode=flash
+  exposure=100 ...`, read from its journal when your user may read it), a 10 s graph of the mean,
+  Snapshot (PNG under `~/sl7-ir-lab/<timestamp>/`) and Status. Needs v4l-utils, gtk4,
+  python-gobject and python-cairo (optional dependencies).
+- **`sl7-ir-emitter-test --status`**: read-only, no root: the bridge state, the `vd55g`
+  `illuminator` parameter, whether `leds_qcom_flash` is loaded and how many `ir:flash-*` LEDs exist
+  (expected 0). Every other option exits 2: the PMIC emitter tests (`--led ir`, `--channel`,
+  `--stage`, `--watch`, `--remove-snapshot`) are retired together with the approval file
+  `/etc/omarchy-surface-sl7/ir-stage-b-approved` (delete it if you created it).
+- **`/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`**: keeps `leds_qcom_flash` unloaded on every
+  boot (`install leds_qcom_flash /bin/true`), as before, so the IR LEDs never bind. The driver also
+  refuses the IR LED nodes by itself unless its `ir_test` parameter is set.
+- **Upgrading**: a leftover "linux-sl7 (IR test)" entry is removed by the package upgrade
+  (`omarchy-sl7-test-entry cleanup --legacy`), with a copy of `limine.conf` in
+  `/etc/omarchy-surface-sl7/limine.conf.pre-ir-test-entry-removal`. `enable ir-test` only prints
+  that the entry is no longer needed.
 
 ### 12b. Camera probe: `sl7-ir-probe` (Phase A of IR face unlock)
 

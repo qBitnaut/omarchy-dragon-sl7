@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=41
+pkgrel=42
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -27,8 +27,7 @@ optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarch
             'pipewire-libcamera: the webcam in browsers and video calls'
             'gtk4: the sl7-ir-lab window'
             'python-gobject: the sl7-ir-lab window (PyGObject)'
-            'python-cairo: the sl7-ir-lab live view and graph'
-            'polkit: pkexec for sl7-ir-lab and the sl7-ir-emitter-test polkit action')
+            'python-cairo: the sl7-ir-lab live view and graph')
 backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
         'etc/limine-entry-tool.d/omarchy-surface-sl7.conf'
         'etc/pacman.d/omarchy-sl7.conf'
@@ -90,7 +89,6 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-sleepstats'
         'sl7-ir-emitter-test'
         'sl7-ir-lab'
-        'org.omarchy.sl7.ir-emitter-test.policy'
         'sl7-ir-lab.desktop'
         'omarchy-surface-sl7-ir.modprobe.conf'
         'sl7-usb-rpm'
@@ -128,7 +126,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             'eb0d712fd5d1cf085baf5434b332e4937f1ba24e5773e45c2597d85ec8e4b158'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '48e3080c253424902b34cff9e8bf848825b8756c8d8c495666d2e5ef85a3d83b'
+            '3071b63d302678a683eb1791f0f76417f8f25ec69c0b22de11b7f4ae76c4baee'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -146,16 +144,15 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca46c5e3beae40e9e0502b3f50ee105429a84fbe7528ea3af5f3893b11d56013'
             'bd5f5bef8154e7ab596149b378f51334eb46db25518a0a93412f05b264f33d23'
             '345a63cf7e8af0b3a0cfc10a0bbf029c821518de10ea8dab601bf96aef03b2ff'
-            '52a3b236adcd6b7ce188f9862b286fb08ea1bb7e65648cf24e15a9b7d1856a62'
+            '5d0b9867de8aa6c15347619258085dc6a3ff7cfd3bb1e1721d9c8e9506dc7f87'
             '3e181253a2aa10511f046ef2cec0fed990d217b310ff06bf511ebb0cbfb641b2'
             '0c78d78e67521251e605b019edd1f42e8452cdee4705a6818670f165f43d611a'
             '41cf0f5821f9dc5bee37b55e32f220b022e8b8cf008d5269281b293f283c4c92'
             '72fe61cb4b0f79867dc998d6b9e119a77daa68e56232466a6ebc23f34d52aa14'
-            'd609039c66d6b432855af002380005a7f5d1174f4e81907c93cc742f142fcfae'
-            '3eb2b79cb04314f49f952fc2386fd9a650f033df40b86e11776e95541bdb92b7'
-            '93ddba82af43a3f7df7a642a06cae86c7adeb1eaef10fdd99294cdaa8ae77d24'
-            '1ea6be0b5ad61494fe2b438349238826080f00e2eed6bfc83fb5c296e73101da'
-            'f14901ed5321b588a300467aaf8fd9175fe4662ab0379c5593f280be7113c8d2'
+            'd6f0c834d5840e17e23a214fa92c02446a95a432f5d3df9c56dc799d4fcecf1a'
+            '1eeb63d6ab90d65a59f3d15f9fa78a2dcc2cb73b92184e764425425fe048d643'
+            'e3859d44fb0d09a3209838af2b4e609f4cedf1569e160b2715fe3b2c6642cc68'
+            '396aae9ebe24f6814d72b56f7f86ad61c07122f36df38203a308b8c2d11dac4a'
             'd6a463909152b5369366925f85449c00bbebea0c229024fb84e0144c2f0079aa'
             'a52d29a202208c7f4aae9639be355b3f6407ad39d647b151269dd68816a4cfa0'
             '75551175f04766cb15662d95aa7ef69e782e4477ffb6e6055af7f03fd1e1d9ef'
@@ -301,16 +298,12 @@ package() {
   # 8e. camera Phase A probe (read-only; --sweep-mclk only changes a module parameter)
   install -Dm755 sl7-ir-probe "$pkgdir/usr/bin/sl7-ir-probe"
 
-  # 8g. IR emitter: load gate (leds_qcom_flash loads only on the IR test boot
-  # entry, sl7.ir_test=1) and the Stage B channel test tool, which refuses
-  # unless Chris creates /etc/omarchy-surface-sl7/ir-stage-b-approved by hand.
+  # 8g. IR: leds_qcom_flash kept unloaded (the PMIC IR LED path is retired), the
+  # read-only sl7-ir-emitter-test --status and the sl7-ir-lab live view.
   install -Dm644 omarchy-surface-sl7-ir.modprobe.conf \
     "$pkgdir/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf"
   install -Dm755 sl7-ir-emitter-test "$pkgdir/usr/bin/sl7-ir-emitter-test"
   install -Dm755 sl7-ir-lab "$pkgdir/usr/bin/sl7-ir-lab"
-  # sl7-ir-lab runs the tool through pkexec; one authentication holds for a few minutes
-  install -Dm644 org.omarchy.sl7.ir-emitter-test.policy \
-    "$pkgdir/usr/share/polkit-1/actions/org.omarchy.sl7.ir-emitter-test.policy"
   install -Dm644 sl7-ir-lab.desktop "$pkgdir/usr/share/applications/sl7-ir-lab.desktop"
 
   # 8h. opt-in USB runtime PM, one dwc3 controller at a time. The udev rule is
