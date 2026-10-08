@@ -12,6 +12,13 @@
 # hidraw nodes to reappear, since their numbers can change.
 case ${1:-} in
   post)
+    # Record what woke the system, for unexplained wakes in the night:
+    # journalctl -t omarchy-surface-sl7 | grep wake
+    irq=$(cat /sys/power/pm_wakeup_irq 2>/dev/null)
+    if [[ $irq =~ ^[0-9]+$ ]]; then
+      src=$(awk -v i="$irq:" 'NR == 1 { n = NF } $1 == i { s = ""; for (k = n + 2; k <= NF; k++) s = s " " $k; print s; exit }' /proc/interrupts 2>/dev/null)
+      logger -t omarchy-surface-sl7 "wake: irq $irq${src:+ (${src# })}" 2>/dev/null || true
+    fi
     helper=/usr/lib/omarchy-surface-sl7/restart-iptsd
     if command -v systemd-run >/dev/null 2>&1; then
       systemd-run --quiet --no-block --on-active=1 \
