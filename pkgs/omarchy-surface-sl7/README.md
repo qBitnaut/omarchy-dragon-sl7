@@ -479,9 +479,11 @@ The tuning is generated automatically at install: `omarchy-surface-sl7-firmware`
 file from your MSI and runs `sl7-camera-tuning --if-missing --quiet`, and the package scriptlet
 does the same on install and upgrade when the kept file exists but the tuning does not. An
 existing `/etc/libcamera/ipa/simple/ov02c10.yaml` is never overwritten. Run `sl7-camera-tuning`
-yourself to regenerate it or to change the options below. Clean installs from the installer stick
-stage only the firmware, not the camera file, so run `omarchy-surface-sl7-firmware --from-msi FILE`
-once after first boot to get the tuning too.
+yourself to regenerate it or to change the options below. Clean installs from the installer
+stick need nothing: the stick carries the camera file from your MSI, the live system hands it to the
+installer with the firmware, and `omarchy-surface-sl7-camera-stage.service` builds the tuning on first
+boot and deletes the staged copy. If the stick was written without it, run
+`sudo omarchy-surface-sl7-firmware --from-msi FILE` once.
 
 Two parts:
 

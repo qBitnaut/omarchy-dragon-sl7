@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=50
+pkgrel=51
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -106,7 +106,9 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'sl7-camera-check'
         'omarchy-sl7-bag-guard'
         'omarchy-surface-sl7-bag-guard.service'
-        'bag-guard.conf')
+        'bag-guard.conf'
+        'omarchy-surface-sl7-camera-stage'
+        'omarchy-surface-sl7-camera-stage.service')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -173,7 +175,9 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5396224d70d0b05704358fb05ac9bc935a7767ad2c64b36c09ab12c80c3eaedd'
             '5bad7ac7f4318eba6743623339ed3d0abd76fbf9ad06ccfe67d72f113ca4d1a1'
             '4aead7533a13e2774a6cb0347bc3e3bb923c04f021fa7e27217588e27a0a1f71'
-            '6ef7d9f902a3361333e52a78caca27d0d4fc574ed8a1a7d5c166f768a270e95a')
+            '6ef7d9f902a3361333e52a78caca27d0d4fc574ed8a1a7d5c166f768a270e95a'
+            'dabf2db2200e5ed537a3b52e73fd029b9d8235d99fe93846e7563b58bbe5d031'
+            '93de124366cf20d310560e6c369f6bacc822980106c985533d829d7f6179bda2')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -277,6 +281,14 @@ package() {
   # and the capture/compare script
   install -Dm755 sl7-camera-tuning "$pkgdir/usr/bin/sl7-camera-tuning"
   install -Dm755 sl7-camera-check "$pkgdir/usr/bin/sl7-camera-check"
+  # Clean installs: the installer stick stages the camera file next to the firmware;
+  # this picks it up at first boot (and from the scriptlet) and builds the tuning.
+  install -Dm755 omarchy-surface-sl7-camera-stage "$pkgdir/usr/lib/omarchy-surface-sl7/camera-stage"
+  install -Dm644 omarchy-surface-sl7-camera-stage.service \
+    "$pkgdir/usr/lib/systemd/system/omarchy-surface-sl7-camera-stage.service"
+  install -dm755 "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
+  ln -sf ../omarchy-surface-sl7-camera-stage.service \
+    "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-surface-sl7-camera-stage.service"
 
   # 8b. AC/battery power mode: root part (udev via power-event, boot, resume),
   # user part (Hyprland watcher, enabled for graphical-session.target), config

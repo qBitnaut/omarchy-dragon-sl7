@@ -4,8 +4,10 @@ sl7-firmware-stage.service (enabled for aarch64/snapdragon media, before
 getty@tty1 and so before the installer) runs omarchy-sl7-firmware-stage, which
 mounts LABEL=SL7DATA read-only, runs
   qcom-firmware-extract --stage /run/omarchy/firmware -d /run/sl7data/firmware
-and unmounts. The installer's own 'qcom-firmware-extract --stage' then reports
-'already staged' and copies the stage into the target. A hybrid-ISO whole-disk
+and unmounts. It also stages SL7DATA's camera/ tuning file next to the firmware, so
+the installer's copy of the stage carries it into the target. The installer's
+own 'qcom-firmware-extract --stage' then reports 'already staged' and copies the
+stage into the target. A hybrid-ISO whole-disk
 claim is handled with a loop device, as in the recon kit. It never fails the
 boot. profiledef.sh sets the script's mode.
 
@@ -32,7 +34,7 @@ new file mode 100755
 index 0000000..393801a
 --- /dev/null
 +++ b/configs/aarch64/omarchy-sl7-firmware-stage
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,89 @@
 +#!/bin/bash
 +# Stage the Surface Laptop 7 firmware from the install stick's SL7DATA
 +# partition into /run/omarchy/firmware (RAM) before the installer runs, so the
@@ -111,6 +113,16 @@ index 0000000..393801a
 +mkdir -p "$(dirname "$STAGE")"
 +log "staging firmware from $dev"
 +qcom-firmware-extract --stage "$STAGE" -d "$MNT/firmware" || log "qcom-firmware-extract failed (status $?)"
++
++# The camera tuning file (Microsoft's, from the user's own MSI) rides along in the
++# stage: the installer copies the whole stage directory into the target as
++# /var/lib/omarchy/firmware-stage, and omarchy-surface-sl7 builds the webcam tuning
++# from camera/ at first boot. Only when firmware was staged (the installer copies
++# the stage only if its manifest exists).
++cam=$MNT/camera/com.surface.tuned.ffc_ov02c10.bin
++if [[ -f $cam && -f $STAGE/manifest ]]; then
++  install -Dm644 "$cam" "$STAGE/camera/${cam##*/}" && log "staged the camera tuning file"
++fi
 +exit 0
 diff --git a/configs/aarch64/sl7-firmware-stage.service b/configs/aarch64/sl7-firmware-stage.service
 new file mode 100644

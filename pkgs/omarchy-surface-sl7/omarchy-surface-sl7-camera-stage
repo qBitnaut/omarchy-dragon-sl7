@@ -1,0 +1,36 @@
+#!/bin/bash
+# Pick up the camera tuning file the installer stick staged and build the
+# libcamera tuning file from it.
+#
+# The install stick carries Microsoft's camera tuning (from the user's own
+# driver MSI) next to the firmware. The live installer copies the firmware stage
+# into the new system as /var/lib/omarchy/firmware-stage; the camera file rides
+# along in its camera/ directory. This moves it to where sl7-camera-tuning
+# keeps it, builds the tuning file (never overwriting an existing one) and
+# removes the staged copy. Run at first boot by
+# omarchy-surface-sl7-camera-stage.service and by the package scriptlet.
+# Never fails: a problem is reported and the next run tries again.
+set -uo pipefail
+
+prog=${0##*/}
+name=com.surface.tuned.ffc_ov02c10.bin
+staged=${OMARCHY_SL7_CAMERA_STAGE:-/var/lib/omarchy/firmware-stage/camera}/$name
+kept=${OMARCHY_SL7_CAMERA_DIR:-/var/lib/omarchy-surface-sl7/camera}/$name
+
+[[ -f $staged ]] || exit 0
+
+if [[ ! -f $kept ]]; then
+  if ! install -Dm644 "$staged" "$kept"; then
+    echo "$prog: could not keep $staged in ${kept%/*}" >&2
+    exit 0
+  fi
+fi
+rm -f "$staged"
+rmdir "${staged%/*}" 2>/dev/null || true
+
+if sl7-camera-tuning --if-missing --quiet; then
+  echo "$prog: camera tuning is in place (restart pipewire/wireplumber or log out and in to use it)"
+else
+  echo "$prog: could not generate the camera tuning; run 'sudo sl7-camera-tuning' later" >&2
+fi
+exit 0

@@ -40,6 +40,14 @@ extracts it with `msiextract` (msitools) and writes `DIR/extracted/ProgramFiles6
 and `DIR/SHA256SUMS.extracted`. `DIR` defaults to `$SL7_MSI`, else `./sl7-msi`. It runs on
 any Linux machine or macOS, and nothing is read from Windows.
 
+The stick also carries the camera tuning file from that MSI (`camera/` on SL7DATA).
+The live system hands it to the installer next to the firmware; on first boot of the
+installed system `omarchy-surface-sl7-camera-stage.service` keeps it under
+`/var/lib/omarchy-surface-sl7/camera/`, builds `/etc/libcamera/ipa/simple/ov02c10.yaml`
+with `sl7-camera-tuning --if-missing --quiet` and deletes the staged copy. Nothing of
+Microsoft's is in the ISO, the packages or the repository. Restart pipewire/wireplumber
+(or log out and in) once to use it.
+
 ## 3. Write the stick
 
 Packages on the build host (once): `sudo pacman -S --needed dosfstools mtools util-linux python github-cli`.

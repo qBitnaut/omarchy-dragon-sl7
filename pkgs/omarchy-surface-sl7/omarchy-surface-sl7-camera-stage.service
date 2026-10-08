@@ -1,0 +1,10 @@
+[Unit]
+Description=Build the front camera tuning from the file staged by the installer (omarchy-surface-sl7)
+ConditionPathExists=/var/lib/omarchy/firmware-stage/camera/com.surface.tuned.ffc_ov02c10.bin
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy-surface-sl7/camera-stage
+
+[Install]
+WantedBy=multi-user.target

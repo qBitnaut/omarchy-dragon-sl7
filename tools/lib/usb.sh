@@ -62,7 +62,7 @@ fw_copy() { # src-rel dst-rel
 }
 
 stage_firmware() {
-	local f r="qcom/x1e80100/microsoft/Romulus"
+	local f cam r="qcom/x1e80100/microsoft/Romulus"
 	[ -d "$FW_BASE" ] || die "MSI extraction not found at $FW_BASE (use --no-firmware to skip)"
 	info "Staging firmware from the local MSI extraction"
 	fw_copy qcdx8380/qcdxkmsuc8380.mbn qcom/x1e80100/microsoft/qcdxkmsuc8380.mbn
@@ -84,7 +84,17 @@ stage_firmware() {
 		) || die "firmware checksum mismatch against SHA256SUMS.extracted"
 		echo "    firmware sha256 verified against SHA256SUMS.extracted"
 	fi
-	find "$STAGE/firmware" -type f | sed "s#^$STAGE/##" | sort | sed 's/^/    /'
+	# The camera tuning (Microsoft's, from the same MSI) is not firmware: it rides along
+	# so the installed system can build its libcamera tuning at first boot. Optional.
+	cam="$(find "$FW_BASE" -type f -name com.surface.tuned.ffc_ov02c10.bin -print -quit)"
+	if [ -n "$cam" ]; then
+		mkdir -p "$STAGE/camera"
+		cp "$cam" "$STAGE/camera/"
+		echo "    camera tuning staged (webcam colour tuning is built from it on first boot)"
+	else
+		echo "    no camera tuning file in the extraction; the webcam stays untuned until you run sl7-camera-tuning" >&2
+	fi
+	find "$STAGE/firmware" "$STAGE/camera" -type f 2>/dev/null | sed "s#^$STAGE/##" | sort | sed 's/^/    /'
 }
 
 # ---------------------------------------------------------------- 3. write

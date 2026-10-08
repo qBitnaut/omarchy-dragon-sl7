@@ -180,6 +180,10 @@ installer copies them into the new system.
 
 PRIVACY AND LICENSE
 -------------------
+camera/ holds Microsoft's camera tuning file from the same package. The installed
+system builds the webcam's libcamera tuning from it at first boot and then deletes
+this staged copy.
+
 firmware/ contains Microsoft/Qualcomm firmware extracted from the Surface
 driver package. It is for your personal use on your own device only. Do NOT
 share, upload or copy this stick's firmware/ directory anywhere, and do not

@@ -14,6 +14,10 @@ _sl7_firmware_present() {
 # (the copy omarchy-surface-sl7-firmware kept) when it is not there yet.
 # Non-fatal: it must never block the transaction.
 _sl7_camera() {
+  # Clean installs: the installer copied the stick's camera file to the firmware
+  # stage; take it from there (omarchy-surface-sl7-camera-stage.service does the
+  # same at first boot if the copy happens after this scriptlet).
+  [[ -x $_sl7_dir/camera-stage ]] && "$_sl7_dir/camera-stage" || true
   [[ -f /var/lib/omarchy-surface-sl7/camera/com.surface.tuned.ffc_ov02c10.bin &&
     ! -e /etc/libcamera/ipa/simple/ov02c10.yaml ]] || return 0
   if /usr/bin/sl7-camera-tuning --if-missing --quiet; then

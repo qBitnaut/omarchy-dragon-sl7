@@ -30,7 +30,8 @@ jobs:
             sl7-firmware sl7-doctor set-boot-order surface-laptop-7.sh omarchy-surface-sl7.install \
             omarchy-sl7-repo-ensure 10-omarchy-sl7-repo sl7-ir-probe sl7-ir-emitter-test \
             sl7-usb-rpm sl7-park omarchy-sl7-powermode omarchy-sl7-test-entry \
-            omarchy-sl7-wifi-powersave.dispatcher sl7-camera-check omarchy-sl7-bag-guard
+            omarchy-sl7-wifi-powersave.dispatcher sl7-camera-check omarchy-sl7-bag-guard \
+            omarchy-surface-sl7-camera-stage
           luac5.4 -p guard-pro-audio.lua
           for f in sl7-vrr-rate sl7-proftop sl7-camera-tuning; do
             python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
@@ -110,6 +111,8 @@ jobs:
             usr/lib/omarchy-surface-sl7/update-uki-dtbs \
             usr/lib/systemd/system-sleep/omarchy-surface-sl7 \
             usr/bin/omarchy-surface-sl7-firmware \
+            usr/lib/omarchy-surface-sl7/camera-stage \
+            usr/lib/systemd/system/omarchy-surface-sl7-camera-stage.service \
             usr/bin/sl7-mac \
             usr/bin/sl7-doctor \
             usr/bin/omarchy-sl7-repo-ensure \
