@@ -196,6 +196,34 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
   the usual rules apply again (lift: wait `DragRelatchMs`, still: park, then release). With
   the bit low (tap and drag, parked drag) nothing changes. `DragDebug` logs `drag-keep`
   (contact lifted but firmware button still held) and `drag-keep-handoff`.
+- `0009-touchpad-haptic-intensity-and-click-force.patch` (applied in `prepare()`, after 0008):
+  adds `[Touchpad] HapticIntensity` (0 to 100, Windows `FeedbackIntensity`, Windows default
+  50) and `[Touchpad] ClickForce` (`low`, `medium` or `high`, Windows `ClickForceSensitivity`
+  0 / 50 / 100, Windows default medium). Both are unset by default and an unset key sends
+  nothing, so the firmware setting stays (`92-iptsd-sl7-tuning.conf` ships them commented
+  out with the Windows defaults). The reports are found in the HID descriptor by usage, not
+  by ID: click force is the Digitizer page Button Press Threshold (`0x0D` / `0xB0`) feature
+  report (SL7: ID `0x88`, 2 bits, logical 1..3 = low / medium / high), intensity the Haptics
+  page Intensity (`0x0E` / `0x23`) feature report (SL7: ID `0x87`, 8 bits, logical 0..100).
+  The field's bit position comes from the descriptor and the value is scaled onto its
+  logical range. They are sent, like Windows does, after iptsd enables multitouch at startup
+  and after every mode watchdog recovery (0004); each apply is logged at info level
+  (`Applied haptic intensity 50 (raw 50)`, `Applied click force medium (raw 2)`). A pad
+  without the report logs a warning once. To set them, put this in
+  `/etc/iptsd.d/94-local.conf` and run `sudo systemctl restart 'iptsd@*.service'`:
+
+  ```ini
+  [Device]
+  Vendor = 0x045E
+  Product = 0x0C77
+
+  [Touchpad]
+  HapticIntensity = 70
+  ClickForce = low
+  ```
+
+  Whether the firmware keeps the values across its own resets that iptsd cannot see is
+  untested; if the feel reverts, restart the unit.
 - Peak suppression (`Neutral`, `NeutralValue`, `PeakSuppressionRadius`,
   `PeakSuppressionFactor`) is already in the pinned fork (upstream iptsd PR #205,
   v3.1.0); the 92 file only enables it, with the Surface Laptop Studio 2 preset

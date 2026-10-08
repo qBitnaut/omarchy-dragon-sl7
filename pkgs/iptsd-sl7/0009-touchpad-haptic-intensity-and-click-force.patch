@@ -1,0 +1,445 @@
+daemon: Haptic intensity and click force settings for touchpads
+
+Windows sends two feature reports to a haptic touchpad when it enables the
+device (and again when the user changes the setting): the haptic feedback
+intensity and the click force. Linux never does, so the pad stays at whatever
+the firmware picked.
+
+Adds [Touchpad] HapticIntensity (0 to 100, the Windows FeedbackIntensity, whose
+default is 50) and [Touchpad] ClickForce (low, medium or high, the Windows
+ClickForceSensitivity 0 / 50 / 100, default medium). Both are unset by default,
+and an unset key sends nothing, so the firmware setting stays in place.
+
+The reports are found in the HID descriptor by usage, not by report ID: the
+click force is the Digitizer page Button Press Threshold (0x0D / 0xB0) feature
+report, the intensity the Haptics page Intensity (0x0E / 0x23) feature report.
+The bit position of the field follows from the fields in front of it and the
+value is scaled onto the logical range of the field (click force: low = minimum,
+medium = middle, high = maximum). A device without the report is logged once
+and otherwise ignored.
+
+Touchpads only. The settings are sent after the runner enables multitouch at
+startup and after every mode watchdog recovery (0004), the same moments Windows
+re-sends them. Every apply is logged at info level.
+
+diff --git i/etc/iptsd.conf w/etc/iptsd.conf
+index 1f3a611..e31df2b 100644
+--- i/etc/iptsd.conf
++++ w/etc/iptsd.conf
+@@ -116,6 +116,21 @@
+ ##
+ # DragDebug = false
+
++##
++## Haptic feedback (click strength) of the touchpad, from 0 to 100. Sent to the device when
++## iptsd starts and again after every multitouch re-enable (like Windows does). The Windows
++## default is 50. Unset: the setting of the device firmware is left alone. Ignored if the
++## device has no haptic intensity report.
++##
++# HapticIntensity = 50
++
++##
++## Click force (how hard the pad has to be pressed): low, medium or high. Sent together with
++## HapticIntensity. The Windows default is medium. Unset: the setting of the device firmware
++## is left alone. Ignored if the device has no click force report.
++##
++# ClickForce = medium
++
+ [Contacts]
+ ##
+ ## How the neutral value of the heatmap will be determined.
+diff --git i/src/core/generic/config.hpp w/src/core/generic/config.hpp
+index e9c1e04..74a6dd4 100644
+--- i/src/core/generic/config.hpp
++++ w/src/core/generic/config.hpp
+@@ -42,6 +42,8 @@ public:
+ 	f64 touchpad_drag_release_still_ms = 300;
+ 	f64 touchpad_drag_relatch_ms = 400;
+ 	bool touchpad_drag_debug = false;
++	f64 touchpad_haptic_intensity = -1;
++	std::string touchpad_click_force = "";
+
+ 	// [Contacts]
+ 	std::string contacts_neutral = "mode";
+diff --git i/src/core/linux/config-loader.hpp w/src/core/linux/config-loader.hpp
+index f8d98d3..435c864 100644
+--- i/src/core/linux/config-loader.hpp
++++ w/src/core/linux/config-loader.hpp
+@@ -168,6 +168,8 @@ private:
+ 		this->get(ini, "Touchpad", "DragReleaseStillMs", m_config.touchpad_drag_release_still_ms);
+ 		this->get(ini, "Touchpad", "DragRelatchMs", m_config.touchpad_drag_relatch_ms);
+ 		this->get(ini, "Touchpad", "DragDebug", m_config.touchpad_drag_debug);
++		this->get(ini, "Touchpad", "HapticIntensity", m_config.touchpad_haptic_intensity);
++		this->get(ini, "Touchpad", "ClickForce", m_config.touchpad_click_force);
+
+ 		this->get(ini, "Contacts", "Neutral", m_config.contacts_neutral);
+ 		this->get(ini, "Contacts", "NeutralValue", m_config.contacts_neutral_value);
+diff --git i/src/core/linux/runner.hpp w/src/core/linux/runner.hpp
+index 576c805..3b33753 100644
+--- i/src/core/linux/runner.hpp
++++ w/src/core/linux/runner.hpp
+@@ -15,11 +15,16 @@
+
+ #include <spdlog/spdlog.h>
+
++#include <algorithm>
+ #include <atomic>
++#include <cctype>
+ #include <chrono>
++#include <cmath>
+ #include <cstdlib>
+ #include <filesystem>
+ #include <memory>
++#include <optional>
++#include <string>
+ #include <string_view>
+ #include <thread>
+ #include <type_traits>
+@@ -85,6 +90,16 @@ private:
+ 	Clock::time_point m_last_touch {};
+ 	Clock::time_point m_last_mode_change {};
+
++	/*
++	 * Haptics (touchpads only): [Touchpad] HapticIntensity and ClickForce. Unset means the
++	 * firmware setting is left alone. Windows sends both whenever it (re)enables the device,
++	 * so they are applied at startup and after every multitouch re-enable.
++	 */
++	std::optional<u8> m_haptic_intensity = std::nullopt;
++	std::optional<ipts::Device::ClickForce> m_click_force = std::nullopt;
++	bool m_haptic_intensity_missing_logged = false;
++	bool m_click_force_missing_logged = false;
++
+ 	/*
+ 	 * deferred initialization
+ 	 */
+@@ -109,6 +124,9 @@ public:
+
+ 		m_buffer.resize(m_ipts.buffer_size());
+
++		if (info.type == ipts::Device::Type::Touchpad)
++			this->load_haptics(loader.config());
++
+ 		// IPTSD_MODE_WATCHDOG=0 turns the mode watchdog off.
+ 		const char *watchdog = std::getenv("IPTSD_MODE_WATCHDOG");
+ 		m_watchdog = info.type == ipts::Device::Type::Touchpad &&
+@@ -129,6 +147,92 @@ public:
+ 		}
+ 	}
+
++	/*!
++	 * Reads the haptic settings from the config. Invalid values are logged and ignored.
++	 */
++	void load_haptics(const Config &config)
++	{
++		const f64 intensity = config.touchpad_haptic_intensity;
++
++		if (intensity > 100)
++			spdlog::warn("Ignoring HapticIntensity {}: must be 0 to 100", intensity);
++		else if (intensity >= 0)
++			m_haptic_intensity = gsl::narrow_cast<u8>(std::lround(intensity));
++
++		std::string force = config.touchpad_click_force;
++		std::transform(force.begin(), force.end(), force.begin(), [](unsigned char c) {
++			return static_cast<char>(std::tolower(c));
++		});
++
++		if (force.empty())
++			return;
++
++		// Windows stores ClickForceSensitivity as 0 / 50 / 100.
++		if (force == "low" || force == "0")
++			m_click_force = ipts::Device::ClickForce::Low;
++		else if (force == "medium" || force == "50")
++			m_click_force = ipts::Device::ClickForce::Medium;
++		else if (force == "high" || force == "100")
++			m_click_force = ipts::Device::ClickForce::High;
++		else
++			spdlog::warn("Ignoring ClickForce '{}': must be low, medium or high", force);
++	}
++
++	static std::string_view click_force_name(const ipts::Device::ClickForce force)
++	{
++		switch (force) {
++		case ipts::Device::ClickForce::Low:
++			return "low";
++		case ipts::Device::ClickForce::High:
++			return "high";
++		default:
++			return "medium";
++		}
++	}
++
++	/*!
++	 * Sends the configured haptic settings to the device.
++	 *
++	 * Does nothing if neither is configured. A device without the matching report is logged
++	 * once, a failing write is logged every time and never stops the daemon.
++	 */
++	void apply_haptics()
++	{
++		if (m_haptic_intensity.has_value()) {
++			try {
++				const auto raw = m_ipts.set_haptic_intensity(m_haptic_intensity.value());
++
++				if (raw.has_value()) {
++					spdlog::info("Applied haptic intensity {} (raw {})",
++						     m_haptic_intensity.value(), raw.value());
++				} else if (!m_haptic_intensity_missing_logged) {
++					spdlog::warn("HapticIntensity is set, but the device has no "
++						     "haptic intensity report");
++					m_haptic_intensity_missing_logged = true;
++				}
++			} catch (const std::exception &e) {
++				spdlog::warn("Failed to set haptic intensity: {}", e.what());
++			}
++		}
++
++		if (m_click_force.has_value()) {
++			try {
++				const auto raw = m_ipts.set_click_force(m_click_force.value());
++
++				if (raw.has_value()) {
++					spdlog::info("Applied click force {} (raw {})",
++						     click_force_name(m_click_force.value()), raw.value());
++				} else if (!m_click_force_missing_logged) {
++					spdlog::warn("ClickForce is set, but the device has no "
++						     "click force report");
++					m_click_force_missing_logged = true;
++				}
++			} catch (const std::exception &e) {
++				spdlog::warn("Failed to set click force: {}", e.what());
++			}
++		}
++	}
++
+ 	/*!
+ 	 * Handles a report that is only sent outside multitouch mode.
+ 	 *
+@@ -170,6 +274,7 @@ public:
+ 		m_ipts.set_mode(ipts::Device::Mode::Singletouch);
+ 		std::this_thread::sleep_for(50ms);
+ 		m_ipts.set_mode(ipts::Device::Mode::Multitouch);
++		this->apply_haptics();
+
+ 		m_last_mode_change = Clock::now();
+ 		return true;
+@@ -213,6 +318,7 @@ public:
+
+ 		// Enable multitouch mode
+ 		m_ipts.set_mode(ipts::Device::Mode::Multitouch);
++		this->apply_haptics();
+ 		m_last_mode_change = Clock::now();
+
+ 		// Signal the application that the data flow has started.
+diff --git i/src/ipts/descriptor.hpp w/src/ipts/descriptor.hpp
+index 8cc13b9..4c888ae 100644
+--- i/src/ipts/descriptor.hpp
++++ w/src/ipts/descriptor.hpp
+@@ -71,6 +71,26 @@ public:
+ 		return m_hid_descriptor.find_report(protocol::descriptor::is_metadata);
+ 	}
+
++	/*!
++	 * Searches for the click force (Button Press Threshold) feature report.
++	 *
++	 * @return The HID report for setting the click force if it exists, null otherwise.
++	 */
++	[[nodiscard]] std::optional<hid::Report> find_click_force_report() const
++	{
++		return m_hid_descriptor.find_report(protocol::descriptor::is_click_force);
++	}
++
++	/*!
++	 * Searches for the haptic intensity feature report.
++	 *
++	 * @return The HID report for setting the haptic intensity if it exists, null otherwise.
++	 */
++	[[nodiscard]] std::optional<hid::Report> find_haptic_intensity_report() const
++	{
++		return m_hid_descriptor.find_report(protocol::descriptor::is_haptic_intensity);
++	}
++
+ 	/*!
+ 	 * Whether the HID descriptor indicates that this device is a touchscreen.
+ 	 */
+diff --git i/src/ipts/device.hpp w/src/ipts/device.hpp
+index 1c801d1..513d9b0 100644
+--- i/src/ipts/device.hpp
++++ w/src/ipts/device.hpp
+@@ -15,6 +15,7 @@
+ #include <gsl/gsl>
+
+ #include <algorithm>
++#include <cmath>
+ #include <functional>
+ #include <memory>
+ #include <optional>
+@@ -57,6 +58,13 @@ public:
+ 		Touchpad,
+ 	};
+
++	//! Windows ClickForceSensitivity: low / medium / high map to logical min / mid / max.
++	enum class ClickForce : u8 {
++		Low,
++		Medium,
++		High,
++	};
++
+ private:
+ 	// The (platform specific) HID device interface
+ 	std::shared_ptr<hid::Device> m_hid;
+@@ -185,6 +193,102 @@ public:
+ 		m_hid->set_feature(buffer);
+ 	}
+
++	/*!
++	 * Sets the intensity of the haptic feedback (click strength), if the device supports it.
++	 *
++	 * The report is located by its usage (Haptics page, Intensity), the value is scaled onto
++	 * the logical range of the field.
++	 *
++	 * @param[in] percent The intensity from 0 to 100 (the Windows FeedbackIntensity).
++	 * @return The raw value that was sent, or null if the device has no such report.
++	 */
++	[[nodiscard]] std::optional<u32> set_haptic_intensity(const u8 percent) const
++	{
++		return write_feature(m_descriptor.find_haptic_intensity_report(),
++				     protocol::descriptor::USAGE_PAGE_HAPTICS,
++				     protocol::descriptor::USAGE_HAPTIC_INTENSITY,
++				     std::min<f64>(percent, 100.0) / 100.0);
++	}
++
++	/*!
++	 * Sets the click force (the pressure needed for a click), if the device supports it.
++	 *
++	 * The report is located by its usage (Digitizer page, Button Press Threshold), low /
++	 * medium / high are mapped to the minimum / middle / maximum of its logical range.
++	 *
++	 * @param[in] force The click force.
++	 * @return The raw value that was sent, or null if the device has no such report.
++	 */
++	[[nodiscard]] std::optional<u32> set_click_force(const ClickForce force) const
++	{
++		f64 fraction = 0.5;
++
++		if (force == ClickForce::Low)
++			fraction = 0.0;
++		else if (force == ClickForce::High)
++			fraction = 1.0;
++
++		return write_feature(m_descriptor.find_click_force_report(),
++				     protocol::descriptor::USAGE_PAGE_DIGITIZER,
++				     protocol::descriptor::USAGE_BUTTON_PRESS_THRESHOLD,
++				     fraction);
++	}
++
++private:
++	/*!
++	 * Writes one field of a feature report, leaving all other bits of the report at zero.
++	 *
++	 * The bit position of the field follows from the sizes of the fields in front of it, the
++	 * report ID is the first byte of the buffer and not part of the payload.
++	 *
++	 * @param[in] report The feature report that contains the field.
++	 * @param[in] page The Usage Page of the field.
++	 * @param[in] id The Usage ID of the field.
++	 * @param[in] fraction Where in the logical range of the field the value lies (0 to 1).
++	 * @return The raw value that was sent, or null if the report or the field is not usable.
++	 */
++	std::optional<u32> write_feature(const std::optional<hid::Report> &report,
++					 const u16 page,
++					 const u16 id,
++					 const f64 fraction) const
++	{
++		if (!report.has_value() || !report->report_id.has_value())
++			return std::nullopt;
++
++		usize offset = 0;
++
++		for (const hid::Field &field : report->fields) {
++			if (!field.has_usage(page, id)) {
++				offset += field.bits();
++				continue;
++			}
++
++			if (field.count != 1 || field.size == 0 || field.size > 32 ||
++			    field.logical_max < field.logical_min)
++				return std::nullopt;
++
++			const f64 span = static_cast<f64>(field.logical_max - field.logical_min);
++			const u32 value = field.logical_min + static_cast<u32>(std::lround(span * fraction));
++
++			std::vector<u8> buffer(report->bytes() + 1, 0);
++			buffer[0] = report->report_id.value();
++
++			for (u32 bit = 0; bit < field.size; bit++) {
++				if (((value >> bit) & 1u) == 0)
++					continue;
++
++				const usize pos = offset + bit;
++				buffer[1 + pos / 8] = gsl::narrow<u8>(buffer[1 + pos / 8] | (1u << (pos % 8)));
++			}
++
++			m_hid->set_feature(buffer);
++			return value;
++		}
++
++		return std::nullopt;
++	}
++
++public:
+ 	/*!
+ 	 * Checks whether a buffer contains IPTS touch data.
+ 	 *
+diff --git i/src/ipts/protocol/descriptor.hpp w/src/ipts/protocol/descriptor.hpp
+index f8eb97f..6ad2d5e 100644
+--- i/src/ipts/protocol/descriptor.hpp
++++ w/src/ipts/protocol/descriptor.hpp
+@@ -14,6 +14,7 @@ namespace hid = iptsd::hid;
+
+ constexpr u16 USAGE_PAGE_BUTTON = 0x0009;
+ constexpr u16 USAGE_PAGE_DIGITIZER = 0x000D;
++constexpr u16 USAGE_PAGE_HAPTICS = 0x000E;
+ constexpr u16 USAGE_PAGE_VENDOR = 0xFF00;
+
+ constexpr u8 USAGE_TOUCHSCREEN = 0x04;
+@@ -23,6 +24,8 @@ constexpr u8 USAGE_SCAN_TIME = 0x56;
+ constexpr u8 USAGE_GESTURE_DATA = 0x61;
+ constexpr u8 USAGE_SET_MODE = 0xC8;
+ constexpr u8 USAGE_METADATA = 0x63;
++constexpr u8 USAGE_BUTTON_PRESS_THRESHOLD = 0xB0;
++constexpr u8 USAGE_HAPTIC_INTENSITY = 0x23;
+
+ constexpr u16 USAGE_BUTTON_1 = 0x0001;
+
+@@ -78,6 +81,30 @@ inline bool is_metadata(const hid::Report &report)
+ 	       report.has_usage(USAGE_PAGE_DIGITIZER, USAGE_METADATA);
+ }
+
++/*!
++ * Checks if a given report sets the click force (Button Press Threshold) of the device.
++ *
++ * @param[in] report The report to check.
++ * @return Whether the report matches the properties for a click force report.
++ */
++inline bool is_click_force(const hid::Report &report)
++{
++	return report.type == hid::Report::Type::Feature &&
++	       report.has_usage(USAGE_PAGE_DIGITIZER, USAGE_BUTTON_PRESS_THRESHOLD);
++}
++
++/*!
++ * Checks if a given report sets the intensity of the haptic feedback of the device.
++ *
++ * @param[in] report The report to check.
++ * @return Whether the report matches the properties for a haptic intensity report.
++ */
++inline bool is_haptic_intensity(const hid::Report &report)
++{
++	return report.type == hid::Report::Type::Feature &&
++	       report.has_usage(USAGE_PAGE_HAPTICS, USAGE_HAPTIC_INTENSITY);
++}
++
+ /*!
+  * Checks if a given collection indicates that this device is a touchscreen.
+  *
