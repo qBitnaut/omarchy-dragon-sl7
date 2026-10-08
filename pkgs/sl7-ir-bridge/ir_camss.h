@@ -41,6 +41,14 @@ int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h);
  * killed bridge never undid them). Links that are in use stay. Returns the
  * number released, or -errno. */
 int ir_camss_release_stale(void);
+/* After a link enable kept failing with EBUSY: list the processes that hold
+ * the IR path's device nodes open (the video node, the sensor and the CSID/VFE
+ * subdevs) or the CAMSS media device, found by scanning /proc/<pid>/fd. One
+ * line per holder is appended to out (NUL terminated, truncated to len). Needs
+ * CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH to see other users' processes; the
+ * ones it could not inspect are counted in the last line. Returns the number
+ * of holders, or -errno when the IR path could not be resolved. */
+int ir_camss_find_holders(char *out, size_t len);
 /* Queue all buffers and VIDIOC_STREAMON. This is what powers the sensor. */
 int ir_camss_start(struct ir_camss *c);
 /* Dequeue one frame: -EAGAIN when none is ready. The frame stays owned by the

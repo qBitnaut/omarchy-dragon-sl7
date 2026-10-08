@@ -31,6 +31,8 @@ DROPIN_DIR=${SL7_DROPIN_DIR:-/etc/systemd/system/polkit-agent-helper@.service.d}
 DROPIN_NAME=10-sl7-faceunlock.conf
 CAMERA=${SL7_CAMERA:-/dev/v4l/by-id/sl7-ir-camera}
 BRIDGE_UNIT=${SL7_BRIDGE_UNIT:-sl7-ir-bridge.service}
+# written by sl7-ir-bridge when its session starts have failed with EBUSY for 30 s
+BRIDGE_BUSY_FILE=${SL7_BRIDGE_BUSY_FILE:-/run/sl7-ir-bridge/ebusy}
 DRY_RUN=${SL7_DRY_RUN:-0}
 
 # Defaults the wizard applies to howdy-next (README: tune on the device). The

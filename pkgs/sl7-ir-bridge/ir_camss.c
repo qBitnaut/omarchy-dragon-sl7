@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define SENSOR_PREFIX "vd55g"
@@ -572,6 +573,138 @@ int ir_camss_release_stale(void)
 out:
 	close(c.media_fd);
 	return rc;
+}
+
+#define HOLDER_NODES (IR_MAX_HOPS * 2 + 4)
+
+struct holder_node {
+	char path[128];
+	const char *what;
+};
+
+static void holder_add(struct holder_node *n, unsigned *cnt, const char *path, const char *what)
+{
+	unsigned i;
+
+	for (i = 0; i < *cnt; i++)
+		if (!strcmp(n[i].path, path))
+			return;
+	if (*cnt >= HOLDER_NODES)
+		return;
+	snprintf(n[*cnt].path, sizeof(n[*cnt].path), "%s", path);
+	n[*cnt].what = what;
+	(*cnt)++;
+}
+
+int ir_camss_find_holders(char *out, size_t len)
+{
+	struct holder_node nodes[HOLDER_NODES];
+	struct ir_camss c;
+	struct topo t;
+	uint32_t video_ent = 0, sensor_ent = 0;
+	unsigned nn = 0, i, found = 0, denied = 0;
+	char node[128];
+	DIR *proc;
+	struct dirent *pe;
+	size_t used = 0;
+	int rc;
+
+	if (!out || !len)
+		return -EINVAL;
+	out[0] = 0;
+	ir_camss_init(&c);
+	rc = find_camss_media(c.media_path, sizeof(c.media_path));
+	if (rc < 0)
+		return rc;
+	c.media_fd = rc;
+	rc = topo_load(c.media_fd, &t);
+	if (rc < 0) {
+		close(c.media_fd);
+		return rc;
+	}
+	rc = plan_path(&t, &c, &video_ent, &sensor_ent);
+	if (rc == 0) {
+		holder_add(nodes, &nn, c.media_path, "CAMSS media device, shared with the RGB camera");
+		if (entity_devnode(&t, video_ent, node, sizeof(node)) == 0)
+			holder_add(nodes, &nn, node, "IR video node");
+		if (entity_devnode(&t, sensor_ent, node, sizeof(node)) == 0)
+			holder_add(nodes, &nn, node, "IR sensor subdev");
+		for (i = 0; i < c.nhops; i++) {
+			if (entity_devnode(&t, c.hops[i].src_ent, node, sizeof(node)) == 0)
+				holder_add(nodes, &nn, node, "IR path subdev");
+			if (entity_devnode(&t, c.hops[i].sink_ent, node, sizeof(node)) == 0)
+				holder_add(nodes, &nn, node, "IR path subdev");
+		}
+	}
+	topo_free(&t);
+	close(c.media_fd);
+	if (rc < 0)
+		return rc;
+
+	proc = opendir("/proc");
+	if (!proc)
+		return -errno;
+	while ((pe = readdir(proc)) != NULL) {
+		char *end, p[64], lp[96], tgt[160], comm[32] = "?";
+		long pid = strtol(pe->d_name, &end, 10);
+		unsigned mask = 0;
+		int have_info = 0;
+		long uid = -1;
+		DIR *fdd;
+		struct dirent *fe;
+
+		if (*end || pid <= 0 || pid == (long)getpid())
+			continue;
+		snprintf(p, sizeof(p), "/proc/%ld/fd", pid);
+		fdd = opendir(p);
+		if (!fdd) {
+			if (errno == EACCES || errno == EPERM)
+				denied++;
+			continue;
+		}
+		while ((fe = readdir(fdd)) != NULL) {
+			ssize_t n;
+
+			if (fe->d_name[0] == '.')
+				continue;
+			snprintf(lp, sizeof(lp), "/proc/%ld/fd/%.20s", pid, fe->d_name);
+			n = readlink(lp, tgt, sizeof(tgt) - 1);
+			if (n <= 0)
+				continue;
+			tgt[n] = 0;
+			for (i = 0; i < nn; i++) {
+				if (strcmp(tgt, nodes[i].path) != 0 || (mask & (1u << i)))
+					continue;
+				mask |= 1u << i;
+				if (!have_info) {
+					struct stat st;
+					FILE *f;
+
+					have_info = 1;
+					snprintf(p, sizeof(p), "/proc/%ld/comm", pid);
+					f = fopen(p, "re");
+					if (f) {
+						if (fgets(comm, sizeof(comm), f))
+							comm[strcspn(comm, "\n")] = 0;
+						fclose(f);
+					}
+					snprintf(p, sizeof(p), "/proc/%ld", pid);
+					if (stat(p, &st) == 0)
+						uid = (long)st.st_uid;
+				}
+				if (used < len)
+					used += (size_t)snprintf(out + used, len - used,
+								 "pid %ld (%s) uid %ld holds %s (%s)\n", pid, comm,
+								 uid, nodes[i].path, nodes[i].what);
+				found++;
+			}
+		}
+		closedir(fdd);
+	}
+	closedir(proc);
+	if (denied && used < len)
+		snprintf(out + used, len - used, "%u process(es) could not be inspected\n", denied);
+	return (int)found;
 }
 
 int ir_camss_queue(struct ir_camss *c, unsigned index)

@@ -419,5 +419,21 @@ else
   printf 'INFO  Iris: v4l2-ctl (v4l-utils) not installed; checked /sys/class/video4linux only\n'
 fi
 
+# IR bridge lock-up. sl7-ir-bridge writes this file when its session starts have
+# failed with EBUSY for 30 s (something else, usually PipeWire/WirePlumber
+# through libcamera, holds the IR camera path); the service removes it when it
+# stops. The directory exists while the service runs.
+ir_busy=${SL7_IR_BRIDGE_BUSY:-/run/sl7-ir-bridge/ebusy}
+if [[ -r $ir_busy ]]; then
+  busy_since=$(sed -n 's/^since=//p' "$ir_busy")
+  fail "sl7-ir-bridge is stuck in EBUSY since $(date -d "@${busy_since:-0}" '+%F %T' 2>/dev/null || echo '?'): something holds the IR camera path and face unlock fails. Fix: systemctl --user restart pipewire wireplumber; sudo systemctl restart sl7-ir-bridge"
+  while IFS= read -r busy_line; do
+    printf 'INFO  IR bridge holder: %s\n' "$busy_line"
+  done < <(sed -n '3,$p' "$ir_busy")
+  printf 'INFO  IR bridge: details: journalctl -u sl7-ir-bridge -b | grep -E "busy|holder"\n'
+elif [[ -d ${ir_busy%/*} ]]; then
+  pass "sl7-ir-bridge is not stuck in EBUSY"
+fi
+
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
 ((fails == 0))

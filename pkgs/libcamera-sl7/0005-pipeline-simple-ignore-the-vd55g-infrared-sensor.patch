@@ -1,0 +1,53 @@
+From 0a1b2c3d4e5f60718293a4b5c6d7e8f901234567 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 14:40:00 -0500
+Subject: [PATCH] pipeline: simple: ignore the vd55g infrared sensor
+
+On the Surface Laptop 7 the qcom-camss media device carries two sensors:
+the OV02C10 front camera and the VD55G0 infrared camera that
+sl7-ir-bridge drives for face unlock. The simple pipeline handler
+registered both, so a libcamera client (PipeWire through WirePlumber,
+cam, a browser) that acquired the infrared camera enabled and streamed
+its links, and the bridge then failed with "enable link: Device or
+resource busy". The infrared sensor is not usable by the software ISP
+anyway (mono, no tuning). Skip sensors whose entity name starts with
+vd55g in locateSensors(), so the RGB camera is always camera 1.
+
+Signed-off-by: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+---
+ src/libcamera/pipeline/simple/simple.cpp | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index e26f438..c07cad3 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1782,8 +1782,24 @@
+ 	 * expose.
+ 	 */
+ 	for (MediaEntity *entity : media->entities()) {
+-		if (entity->function() == MEDIA_ENT_F_CAM_SENSOR)
+-			entities.push_back(entity);
++		if (entity->function() != MEDIA_ENT_F_CAM_SENSOR)
++			continue;
++
++		/*
++		 * Surface Laptop 7: the infrared camera (ST VD55G0, a mono
++		 * global shutter sensor on its own CSIPHY and CSID) is driven
++		 * by sl7-ir-bridge for face unlock. It is not a camera for the
++		 * software ISP, and a libcamera client that acquires it holds
++		 * the media links the bridge needs. Do not expose it.
++		 */
++		if (entity->name().compare(0, 5, "vd55g") == 0) {
++			LOG(SimplePipeline, Info)
++				<< "Ignoring infrared sensor '" << entity->name()
++				<< "'";
++			continue;
++		}
++
++		entities.push_back(entity);
+ 	}
+
+ 	if (entities.empty())
+--
+2.50.0

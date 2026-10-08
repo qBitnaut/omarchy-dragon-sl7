@@ -24,6 +24,17 @@ bridge_state() {
   printf '%s' "${out:-inactive}"
 }
 
+# stuck | ok. Stuck: the bridge could not start a session for 30 s because
+# something else (usually PipeWire/WirePlumber through libcamera) holds the IR
+# camera path; face unlock fails until it is released.
+bridge_busy_state() {
+  if [[ -e $BRIDGE_BUSY_FILE ]]; then
+    printf 'stuck'
+  else
+    printf 'ok'
+  fi
+}
+
 # missing | unreadable | ok. The lock screen runs PAM in the user's own
 # process, so the user (not just root) must be able to open the node.
 camera_state() {

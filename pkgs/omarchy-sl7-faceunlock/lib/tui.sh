@@ -25,14 +25,14 @@ status_json() {
   jq -n --arg user "$user" \
     --argjson installed "$(howdy_installed && echo true || echo false)" \
     --arg version "$(howdy_version 2>/dev/null)" \
-    --arg bridge "$(bridge_state)" \
+    --arg bridge "$(bridge_state)" --arg bridge_busy "$(bridge_busy_state)" \
     --arg camera_path "$CAMERA" --arg camera "$(camera_state)" \
     --arg emitter "$(emitter_state)" --arg lid "$lid" \
     --argjson faces "${faces:-[]}" --argjson stacks "$stacks" \
     --arg lock_plugin "$lock_state" \
     --argjson lock_patched "$(lock_patched && echo true || echo false)" \
     '{user: $user, howdy: {installed: $installed, version: $version},
-      bridge: $bridge, camera: {path: $camera_path, state: $camera},
+      bridge: $bridge, bridge_busy: ($bridge_busy == "stuck"), camera: {path: $camera_path, state: $camera},
       emitter: $emitter, lid: $lid, faces: $faces, stacks: $stacks,
       lock_plugin: {state: $lock_plugin, patched: $lock_patched}}'
 }
@@ -61,6 +61,11 @@ status_text() {
   inactive) mark warn "IR bridge service: not running (start it: sudo systemctl start sl7-ir-bridge)" ;;
   *) mark bad "IR bridge service: not installed" ;;
   esac
+  if [[ $(bridge_busy_state) == stuck ]]; then
+    mark bad "IR bridge is stuck: something holds the IR camera path (EBUSY), so face unlock fails"
+    say "      fix: systemctl --user restart pipewire wireplumber; sudo systemctl restart sl7-ir-bridge"
+    sed -n '3,$p' "$BRIDGE_BUSY_FILE" 2>/dev/null | while IFS= read -r s; do say "      holder: $s"; done
+  fi
   s=$(camera_state)
   case $s in
   ok) mark good "camera reachable: $CAMERA" ;;

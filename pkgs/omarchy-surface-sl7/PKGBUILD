@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=51
+pkgrel=52
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -24,7 +24,7 @@ optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarch
             'v4l-utils: media-ctl and v4l2-ctl for sl7-ir-probe and sl7-ir-lab'
             'pciutils: lspci in sl7-sleepstats --trace'
             'libcamera-tools: cam and qcam to test the webcam, and sl7-camera-check'
-            'libcamera>=0.7.2-4.1: the OV02C10 sensor helper (omarchy-sl7 repository build) for the webcam'
+            'libcamera>=0.7.2-4.3: the OV02C10 sensor helper and the hidden IR camera (omarchy-sl7 repository build) for the webcam'
             'pipewire-libcamera: the webcam in browsers and video calls'
             'imagemagick: PNG output in sl7-camera-check'
             'gtk4: the sl7-ir-lab window'
@@ -108,7 +108,8 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'omarchy-surface-sl7-bag-guard.service'
         'bag-guard.conf'
         'omarchy-surface-sl7-camera-stage'
-        'omarchy-surface-sl7-camera-stage.service')
+        'omarchy-surface-sl7-camera-stage.service'
+        '51-omarchy-surface-sl7-ir-camera.conf')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -124,7 +125,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8c483b94075a56d5fad7628bd8f548b8384c3a7f944611c68b00f08fce759d43'
             '129dbf0c44b1d841da5203a50a3603bfbe9f87cd86940f87de8618d4d2b245ab'
             '74850086b1b946293ea7812764ea1633b3e509d38dd6f46265987e9868f48f18'
-            '1990463034e65a78933ee4dd5d02263c6f3f261b31e77e0f321c94eb0332ef60'
+            'cd72f1a9003830c853b54d28e09c0f4556f249e6d03cd5177c42fe39b2dd95d9'
             '64a6520c18dae8205e6802e7081a831a943412e4d5c7ef4d5f4cd81d1a9800d5'
             'b2b08c6b796cc43f3b807b9c083bb906577edfa7027a588867f9488fa92a439c'
             '897147e955439937365d1ae2e44c051faada34cf75684e9f74b391c73219585a'
@@ -136,7 +137,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             'ca8d09a8500c6bef7817d436fee54c1f56a2fdcf2a264e280debb60a922852eb'
             'eb0d712fd5d1cf085baf5434b332e4937f1ba24e5773e45c2597d85ec8e4b158'
             'e2671c83d613ef666e2739d2ac2c8685d880686986799e394920f325d9ea3c1d'
-            '8d2b11f322b7cf21e28a2403ac512269659b00ff7f88f967239cd73901f1c7bb'
+            '0e8d8223631d7278dedacc1a98eef5ef0485679e1e6c1832941e31ed6a134d4e'
             'b44de31d1069341320fa45c90745a64bd3f9d3e53d83fce54eca5d18b4698b3b'
             'f2df38245295849fbd43d38248f14301256d5fa5ff4b9b3f6ac313f8c04c460c'
             '0ebe0fc73784fa36f450a16276ecf3574bc5ad08fbe50e05d2f55032791b9d59'
@@ -172,12 +173,13 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '84d9b78366b4cb6620833331422dc200b3327300ba698d5def9ba562e41d864f'
             '62e225ffc67c113ba344e0c0369870343a7685a81cbb72b4e90f46598363769b'
             'e6a2ce4efd24557c08b2c7cd2469e862b00aebc7b8b7cd3184ce31e753d55af8'
-            '5396224d70d0b05704358fb05ac9bc935a7767ad2c64b36c09ab12c80c3eaedd'
+            '94da4e846ec73a6752daf65de5fcb1c9be2fa433764962e6f3cfbf8fef91609a'
             '5bad7ac7f4318eba6743623339ed3d0abd76fbf9ad06ccfe67d72f113ca4d1a1'
             '4aead7533a13e2774a6cb0347bc3e3bb923c04f021fa7e27217588e27a0a1f71'
             '6ef7d9f902a3361333e52a78caca27d0d4fc574ed8a1a7d5c166f768a270e95a'
             'dabf2db2200e5ed537a3b52e73fd029b9d8235d99fe93846e7563b58bbe5d031'
-            '93de124366cf20d310560e6c369f6bacc822980106c985533d829d7f6179bda2')
+            '93de124366cf20d310560e6c369f6bacc822980106c985533d829d7f6179bda2'
+            '07d113461098cf92c7a00b591228640629f2c7b8f77b6b1c9e974161117d9a9c')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -254,6 +256,10 @@ package() {
     "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf"
   install -Dm644 guard-pro-audio.lua \
     "$pkgdir/usr/share/wireplumber/scripts/omarchy-surface-sl7/guard-pro-audio.lua"
+
+  # 6b. keep the IR camera and its loopback out of PipeWire (sl7-ir-bridge owns them)
+  install -Dm644 51-omarchy-surface-sl7-ir-camera.conf \
+    "$pkgdir/usr/share/wireplumber/wireplumber.conf.d/51-omarchy-surface-sl7-ir-camera.conf"
 
   # 7. firmware installer (no firmware in this package)
   install -Dm755 omarchy-surface-sl7-firmware "$pkgdir/usr/bin/omarchy-surface-sl7-firmware"

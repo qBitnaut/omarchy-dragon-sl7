@@ -79,6 +79,27 @@ starts it releases IR path links that a killed predecessor left enabled (links i
 (later) the session is stopped. If the loopback disappears the daemon exits and
 systemd restarts it.
 
+## Stuck in EBUSY
+
+If session starts keep failing with `EBUSY` (the bridge cannot enable the IR path links
+because another process holds the path), the bridge notes the first failure and, once the
+failures span 30 s (`BUSY_REPORT_MS`), does three things, once per episode:
+
+- logs `the IR path has been busy for N s` and one `busy holder: pid P (name) uid U holds
+  /dev/videoN (IR video node)` line per process that has the IR video node, the IR sensor or
+  CSID/VFE subdevs, or the CAMSS media device open (found by scanning `/proc/<pid>/fd`; the media
+  device is shared with the RGB camera, so a camera application shows up there legitimately),
+  or a note that no process holds it (a stream whose owner is gone) or that some processes could
+  not be inspected;
+- logs the fix: `systemctl --user restart pipewire wireplumber`, then `sudo systemctl restart
+  sl7-ir-bridge`;
+- writes `/run/sl7-ir-bridge/ebusy` (`since=<unix time>`, `holders=<n>`, then the holder lines)
+  for `sl7-doctor` and `omarchy-sl7-faceunlock status`.
+
+The file is removed at the next successful session, when a start fails for another reason, or
+when the service stops (it lives in the unit's `RuntimeDirectory`). The retries only happen while
+a consumer is waiting, so after the holder is gone the flag stays until the next face scan.
+
 ## Self test
 
 ```
@@ -130,11 +151,15 @@ at most 10 s per session.
 
 ## Sandbox
 
-Root with an empty capability set, `NoNewPrivileges`, `DevicePolicy=closed` with
+Root with only `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH` (to read other users' `/proc/<pid>/fd`
+for the EBUSY report; the syscall filter still has no `ptrace`, and `open_by_handle_at` is denied),
+`NoNewPrivileges`, `DevicePolicy=closed` with
 `DeviceAllow` for `char-media` and `char-video4linux` only, `ProtectSystem=strict`,
 `ProtectHome`, `PrivateTmp`, `PrivateNetwork`, the kernel and clock protections,
 `MemoryDenyWriteExecute`, a `@system-service` syscall filter without `@privileged`
-and `@resources`, `MemoryMax=64M`. `systemd-analyze security` rates it 1.1 OK.
+and `@resources`, `MemoryMax=64M`, and a `RuntimeDirectory` (`/run/sl7-ir-bridge`) for the EBUSY
+flag file. `ProtectProc=invisible` is gone (it hid the processes it must inspect). `systemd-analyze
+security` was 1.1 OK before these changes; not re-measured.
 It restarts on failure with no start limit.
 
 ## Known limits
@@ -148,8 +173,11 @@ It restarts on failure with no start limit.
   leave the bridge waiting.
 - The default udev rules give the CAMSS and subdev nodes to group `video`. The
   emitter plan wants them root-only; that is a separate udev change.
-- Browsers and PipeWire will list "SL7 IR Camera". A WirePlumber rule that hides
-  it (and the raw CAMSS node) is still to do.
+- PipeWire and browsers must not hold the IR path or the loopback. `libcamera-sl7`
+  0.7.2-4.3 no longer registers the IR sensor, and `omarchy-surface-sl7` ships a
+  WirePlumber drop-in that hides the `qcom-camss` video nodes and "SL7 IR Camera" from
+  PipeWire (see "Stuck in EBUSY" below). Chromium's own V4L2 enumeration (without the
+  PipeWire camera flag) can still list the loopback.
 - Lit frames at Windows' 100 line exposure are dim (stage C: mean 20 of 255, p99 38 at
   default gain). The face detector thresholds in omarchy-sl7-faceunlock are set for that.
 - Not run on hardware: only the repacking logic is unit tested (`make check`).

@@ -45,6 +45,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define VERSION "0.1.0"
@@ -60,6 +62,11 @@
 #define RETRY_MAX_SHIFT 2	/* retry delay 5 s, 10 s, 20 s, then stays at 20 s */
 #define CAPPED_RESYNC_MS 1000
 #define MAX_LB_ERRORS 100
+/* Session starts failing with EBUSY for this long: say who holds the IR path
+ * (once) and leave a flag file for sl7-doctor and omarchy-sl7-faceunlock. The
+ * unit's RuntimeDirectory removes the file when the bridge stops. */
+#define BUSY_REPORT_MS 30000
+#define BUSY_STATE_FILE "/run/sl7-ir-bridge/ebusy"
 
 struct bridge {
 	int lb_fd;
@@ -71,6 +78,8 @@ struct bridge {
 	bool seen_frame;
 	int64_t t_start, t_last_frame, t_first_frame, stop_at, retry_at, resync_at;
 	unsigned start_failures;	/* consecutive failed session starts */
+	int64_t busy_since;	/* first of the consecutive EBUSY starts, 0 = none */
+	bool busy_reported;	/* holders logged and the flag file written */
 	uint64_t frames, dropped;
 	unsigned lb_errors;
 	int64_t grace_ms, session_max_ms;
@@ -267,6 +276,60 @@ static int session_start(struct bridge *b)
 	return 0;
 }
 
+static void busy_clear(struct bridge *b)
+{
+	if (b->busy_reported) {
+		unlink(BUSY_STATE_FILE);
+		ir_log(IR_LOG_INFO, "the IR path is no longer busy");
+	}
+	b->busy_since = 0;
+	b->busy_reported = false;
+}
+
+/* A session start failed with EBUSY. After BUSY_REPORT_MS of it, log the
+ * likely holder once and write the flag file. */
+static void busy_note(struct bridge *b, int64_t now)
+{
+	char holders[2048];
+	char *line, *save = NULL;
+	int n;
+	FILE *f;
+
+	if (!b->busy_since) {
+		b->busy_since = now;
+		return;
+	}
+	if (b->busy_reported || now - b->busy_since < BUSY_REPORT_MS)
+		return;
+	b->busy_reported = true;
+	ir_log(IR_LOG_ERR, "the IR path has been busy for %lld s (EBUSY enabling its links): "
+	       "something else holds it open or streams it",
+	       (long long)((now - b->busy_since) / 1000));
+	n = ir_camss_find_holders(holders, sizeof(holders));
+	if (n < 0) {
+		ir_log(IR_LOG_ERR, "cannot look for the holder: %s", strerror(-n));
+		holders[0] = 0;
+	} else if (n == 0) {
+		ir_log(IR_LOG_ERR, "no process holds the IR video node, its subdevs or the CAMSS "
+		       "media device open (the holder may be inside the kernel: a stream whose "
+		       "owner is gone)");
+	}
+	f = fopen(BUSY_STATE_FILE, "we");
+	if (f) {
+		fchmod(fileno(f), 0644);
+		fprintf(f, "since=%lld\nholders=%d\n",
+			(long long)time(NULL) - (long long)((now - b->busy_since) / 1000), n < 0 ? 0 : n);
+		fputs(holders, f);
+		fclose(f);
+	} else {
+		ir_log(IR_LOG_WARN, "cannot write %s: %s", BUSY_STATE_FILE, strerror(errno));
+	}
+	for (line = strtok_r(holders, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+		ir_log(IR_LOG_ERR, "busy holder: %s", line);
+	ir_log(IR_LOG_ERR, "to release it: systemctl --user restart pipewire wireplumber, then "
+	       "sudo systemctl restart sl7-ir-bridge");
+}
+
 static void tick(struct bridge *b, int64_t now)
 {
 	if (b->want) {
@@ -287,8 +350,13 @@ static void tick(struct bridge *b, int64_t now)
 				       (long long)(delay / 1000));
 				b->start_failures++;
 				b->retry_at = now + delay;
+				if (rc == -EBUSY)
+					busy_note(b, now);
+				else
+					busy_clear(b);
 			} else {
 				b->start_failures = 0;
+				busy_clear(b);
 			}
 		} else if (b->capped && now >= b->resync_at) {
 			/* the consumer may be gone without us having seen its 0 */
@@ -437,6 +505,7 @@ static int run_daemon(void)
 	}
 	if (open_loopback(&b) < 0)
 		return 1;
+	unlink(BUSY_STATE_FILE);
 	ir_camss_release_stale();
 	ir_log(IR_LOG_INFO, "sl7-ir-bridge %s idle on %s (stop grace %lld ms, session cap %lld ms)",
 	       VERSION, b.lb_path, (long long)b.grace_ms, (long long)b.session_max_ms);

@@ -1,7 +1,8 @@
 # libcamera-sl7
 
 Arch Linux ARM's `libcamera` 0.7.2 rebuilt for the Surface Laptop 7, with a camera sensor
-helper for the front camera (OmniVision OV02C10) and three software ISP fixes. It builds the same split packages
+helper for the front camera (OmniVision OV02C10), three software ISP fixes, and a pipeline handler
+patch that hides the infrared camera. It builds the same split packages
 (`libcamera`, `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera`, `python-libcamera`),
 so the omarchy-sl7 repository replaces Arch's with a plain `sudo pacman -Syu`.
 
@@ -14,6 +15,19 @@ upstream) declares the analogue gain as `AnalogueGainLinear{ 1, 0, 0, 16 }` (the
 0x10 to 0xf8 are 1x to 15.5x in 1/16 steps) and a black level of 4096 (64 at 10 bits). It is
 carried unmodified as `0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch` until it is
 released.
+
+## The IR camera is hidden (0005)
+
+The qcom-camss media device of the Surface Laptop 7 carries a second sensor, the VD55G0 infrared
+camera that `sl7-ir-bridge` drives for face unlock. The simple pipeline handler registered it as a
+camera, enabled its media links while enumerating and let any client (PipeWire through
+WirePlumber, `cam`, a browser) acquire it. The bridge then failed with `enable link ... Device or
+resource busy` and face unlock broke until PipeWire was restarted. Patch
+`0005-pipeline-simple-ignore-the-vd55g-infrared-sensor` makes `SimplePipelineHandler::locateSensors()`
+skip entities whose name starts with `vd55g` (the prefix `sl7-ir-bridge` itself uses), so the IR
+sensor is never opened, its links are never touched, and `cam -l` lists only the RGB camera. A
+WirePlumber rule in `omarchy-surface-sl7` backs this up for other libcamera builds. The IR
+camera is not usable by libcamera here anyway (mono, no tuning, no software ISP path).
 
 ## Software ISP fixes (0002 to 0004)
 
@@ -40,8 +54,8 @@ whether 0003 and 0004 are still needed.
 
 | | |
 |---|---|
-| Version | `0.7.2-4.2`: pkgrel 4.2 sorts above ALARM's 4. A later ALARM pkgrel (5 or more) would win again; bump ours when that happens. |
-| Patches | the OV02C10 helper; the three software ISP fixes above; ALARM's Python 3.14 fix, with trailing whitespace stripped |
+| Version | `0.7.2-4.3`: pkgrel 4.3 sorts above ALARM's 4. A later ALARM pkgrel (5 or more) would win again; bump ours when that happens. |
+| Patches | the OV02C10 helper; the three software ISP fixes above; the IR camera hiding patch (0005); ALARM's Python 3.14 fix, with trailing whitespace stripped |
 | Not built | `libcamera-docs` (it needs TeX Live), tests and `check()` |
 | Unchanged | dependencies, build options, split packages, the signed IPA modules |
 

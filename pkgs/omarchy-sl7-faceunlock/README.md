@@ -35,6 +35,11 @@ The app uses the active Omarchy theme's gum colours.
   are on (sudo, polkit, lock), lock plugin state, lid, and
   the IR emitter (`on` while the bridge streams, `off` if `IR_EMITTER=off`
   is set in `/etc/sl7-ir-bridge.conf`, `not yet available` without the bridge).
+  A red "IR bridge is stuck" line appears when the bridge has been unable to start
+  a camera session for 30 s because something holds the IR camera path (EBUSY,
+  `/run/sl7-ir-bridge/ebusy`); it shows the fix (`systemctl --user restart
+  pipewire wireplumber; sudo systemctl restart sl7-ir-bridge`) and the holding
+  processes. `status --json` has `bridge_busy` (true when stuck).
 - **Manage faces**: a table of id, label and enrolment time, then Add a
   variation, Remove one, Remove all, Refresh list. Adding offers No glasses,
   Glasses, Sunglasses, Low light, Bright light, Hat or a custom label (24

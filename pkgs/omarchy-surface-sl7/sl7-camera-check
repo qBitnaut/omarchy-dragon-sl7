@@ -81,6 +81,29 @@ dmesg 2>/dev/null | grep -i -E 'ov02c10|camss' | tail -n 20 >"$out/logs/dmesg-ca
 hdr "cam -l"
 cam -l 2>&1 | tee "$out/logs/cam-list.txt" | tee -a "$summary"
 
+# The RGB camera is picked by id, never by index: the order of cam -l is not
+# stable (libcamera 0.7.2-4.2 and older also listed the IR camera, sometimes
+# first). The id is the firmware node of the OV02C10 (camera@36); cam -l prints
+# the model instead when the location is unknown. A lone camera is accepted.
+rgb_camera() {
+  awk '
+    /^[0-9]+: / {
+      id = $0
+      sub(/^[0-9]+: .*\(/, "", id)
+      sub(/\)$/, "", id)
+      n++
+      ids[n] = id
+      if ($0 ~ /ov02c10|camera@36/) { print id; found = 1; exit }
+    }
+    END { if (!found && n == 1) print ids[1] }' "$out/logs/cam-list.txt"
+}
+cam_id=$(rgb_camera)
+if [[ -z $cam_id ]]; then
+  say "no OV02C10 (camera@36) camera in the cam -l list above; nothing to capture"
+  exit 1
+fi
+say "RGB camera: $cam_id"
+
 hdr "Tuning file"
 if [[ -f $tuning ]]; then
   say "$tuning: present"
@@ -96,7 +119,7 @@ grab() { # MODE WxH
   local mode=$1 size=$2 w=${2%x*} h=${2#*x} tag
   tag=$mode-${w}x$h
   say "capturing $tag"
-  camrun "$mode" "$out/logs/cam-$tag.log" -c1 -C20 \
+  camrun "$mode" "$out/logs/cam-$tag.log" -c "$cam_id" -C20 \
     -s "role=viewfinder,width=$w,height=$h,pixelformat=BGR888" \
     -F"$out/frames/$tag-#.ppm"
   # keep only the last (settled) frame
@@ -212,7 +235,7 @@ PY
 
 capture_raw() { # TAG EXT COUNT
   local tag=$1 ext=$2 count=$3
-  camrun cpu "$out/logs/cam-$tag-$ext.log" -c1 -C"$count" -s role=raw -F"$out/frames/$tag-#.$ext"
+  camrun cpu "$out/logs/cam-$tag-$ext.log" -c "$cam_id" -C"$count" -s role=raw -F"$out/frames/$tag-#.$ext"
   # keep the last three frames
   local keep n
   n=$(ls "$out"/frames/"$tag"-*."$ext" 2>/dev/null | wc -l)
@@ -253,7 +276,7 @@ fi
 # --- CPU / power at 720p -----------------------------------------------------
 if ((power_secs > 0)); then
   hdr "720p stream: CPU and power over ${power_secs}s"
-  LIBCAMERA_SOFTISP_MODE=gpu cam -c1 -C -s role=viewfinder,width=1280,height=720,pixelformat=BGR888 >/dev/null 2>&1 &
+  LIBCAMERA_SOFTISP_MODE=gpu cam -c "$cam_id" -C -s role=viewfinder,width=1280,height=720,pixelformat=BGR888 >/dev/null 2>&1 &
   campid=$!
   sleep 3
   python3 - "$campid" "$power_secs" <<'PY' | tee -a "$summary"

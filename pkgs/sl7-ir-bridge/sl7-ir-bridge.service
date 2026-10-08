@@ -15,9 +15,13 @@ TimeoutStopSec=5
 SyslogIdentifier=sl7-ir-bridge
 
 # Sandbox: it only needs the media and video4linux character devices and
-# read access to /sys. Root, but with no capabilities at all (the device nodes
-# are root-owned, so ownership is enough).
-CapabilityBoundingSet=
+# read access to /sys. Root. The device nodes are root-owned, so ownership is
+# enough for them. Two read-only capabilities let it list, when the IR path has
+# been busy for 30 s, which process holds it (a scan of /proc/<pid>/fd of other
+# users' processes, e.g. WirePlumber): CAP_SYS_PTRACE for the fd links and
+# CAP_DAC_READ_SEARCH for the 0500 fd directories. The syscall filter below
+# still has no ptrace and no open_by_handle_at.
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 DevicePolicy=closed
 DeviceAllow=char-media rw
@@ -32,7 +36,7 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
+ProtectProc=default
 ProcSubset=pid
 RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
@@ -42,8 +46,12 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallFilter=~@privileged @resources open_by_handle_at
 UMask=0077
+# /run/sl7-ir-bridge/ebusy: written when the IR path stays busy (read by
+# sl7-doctor and omarchy-sl7-faceunlock), removed when the service stops.
+RuntimeDirectory=sl7-ir-bridge
+RuntimeDirectoryMode=0755
 MemoryMax=64M
 
 [Install]

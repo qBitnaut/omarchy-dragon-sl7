@@ -33,7 +33,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
 | 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
 | 8j | opt-in cluster parking on battery, off by default (section 8j) | `/usr/bin/sl7-park` |
-| 8k | front webcam tuning, generated automatically at install on your machine from your own Surface driver package (`sl7-camera-tuning` regenerates or adjusts it), and a capture/compare script (section 8k) | `/usr/bin/sl7-camera-tuning`, `/usr/bin/sl7-camera-check` |
+| 8k | front webcam tuning, generated automatically at install on your machine from your own Surface driver package (`sl7-camera-tuning` regenerates or adjusts it), a capture/compare script (section 8k), and WirePlumber rules that keep the IR camera and its loopback out of PipeWire | `/usr/bin/sl7-camera-tuning`, `/usr/bin/sl7-camera-check`, `/usr/share/wireplumber/wireplumber.conf.d/51-omarchy-surface-sl7-ir-camera.conf` |
 | 12e | read-only per-process CPU and wakeup sampler (section 12e) | `/usr/bin/sl7-proftop` |
 | 9 | Omarchy leaf script, reference only | `/usr/share/doc/omarchy-surface-sl7/upstream/install/hardware/microsoft/surface-laptop-7.sh` |
 | 10 | `.install` scriptlet | `omarchy-surface-sl7.install` |
@@ -487,13 +487,14 @@ boot and deletes the staged copy. If the stick was written without it, run
 
 Two parts:
 
-1. **libcamera 0.7.2-4.2 or later from the omarchy-sl7 repository** (package `libcamera-sl7`
+1. **libcamera 0.7.2-4.3 or later from the omarchy-sl7 repository** (package `libcamera-sl7`
    builds the usual `libcamera`, `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera` and
    `python-libcamera`). It adds the OV02C10 camera sensor helper (analogue gain in 1/16 steps,
    10-bit black level 64, from upstream patch 28362), without which AGC does not run. It is a
    plain update: `sudo pacman -Syu`. 4.2 adds a faster AGC start, a statistics window fix for the
    GPU path and reading the contrast and saturation defaults from the tuning file (see
-   `pkgs/libcamera-sl7`); 4.1 is enough for colour correction alone.
+   `pkgs/libcamera-sl7`); 4.1 is enough for colour correction alone. 4.3 stops libcamera from
+   registering the infrared camera at all (see "The IR camera is not a libcamera camera" below).
 2. **The tuning file**, built from the Microsoft driver package:
 
 ```
@@ -503,6 +504,7 @@ sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.0
 sudo sl7-camera-tuning            # regenerate or adjust: uses that copy (or: --from-msi FILE.msi, --bin FILE)
 systemctl --user restart pipewire wireplumber
 sl7-camera-check                  # frames, logs and a CPU/power sample into ~/sl7-camera-<time>/
+                                  # (picks the RGB camera by id, not by `cam -c1`)
 ```
 
 `sl7-camera-tuning` options:
@@ -549,6 +551,35 @@ fully reach the blue channel on some sensors (libcamera issue 355); if the pictu
 under the GPU path but fine with `LIBCAMERA_SOFTISP_MODE=cpu`, it is that. To force the CPU path
 for PipeWire: `systemctl --user edit wireplumber` and add
 `[Service]` / `Environment=LIBCAMERA_SOFTISP_MODE=cpu`.
+
+#### The IR camera is not a libcamera camera
+
+The Surface Laptop 7 has two sensors on the same CAMSS media device: this OV02C10 and the VD55G0
+infrared camera that `sl7-ir-bridge` streams on demand for face unlock. With libcamera
+0.7.2-4.2 and older the simple pipeline registered both, so `cam -l` listed the IR camera too
+(sometimes as camera 1), and PipeWire (WirePlumber's libcamera monitor) or a `cam -c1` run enabled
+and held the IR media links. `sl7-ir-bridge` then failed every session with `enable link 1:1 ->
+13:0: Device or resource busy` and face unlock (sudo, lock screen) stopped working until
+`systemctl --user restart pipewire wireplumber` and `sudo systemctl restart sl7-ir-bridge`.
+
+Two layers prevent that:
+
+1. **libcamera-sl7 0.7.2-4.3** skips sensors named `vd55g*` in the simple pipeline handler
+   (patch 0005), so nothing that uses libcamera can see or acquire the IR camera, and `cam -l`
+   lists only the RGB camera. This is the real fix: a WirePlumber rule cannot stop libcamera
+   itself from enumerating a sensor, and the enumeration is what sets up the links.
+2. **`/usr/share/wireplumber/wireplumber.conf.d/51-omarchy-surface-sl7-ir-camera.conf`** (this
+   package) is the second line of defence for any other libcamera build: `monitor.libcamera.rules`
+   disables the device whose model is `vd55g*` (or whose id ends in `camera@10`), and
+   `monitor.v4l2.rules` disables the PipeWire nodes of the `qcom-camss` video nodes (raw capture
+   nodes; the RGB camera comes through libcamera) and of the `SL7 IR Camera` loopback. The loopback
+   is hidden on purpose: v4l2loopback has one capture client, so a browser that opened it through
+   PipeWire would start a bridge session (the IR emitter would flash) and howdy would then fail
+   with EBUSY. howdy opens `/dev/v4l/by-id/sl7-ir-camera` directly; the rules do not affect it.
+   Restart `pipewire wireplumber` (or log out and in) after the upgrade.
+
+`sl7-doctor` flags a bridge that is stuck (section 11), and `omarchy-sl7-faceunlock status` shows
+the same with the holders.
 
 #### Using the camera in a browser
 
@@ -628,7 +659,10 @@ when the default entry lacks `msm.vrr_enabled=1`),
 the Iris firmware file, the video-codec node status and the iris V4L2 decoder/encoder devices
 (INFO, or WARN when the firmware is missing or the devices fail to appear; never a failure),
 the pending tap-to-click default (8f) and, from the journal, how often iptsd's mode watchdog had to
-re-enable touchpad multitouch this boot (warn only).
+re-enable touchpad multitouch this boot (warn only),
+and whether `sl7-ir-bridge` is stuck in EBUSY (FAIL, with the fix command and the processes that
+hold the IR camera path; `/run/sl7-ir-bridge/ebusy` is written by the bridge after 30 s of failed
+session starts and removed at the next successful session or when the service stops).
 Exit 1 on any failure.
 
 ### 11b. Optional kernel test entries (`omarchy-sl7-test-entry`)

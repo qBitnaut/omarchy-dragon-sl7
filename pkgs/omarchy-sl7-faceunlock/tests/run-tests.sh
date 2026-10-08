@@ -53,7 +53,7 @@ PAM
   export SL7_ASSUME_ROOT=1 SL7_NO_SYSTEMCTL=1 SL7_DROPIN_DIR=$T/env/dropin SL7_DROPIN_VENDOR=$T/env/none
   export SL7_HOWDY_BIN=$ROOT/tests/fake-howdy FAKE_HOWDY_DIR=$T/env/howdy SL7_HOWDY_CONFIG=$T/env/config.ini
   export SL7_USER=tester SL7_MENU_FILE=$T/env/menu.jsonc XDG_STATE_HOME=$T/env/xdg SL7_BRIDGE_UNIT=none.service
-  export SL7_CAMERA=$T/env/camera SL7_PLUGIN_DIR=$T/env/plugins
+  export SL7_CAMERA=$T/env/camera SL7_PLUGIN_DIR=$T/env/plugins SL7_BRIDGE_BUSY_FILE=$T/env/no-ebusy
 }
 H=$LIB/root-helper
 
@@ -220,6 +220,10 @@ em_off=$(emitter_with "$T/env/bridge-off.conf")
 check "emitter: on when no conf is readable" bash -c "[[ '$em_none' == on ]]"
 check "emitter: on from the conf" bash -c "[[ '$em_on' == on ]]"
 check "emitter: off from the conf" bash -c "[[ '$em_off' == off ]]"
+check "cli: status json, bridge not stuck without the flag file" bash -c "'$APP' status --json | jq -e '.bridge_busy == false'"
+printf 'since=1\nholders=1\npid 5 (wireplumber) uid 1000 holds /dev/video3 (IR video node)\n' >"$T/env/ebusy"
+check "cli: status json, bridge stuck with the flag file" bash -c "SL7_BRIDGE_BUSY_FILE='$T/env/ebusy' '$APP' status --json | jq -e '.bridge_busy == true'"
+check "cli: status text gives the fix and the holder when stuck" bash -c "SL7_BRIDGE_BUSY_FILE='$T/env/ebusy' '$APP' status | grep -q 'systemctl --user restart pipewire wireplumber' && SL7_BRIDGE_BUSY_FILE='$T/env/ebusy' '$APP' status | grep -q 'holder: pid 5 (wireplumber)'"
 check "cli: --off" "$APP" --off
 check "cli: --off removed the lines" bash -c "! grep -rq sl7-faceunlock '$SL7_PAM_DIR'"
 check "cli: sudo restored" cmp "$SL7_PAM_DIR/sudo" "$T/env/sudo.orig"
