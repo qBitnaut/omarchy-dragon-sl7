@@ -19,7 +19,7 @@ picture), and it needs media links and pad formats set first.
 | `/usr/lib/modules-load.d/sl7-ir-bridge.conf` | loads `v4l2loopback` at boot |
 | `/usr/lib/modprobe.d/sl7-ir-bridge.conf` | `devices=1 video_nr=42 card_label="SL7 IR Camera" exclusive_caps=1 max_buffers=4` (override in `/etc/modprobe.d/`) |
 | `/usr/lib/udev/rules.d/71-sl7-ir-bridge.rules` | `/dev/v4l/by-id/sl7-ir-camera`, group `video`, mode 0660, `uaccess` |
-| `/etc/sl7-ir-bridge.conf` | `IR_EMITTER=off` and optional timing settings |
+| `/etc/sl7-ir-bridge.conf` | `IR_EMITTER=on` (default; `off` keeps the emitter dark), optional gains and timing settings |
 
 The `v4l2loopback` module (0.15.4, GPL-2.0-or-later) comes from `linux-sl7`
 7.2.8-10 or later, which builds it out of tree against its own tree and installs
@@ -68,9 +68,14 @@ a fresh consumer start (the consumer closes the device and opens it again) befor
 streaming again. This is a safety budget for the emitter work and also bounds the
 sensor's on time.
 
-Failures: if the CAMSS setup or start fails the bridge logs the reason and retries
-every 5 s while a consumer is waiting; no frames arrive and the consumer times
-out (no fake frames are sent). If no frame arrives for 4 s (first) or 1.5 s
+Failures: if the CAMSS setup or start fails the bridge tears down what it had set up
+(links, buffers, `led_mode`), logs the reason once and retries after 5 s, then 10 s, then
+every 20 s while a consumer is waiting (a fresh consumer start retries at once); no frames
+arrive and the consumer times out (no fake frames are sent). Enabling a media link can fail
+with `EBUSY` while a stream still runs through the IR path (a test tool, or a consumer that was
+killed and whose pipeline the kernel is still stopping): the bridge waits up to 2 s for it,
+then releases the links it enabled and retries later instead of looping. When the daemon
+starts it releases IR path links that a killed predecessor left enabled (links in use stay). If no frame arrives for 4 s (first) or 1.5 s
 (later) the session is stopped. If the loopback disappears the daemon exits and
 systemd restarts it.
 
@@ -86,24 +91,41 @@ brightness. No images are saved. The first frame it receives is the bridge's idl
 black frame and is not counted. Exit status 0 pass, 1 failure, 3 frames received
 but all black (a dark scene while the emitter is not working yet).
 
-## IR emitter hook (disabled)
+## IR emitter
 
-The emitter does not work yet and this package never drives an LED or a GPIO.
-The hook points are in `ir_emitter.c`:
+The IR emitter is lit by the sensor's GPIO 1 strobe alone (emitter plan, stage C): it is high for
+the whole exposure of every frame while the vd55g `led_mode` control is not off. The PMIC flash
+is not in the path, so the only safety control is the strobe duration (the exposure) and how
+often it repeats (the frame length). The kernel (`linux-sl7` 7.2.8-22, patch 0098) holds both to
+what Windows Hello programs whenever `led_mode` is not off, whatever user space asks:
 
-- `ir_emitter_pre_stream()` runs after the links and formats are set and just
-  before STREAMON;
-- `ir_emitter_post_stream()` runs after STREAMOFF and on every error path after
-  `pre_stream`.
+| | Windows | Source |
+|---|---|---|
+| exposure | 100 lines = 1.59 ms (manual exposure, `0x044c` = 2, `0x044e` = 100) | Windows sensor module file, regSetting 37 |
+| frame length | 1750 lines = 27.8 ms = 36 fps (`0x0458/9`) | same |
+| strobe duty | 5.7 % | derived |
 
-Per the emitter plan (stage D), the later implementation sets the vd55g
-subdev's `led_mode` control (`V4L2_CID_FLASH_LED_MODE`) to flash before STREAMON
-when the control exists and the config enables it, and back to none after
-STREAMOFF. That code is present but compiled out: it needs
-`-DSL7_IR_EMITTER_BUILD=1`, which the PKGBUILD does not pass, and even then
-`IR_EMITTER=on` in `/etc/sl7-ir-bridge.conf`. In this package version
-`IR_EMITTER=on` is ignored with a warning, and it must stay off. The kernel owns
-the real safety limits; the 10 s session cap above is the bridge's own.
+With `IR_EMITTER=on` (the default in `/etc/sl7-ir-bridge.conf`) every session does, in
+`ir_emitter.c`:
+
+- before STREAMON (the strobe configuration latches when the stream starts): vblank = 1750 -
+  604, auto exposure to manual, exposure 100, analogue and digital gain to the driver defaults
+  (Windows' init writes no gain register; `IR_GAIN_ANALOG` and `IR_GAIN_DIGITAL` override), then
+  `led_mode` = flash. The values are read back; if the sensor does not report exposure <= 100 and
+  frame length >= 1750 with manual exposure, or `led_mode` does not read back flash, the session
+  runs unlit. A kernel without the `led_mode` control (older than 7.2.8-22, or
+  `vd55g.illuminator=0`) also runs unlit, with a warning.
+- before STREAMOFF: `led_mode` = none, so the emitter goes dark before the stream and the sensor
+  stop; also on every error path and at shutdown.
+
+`IR_EMITTER=off` keeps the emitter dark and sets `led_mode` to none before every session, so a
+state left by another tool cannot light it. The journal shows `emitter ON: led_mode=flash
+exposure=100 lines ...` per session and the kernel logs `IR strobe timing: ...` at stream start.
+While `/run/sl7-ir-bridge.hands-off` exists and is younger than two minutes the bridge neither sets
+nor clears `led_mode` (the stage C test tool of omarchy-surface-sl7 uses it so its own
+`led_mode` is not overridden; the kernel limits still apply).
+The emitter is lit only while the bridge streams, which is only while a consumer is reading, for
+at most 10 s per session.
 
 ## Sandbox
 
@@ -120,13 +142,16 @@ It restarts on failure with no start limit.
   client). A second one fails at `REQBUFS` with `EBUSY`.
 - The client-usage event has one queue slot; if a consumer closes and reopens
   within a single wake-up the 0 can be coalesced away. After a session cap the
-  bridge then does not restart until the next real stop; the consumer times out
-  and a retry works.
+  bridge asks v4l2loopback for the client count again every second (a new
+  subscription with SEND_INITIAL), so a consumer that went away abruptly does not
+  leave the bridge waiting.
 - The default udev rules give the CAMSS and subdev nodes to group `video`. The
   emitter plan wants them root-only; that is a separate udev change.
 - Browsers and PipeWire will list "SL7 IR Camera". A WirePlumber rule that hides
   it (and the raw CAMSS node) is still to do.
-- Not run on hardware yet: only the repacking logic is unit tested (`make check`).
+- Lit frames at Windows' 100 line exposure are dim (stage C: mean 20 of 255, p99 38 at
+  default gain). The face detector thresholds in omarchy-sl7-faceunlock are set for that.
+- Not run on hardware: only the repacking logic is unit tested (`make check`).
 
 ## Build
 

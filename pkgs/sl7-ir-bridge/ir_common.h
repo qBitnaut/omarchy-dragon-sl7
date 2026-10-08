@@ -15,6 +15,16 @@
  * always looked up by this name, never by number. */
 #define IR_LOOPBACK_CARD "SL7 IR Camera"
 
+/* The timing Windows Hello programs on this sensor (EMITTER-PLAN E7, decoded
+ * from the Windows sensor module file): manual exposure 100 lines and frame
+ * length 1750 lines (line length 1200 px, 75.6 MHz: 1.59 ms strobe per
+ * 27.8 ms frame, 36 fps, duty 5.7 %). The IR emitter is lit by the sensor's
+ * strobe for the whole exposure, so these two numbers are the safety control.
+ * The vd55g driver enforces them whatever user space asks; the bridge asks for
+ * exactly these values and never for anything longer or faster. */
+#define IR_WIN_EXPOSURE_LINES 100
+#define IR_WIN_FRAME_LENGTH 1750
+
 /* Hard ceiling for one CAMSS streaming session, in ms. The emitter plan makes
  * this a safety budget: a session never streams longer than this, whatever the
  * configuration says, and the consumer must start again for a new one. */

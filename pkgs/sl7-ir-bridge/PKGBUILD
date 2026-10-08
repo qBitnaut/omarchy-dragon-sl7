@@ -3,18 +3,19 @@
 #
 # On-demand bridge from the Surface Laptop 7 IR camera (CAMSS raw node) to a
 # v4l2loopback device, for howdy-next. Pure C, direct V4L2/media ioctls. The
-# v4l2loopback module itself ships in linux-sl7 (>= 7.2.8-10, extra/).
+# v4l2loopback module itself ships in linux-sl7 (extra/); 7.2.8-22 is the first
+# kernel that holds the IR strobe timing to Windows' values (patch 0098).
 # Local files carry SKIP checksums: they are covered by the repository's git
 # history, as in the other packages here.
 
 pkgname=sl7-ir-bridge
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='On-demand bridge from the Surface Laptop 7 IR camera to a v4l2loopback device (GREY 644x604) for face unlock'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT')
-depends=('glibc' 'kmod' 'systemd' 'linux-sl7>=7.2.8-10')
+depends=('glibc' 'kmod' 'systemd' 'linux-sl7>=7.2.8-22')
 makedepends=('gcc' 'make' 'linux-api-headers')
 optdepends=('v4l-utils: v4l2-ctl and media-ctl for debugging')
 backup=('etc/sl7-ir-bridge.conf')

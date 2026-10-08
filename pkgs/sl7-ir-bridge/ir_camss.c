@@ -22,6 +22,11 @@
  * msm_csid1 / msm_vfe1_*). */
 #define IR_CSID "msm_csid0"
 #define IR_RDI "msm_vfe0_rdi0"
+/* Enabling a link fails with EBUSY while a stream still runs through one of its
+ * entities: the pipeline of a consumer that was just killed is torn down by the
+ * kernel when its descriptors close, which can lag a little. Wait for it. */
+#define LINK_BUSY_TRIES 10
+#define LINK_BUSY_WAIT_MS 200
 
 struct topo {
 	struct media_v2_entity *ents;
@@ -453,7 +458,7 @@ int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h)
 	struct topo t;
 	uint32_t video_ent = 0, sensor_ent = 0;
 	unsigned i;
-	int rc;
+	int rc, tries;
 
 	rc = find_camss_media(c->media_path, sizeof(c->media_path));
 	if (rc < 0) {
@@ -483,9 +488,20 @@ int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h)
 		if (hp->flags & (MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED))
 			continue;
 		rc = setup_link(c->media_fd, hp, 1);
+		for (tries = 0; rc == -EBUSY && tries < LINK_BUSY_TRIES; tries++) {
+			ir_log(IR_LOG_DEBUG, "link %u:%u -> %u:%u busy, waiting (%d)", hp->src_ent,
+			       hp->src_pad, hp->sink_ent, hp->sink_pad, tries + 1);
+			usleep(LINK_BUSY_WAIT_MS * 1000);
+			rc = setup_link(c->media_fd, hp, 1);
+		}
 		if (rc < 0) {
 			ir_log(IR_LOG_ERR, "enable link %u:%u -> %u:%u: %s", hp->src_ent, hp->src_pad,
 			       hp->sink_ent, hp->sink_pad, strerror(-rc));
+			if (rc == -EBUSY)
+				ir_log(IR_LOG_ERR,
+				       "the IR path is still streaming for another user (a test tool, or a "
+				       "consumer that has not finished stopping); links enabled so far are "
+				       "released and the session start is retried later");
 			goto fail_topo;
 		}
 		hp->we_enabled = 1;
@@ -517,6 +533,44 @@ fail_topo:
 	topo_free(&t);
 fail:
 	ir_camss_close(c);
+	return rc;
+}
+
+int ir_camss_release_stale(void)
+{
+	struct ir_camss c;
+	struct topo t;
+	uint32_t video_ent = 0, sensor_ent = 0;
+	unsigned i;
+	int rc, released = 0;
+
+	ir_camss_init(&c);
+	rc = find_camss_media(c.media_path, sizeof(c.media_path));
+	if (rc < 0)
+		return rc;
+	c.media_fd = rc;
+	rc = topo_load(c.media_fd, &t);
+	if (rc < 0)
+		goto out;
+	rc = plan_path(&t, &c, &video_ent, &sensor_ent);
+	topo_free(&t);
+	if (rc < 0)
+		goto out;
+	for (i = c.nhops; i-- > 0;) {
+		const struct ir_hop *hp = &c.hops[i];
+
+		if ((hp->flags & MEDIA_LNK_FL_IMMUTABLE) || !(hp->flags & MEDIA_LNK_FL_ENABLED))
+			continue;
+		if (setup_link(c.media_fd, hp, 0) == 0)
+			released++;
+		else
+			ir_log(IR_LOG_DEBUG, "stale link %u not released (in use)", i);
+	}
+	if (released)
+		ir_log(IR_LOG_INFO, "released %d IR path link(s) left enabled by an earlier run", released);
+	rc = released;
+out:
+	close(c.media_fd);
 	return rc;
 }
 

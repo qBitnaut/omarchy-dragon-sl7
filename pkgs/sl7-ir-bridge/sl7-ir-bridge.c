@@ -19,7 +19,11 @@
  *   sl7-ir-bridge --version | --help
  *
  * Environment (the unit reads /etc/sl7-ir-bridge.conf):
- *   IR_EMITTER=off|on       emitter hook; "off" and it must stay off (see ir_emitter.c)
+ *   IR_EMITTER=on|off       light the IR emitter for each session (default on):
+ *                           Windows' exposure and frame length, led_mode=flash;
+ *                           "off" keeps led_mode at none (see ir_emitter.c)
+ *   IR_GAIN_ANALOG, IR_GAIN_DIGITAL
+ *                           optional gain control values (default: the driver's)
  *   IR_STOP_GRACE_MS=500    keep streaming this long after the consumer stops
  *   IR_SESSION_MAX_MS=10000 per-session streaming cap, never above 10000
  *   SL7_IR_DEBUG=1          debug logging
@@ -53,6 +57,8 @@
 #define FIRST_FRAME_TIMEOUT_MS 4000
 #define FRAME_GAP_TIMEOUT_MS 1500
 #define RETRY_MS 5000
+#define RETRY_MAX_SHIFT 2	/* retry delay 5 s, 10 s, 20 s, then stays at 20 s */
+#define CAPPED_RESYNC_MS 1000
 #define MAX_LB_ERRORS 100
 
 struct bridge {
@@ -63,7 +69,8 @@ struct bridge {
 	bool running;	/* CAMSS is streaming */
 	bool capped;	/* session cap hit: wait for a fresh consumer start */
 	bool seen_frame;
-	int64_t t_start, t_last_frame, t_first_frame, stop_at, retry_at;
+	int64_t t_start, t_last_frame, t_first_frame, stop_at, retry_at, resync_at;
+	unsigned start_failures;	/* consecutive failed session starts */
 	uint64_t frames, dropped;
 	unsigned lb_errors;
 	int64_t grace_ms, session_max_ms;
@@ -180,6 +187,11 @@ static int drain_events(struct bridge *b)
 			uint32_t count;
 
 			memcpy(&count, ev.u.data, sizeof(count));
+			if (count != 0 && !b->want) {
+				/* a fresh consumer start: no waiting for an old failure */
+				b->retry_at = 0;
+				b->start_failures = 0;
+			}
 			b->want = count != 0;
 			if (!b->want)
 				b->capped = false; /* the next start is a fresh session */
@@ -188,13 +200,33 @@ static int drain_events(struct bridge *b)
 	}
 }
 
+/* Ask v4l2loopback for the current client count again (a new subscription
+ * with SEND_INITIAL queues it). The event queue has one slot, so a consumer
+ * that goes away abruptly can leave the 0 unseen; used while capped. */
+static int resync_usage(struct bridge *b)
+{
+	struct v4l2_event_subscription sub;
+
+	memset(&sub, 0, sizeof(sub));
+	sub.type = V4L2LOOPBACK_EVENT_CLIENT_USAGE;
+	ir_ioctl(b->lb_fd, VIDIOC_UNSUBSCRIBE_EVENT, &sub);
+	sub.flags = V4L2_EVENT_SUB_FL_SEND_INITIAL;
+	if (ir_ioctl(b->lb_fd, VIDIOC_SUBSCRIBE_EVENT, &sub) < 0) {
+		ir_log(IR_LOG_ERR, "%s: re-subscribe to the client-usage event: %s", b->lb_path,
+		       strerror(errno));
+		return -1;
+	}
+	return drain_events(b);
+}
+
 static void session_stop(struct bridge *b, const char *reason)
 {
 	int64_t now = ir_now_ms();
 	double secs = (double)(now - b->t_start) / 1000.0;
 
-	ir_camss_stop(&b->cam);
+	/* The emitter goes dark first, then the stream and the sensor stop. */
 	ir_emitter_post_stream(&b->cam);
+	ir_camss_stop(&b->cam);
 	ir_camss_close(&b->cam);
 	b->running = false;
 	b->stop_at = -1;
@@ -214,7 +246,9 @@ static int session_start(struct bridge *b)
 	rc = ir_camss_open(&b->cam, IR_WIDTH, IR_HEIGHT);
 	if (rc < 0)
 		return rc;
-	/* Emitter hook point: after the links and formats, before STREAMON. */
+	/* Emitter: Windows' sensor settings and led_mode=flash after the links and
+	 * formats, before STREAMON (it latches when the stream starts). A failure
+	 * is logged and the session runs unlit. */
 	ir_emitter_pre_stream(&b->cam);
 	rc = ir_camss_start(&b->cam);
 	if (rc < 0) {
@@ -238,10 +272,29 @@ static void tick(struct bridge *b, int64_t now)
 	if (b->want) {
 		b->stop_at = -1;
 		if (!b->running && !b->capped && now >= b->retry_at) {
-			if (session_start(b) < 0) {
-				ir_log(IR_LOG_ERR, "session start failed, retrying in %d s", RETRY_MS / 1000);
-				b->retry_at = now + RETRY_MS;
+			int rc = session_start(b);
+
+			if (rc < 0) {
+				unsigned shift = b->start_failures < RETRY_MAX_SHIFT ? b->start_failures :
+										  RETRY_MAX_SHIFT;
+				int64_t delay = (int64_t)RETRY_MS << shift;
+
+				/* session_start() already tore down whatever it had set up
+				 * (links, buffers, led_mode), so the retry starts clean.
+				 * Say it once, then only at debug level. */
+				ir_log(b->start_failures ? IR_LOG_DEBUG : IR_LOG_ERR,
+				       "session start failed (%s), retrying in %lld s", strerror(-rc),
+				       (long long)(delay / 1000));
+				b->start_failures++;
+				b->retry_at = now + delay;
+			} else {
+				b->start_failures = 0;
 			}
+		} else if (b->capped && now >= b->resync_at) {
+			/* the consumer may be gone without us having seen its 0 */
+			b->resync_at = now + CAPPED_RESYNC_MS;
+			if (resync_usage(b) < 0)
+				b->capped = false;
 		}
 	} else if (b->running) {
 		if (b->stop_at < 0)
@@ -255,6 +308,7 @@ static void tick(struct bridge *b, int64_t now)
 		if (now - b->t_start >= b->session_max_ms) {
 			session_stop(b, "session cap reached, a new consumer start is required");
 			b->capped = b->want;
+			b->resync_at = now + CAPPED_RESYNC_MS;
 		} else if (now - b->t_last_frame > limit) {
 			session_stop(b, "no frames from CAMSS");
 			b->retry_at = now + RETRY_MS;
@@ -274,6 +328,8 @@ static int next_timeout(const struct bridge *b, int64_t now)
 			MIN_AT(b->stop_at);
 	} else if (b->want && !b->capped) {
 		MIN_AT(b->retry_at);
+	} else if (b->capped) {
+		MIN_AT(b->resync_at);
 	}
 	#undef MIN_AT
 	return t < 0 ? -1 : (int)(t > 60000 ? 60000 : t);
@@ -381,6 +437,7 @@ static int run_daemon(void)
 	}
 	if (open_loopback(&b) < 0)
 		return 1;
+	ir_camss_release_stale();
 	ir_log(IR_LOG_INFO, "sl7-ir-bridge %s idle on %s (stop grace %lld ms, session cap %lld ms)",
 	       VERSION, b.lb_path, (long long)b.grace_ms, (long long)b.session_max_ms);
 

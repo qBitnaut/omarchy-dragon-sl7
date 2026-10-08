@@ -37,6 +37,10 @@ void ir_camss_init(struct ir_camss *c);
  * pad of the path, set GREY on the video node and map the buffers.
  * 0 or -errno (a message is logged). */
 int ir_camss_open(struct ir_camss *c, unsigned w, unsigned h);
+/* At daemon start: disable the IR path links an earlier run left enabled (a
+ * killed bridge never undid them). Links that are in use stay. Returns the
+ * number released, or -errno. */
+int ir_camss_release_stale(void);
 /* Queue all buffers and VIDIOC_STREAMON. This is what powers the sensor. */
 int ir_camss_start(struct ir_camss *c);
 /* Dequeue one frame: -EAGAIN when none is ready. The frame stays owned by the
