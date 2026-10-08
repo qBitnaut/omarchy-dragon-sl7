@@ -53,7 +53,7 @@ source=(
 )
 sha256sums=('e2e3afabc3d6d3fd696ec0ab6a1f144b6254449216b390be579864a6fd26c50a'
             '2283fc4684751caa41e87023755bba5c3468475b6ed632b13a4ac6e9c748c512'
-            '795dcd866ae586a348adbe4d28df57c9e7e7f6993766f332ff0d889fb312728f')
+            '09f91691afcfc02472ba3a524b8812fde7fc53213749d28028f614d9242157ae')
 
 prepare() {
 	patch -d "$srcdir/howdy-next" -p1 < "$srcdir/0001-quiet-opencv-dnn-target-warning.patch"

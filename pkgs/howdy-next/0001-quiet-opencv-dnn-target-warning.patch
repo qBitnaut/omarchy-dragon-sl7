@@ -3,7 +3,7 @@
 @@ -11,6 +11,8 @@
  #include "vision/face_model/internal.hpp"
  #include "vision/frame_validation.hpp"
- 
+
 +#include <opencv2/core/utils/logger.hpp>
 +
  #include <exception>
