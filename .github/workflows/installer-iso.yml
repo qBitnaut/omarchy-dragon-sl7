@@ -237,7 +237,7 @@ jobs:
             echo "| omarchy-pkgs | \`$OMARCHY_PKGS_SHA\` (+ #221 \`$OMARCHY_PKGS_PR221_SHA\`, #222 \`$OMARCHY_PKGS_PR222_SHA\`) |"
             echo '| SL7 package (repo-aarch64) | version |'
             echo '|---|---|'
-            while read -r n v; do echo "| $n | $v |"; done < dl-versions.txt
+            while read -r n v; do echo "| $n | $v |"; done < "$GITHUB_WORKSPACE/dl-versions.txt"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -282,7 +282,7 @@ jobs:
           else
             echo "::warning title=installer-iso::REPO_SIGNING_KEY not set: the ISO checksum is published unsigned"
           fi
-          pkgs="$(while read -r n v; do echo "- $n $v"; done < dl-versions.txt)"
+          pkgs="$(while read -r n v; do echo "- $n $v"; done < "$GITHUB_WORKSPACE/dl-versions.txt")"
           cat > notes.md <<NOTES
           Omarchy installer ISO for the Surface Laptop 7 13.8" (Snapdragon X, aarch64), rebuilt by
           .github/workflows/installer-iso.yml on every change. This release is replaced by each build.
