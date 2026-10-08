@@ -85,6 +85,8 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0096 | SL7 local: leds-qcom-flash IR hardware strobe arm: `hw_strobe_arm` attribute on the IR LEDs (`ir_test=1`, 4ch): CHAN_STROBE 0x05 (hardware, level, active high, source bits 6:4 = 0), 10 ms timer, at most 25 mA per channel whatever `ir_max_ua` says, auto disarm after 1 s, disarm on remove, shutdown and suspend, 30 ms back-to-back status poll logged afterwards. Torch still refused | ours; EMITTER-LOCATE.md section 7 | not submitted (SL7 specific) |
 | 0097 | SL7 local: romulus13 `st,leds = <1>` on the IR sensor (GPIO 1 strobe, gated by 0094) and a second ganged IR LED `ir:flash-23` (channels 2 and 3, same limits) for the T0b decode check | ours | not submitted (SL7 specific) |
 | 0098 | SL7 local: vd55g holds exposure (at most 100 lines) and frame length (at least 1750 lines) to the values Windows Hello programs whenever `led_mode` is not off, at control set time, on `led_mode` change and at stream start, auto exposure replaced by manual while the strobe is on; the `illuminator` parameter (0094) now defaults to 1 (`illuminator=0` disables the strobe) | ours; IR plan stage C result | not submitted (SL7 specific) |
+| 0099 | media: i2c: ov02c10: accept a 12 MHz external clock with a 250 MHz link frequency (19.2 MHz stays 400 MHz, any other pairing is refused at probe); pixel rate follows the link frequency; default frame length scaled with the link frequency (2328 lines at 400 MHz, 1455 at 250 MHz) by one helper; no new register values | Ryan Thomas Cragun report, linux-media 2026-07-02; Sakari Ailus' reply | not submitted yet, upstream candidate |
+| 0100 | SL7 local: romulus front camera clocked from a 12 MHz `fixed-clock` node (CAMCC MCLK4 reference and its 19.2 MHz assigned rate dropped, gpio100 pinctrl kept), `link-frequencies` 250 MHz | ours | not submitted (SL7 specific) |
 
 PMIC IR LED patches (0080, 0081, 0091 to 0093, 0095, 0096): retired. The PM8550 flash LED path
 proved to have no load (open circuit); the IR emitter is lit by the sensor's GPIO 1 strobe (0094,
@@ -752,6 +754,35 @@ off, the vd55g driver holds both to what Windows Hello programs, whatever user s
   (sl7-ir-bridge) turns it on for a session.
 
 Checked as `patch --dry-run` against the series on v7.2 only; CI compiles the driver. Never run.
+
+### Front camera at 18.8 fps: the OV02C10 runs from 12 MHz (7.2.8-23)
+
+**Patches 0099 and 0100.** Symptom: with the stock driver the front camera ran at 18.8 fps. Setting
+`vertical_blanking` = 370 (frame length 1462 lines) mid-stream gave 29 to 30 fps. The driver timings
+assume a 19.2 MHz reference; 30 fps * 12 / 19.2 = 18.75 fps, so the sensor's reference is 12 MHz.
+This matches the linux-media report by Ryan Thomas Cragun (2026-07-02) that the Surface Laptop 7
+drives the OV02C10 from a fixed 12 MHz clock, and Sakari Ailus' answer that the driver should
+support 12 MHz and compute the pixel rate from the external clock.
+
+- **Cause.** The same register settings from a 12 MHz reference give a 250 MHz link (500 Mb/s per
+  lane) instead of 400 MHz; line time stays 2280 sensor clocks = 22.8 us, pixel rate 100 MHz for two
+  lanes. The default frame length (minimum 1164 times 2 lanes = 2328) is 30 fps only at 400 MHz.
+- **0099.** Accepts a 12 MHz clock, adds the 250 MHz link frequency and requires 19.2 MHz with
+  400 MHz or 12 MHz with 250 MHz. The pixel rate control follows the link frequency by itself. The
+  default frame length is scaled by link frequency / 400 MHz (1455 lines at 250 MHz, about 30.1 fps).
+  The 19.2 MHz behaviour is unchanged. No new register values.
+- **0100.** The module most likely carries its own oscillator: the Windows camera resources for
+  MSHW0470 list no MCLK, and CAMCC cannot generate 12 MHz. The sensor's `clocks` is now a 12 MHz
+  `fixed-clock` node; the CAMCC MCLK4 reference and `assigned-clock-rates` are gone and the gpio100
+  pinctrl state is kept (it only muxes the pin). `link-frequencies` is 250 MHz.
+- **CAMSS.** It reads the sensor's link frequency control (`v4l2_get_link_freq`) for the CSIPHY
+  settle count, so it now sees the real 250 MHz (500 Mb/s) rate instead of 400 MHz.
+- **Check after boot.** Front camera about 30 fps; `v4l2-ctl -d <ov02c10 subdev> -C
+  pixel_rate,link_frequency,vertical_blanking` should read 100000000, 250000000 (menu index 1) and
+  363; the image is correct; no CSIPHY errors in `dmesg`.
+
+Checked as `git apply --check` against the series on v7.2 only; CI compiles the driver and runs
+dtbs_check. Never run.
 
 ## USB-C reverse plug (7.2.8-18): fixed PHY orientation, on by default
 

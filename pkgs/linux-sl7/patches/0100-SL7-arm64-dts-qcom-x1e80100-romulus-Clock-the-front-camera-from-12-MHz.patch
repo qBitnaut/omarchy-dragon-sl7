@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 13:17:22 -0500
+Subject: [PATCH] SL7 local: arm64: dts: qcom: x1e80100-romulus: Clock the
+ front camera from 12 MHz
+
+The OV02C10 of the Surface Laptop 7 runs from 12 MHz, not 19.2 MHz: with
+the 19.2 MHz driver settings the front camera streams at 18.8 fps
+(30 * 12 / 19.2 = 18.75) and lowering the frame length to 1462 lines
+(vertical_blanking=370) mid-stream gave 29 to 30 fps. This matches the
+linux-media report by Ryan Thomas Cragun (2026-07-02) that the machine
+drives the OV02C10 from a fixed 12 MHz clock. The Windows camera resources
+for MSHW0470 list no MCLK, so the module most likely carries its own
+oscillator, and the camera clock controller cannot generate 12 MHz.
+
+Model the clock as a 12 MHz fixed clock referenced by the sensor, and drop
+the CAMCC MCLK4 reference and its 19.2 MHz assigned rate. The pinctrl
+state with the gpio100 MCLK pin is kept: it only selects the pin function
+and the sensor does not depend on a clock on that pin.
+
+Declare the 250 MHz link frequency the driver now requires with a 12 MHz
+clock (500 Mb/s per lane, 100 MHz pixel rate), which is also what CAMSS
+reads from the sensor's link frequency control to compute the CSIPHY
+settle count.
+
+Upstream-Status: Pending (depends on the ov02c10 12 MHz support patch)
+---
+ .../dts/qcom/x1e80100-microsoft-romulus.dtsi    | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+index d26817e92d0a..12827c0bffec 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+@@ -62,6 +62,17 @@ backlight: backlight {
+ 		pinctrl-names = "default";
+ 	};
+
++	/*
++	 * The front camera module has its own 12 MHz oscillator: the Windows
++	 * resources for MSHW0470 list no MCLK and the sensor runs from 12 MHz
++	 * whatever CAMCC MCLK4 is set to, which cannot make 12 MHz anyway.
++	 */
++	ov02c10_xvclk: clock-12000000 {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <12000000>;
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+
+@@ -944,9 +955,7 @@ camera@36 {
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&cam_rgb_default>;
+
+-		clocks = <&camcc CAM_CC_MCLK4_CLK>;
+-		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
+-		assigned-clock-rates = <19200000>;
++		clocks = <&ov02c10_xvclk>;
+
+ 		orientation = <0>; /* front facing */
+
+@@ -957,7 +966,7 @@ camera@36 {
+ 		port {
+ 			ov02c10_ep: endpoint {
+ 				data-lanes = <1 2>;
+-				link-frequencies = /bits/ 64 <400000000>;
++				link-frequencies = /bits/ 64 <250000000>;
+ 				remote-endpoint = <&csiphy4_in_ep>;
+ 			};
+ 		};
+-- 
+2.55.0
+

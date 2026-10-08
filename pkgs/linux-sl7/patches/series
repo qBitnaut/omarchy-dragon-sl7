@@ -157,3 +157,7 @@
 
 # 21. IR emitter stage C result: vd55g holds exposure and frame length to Windows Hello values whenever the strobe is on; illuminator on by default (SL7 local)
 0098-SL7-media-i2c-vd55g-Windows-IR-strobe-timing-and-illuminator-on-by-default.patch
+
+# 22. OV02C10 12 MHz external clock: 250 MHz link, default frame length scaled with the link frequency; front camera clocked from a 12 MHz fixed clock (Cragun report, linux-media 2026-07-02)
+0099-media-i2c-ov02c10-Support-a-12-MHz-external-clock.patch
+0100-SL7-arm64-dts-qcom-x1e80100-romulus-Clock-the-front-camera-from-12-MHz.patch
