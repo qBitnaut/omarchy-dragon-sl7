@@ -21,13 +21,20 @@ the typed phrase for 12.5, 25 and 50 mA per channel only; the approval file, the
 IR test boot, the per-boot pulse limit, the hardware timer and the ir_max_ua cap
 all still apply, and there is no 100 mA button. The emitter test sets the IR
 sensor to manual maximum exposure itself and restores it on every exit path.
-Stage C section (linux-sl7 7.2.8-21 and omarchy-surface-sl7 39 or later): buttons C0a, C0b,
-C1 (SW), C1 (HW) and T0b run `pkexec sl7-ir-emitter-test --i-have-read-the-plan --stage NAME
---confirmed` after a Fire / Cancel dialog. Each button is enabled only when the stage before
-it is recorded OK (read with `pkexec sl7-ir-emitter-test --status`, press Status). The stage
-tool starts the IR sensor itself with led_mode set before the stream starts, so the lab
-pauses its own camera reader for the run (the live view freezes, the graph pauses, a banner
-says so) and reconnects when the tool ends; the result (OK or FAIL, STATUS bits decoded:
+The frames are lit: sl7-ir-bridge (linux-sl7 7.2.8-22 and sl7-ir-bridge 0.1.0-2 or later) strobes
+the IR emitter with the sensor's GPIO 1 for every session, at Windows' timing (exposure 100
+lines, frame length 1750 lines), so the picture is no longer the flat dark noise of an unlit
+sensor. The readout shows what the bridge reported for the session ("emitter ON: ...") and a
+lit / dark hint from the frame maximum.
+Stage C section (linux-sl7 7.2.8-22 and omarchy-surface-sl7 41 or later): buttons C0a, C0b
+and T0b run `pkexec sl7-ir-emitter-test --i-have-read-the-plan --stage NAME --confirmed` after
+a Fire / Cancel dialog (C1 SW / HW are retired: C0b found that GPIO 1 drives the emitter, the
+PMIC current is not in the path). T0b is enabled only when C0a is recorded OK (read with
+`pkexec sl7-ir-emitter-test --status`, press Status). The stage tool starts the IR sensor
+itself with led_mode set before the stream starts, so the lab stops its own camera reader
+gracefully for the run (SIGTERM so the device is closed, then a wait for the bridge's stop
+grace; the live view freezes, the graph pauses, a banner says so) and reconnects when the
+tool ends; the result (OK or FAIL, STATUS bits decoded:
 "CH1 open", "ramp-up done", "timer expired") and the stage's frame means with the pulse or
 arm times are shown in the window afterwards.
 
@@ -57,6 +64,8 @@ TOOL = "/usr/bin/sl7-ir-emitter-test"
 MAX_PULSES = 12
 STAGE_MAX_PULSES = 24
 SPARK_S = 10.0
+BRIDGE_STOP_GRACE_S = 1.2  # the bridge keeps streaming 0.5 s after the last reader closes
+LIT_MAX = 24  # an unlit IR frame is flat dark noise (max about 17); lit ones reach 30 and more
 SPIKE_SD = 5.0
 SD_FLOOR = 0.02
 PULSE_DELAY_S = 2
@@ -64,14 +73,11 @@ PULSE_DELAY_S = 2
 STAGES = [
     ("c0a", "C0a", "Hardware strobe armed for about 0.7 s at 12.5 mA per channel with the sensor not streaming. "
      "Pass: STATUS1 stays 0, no ramp or fault.", None),
-    ("c0b", "C0b", "The sensor strobes GPIO 1 with led_mode=1 for about 2 s at a short and at a long exposure, "
-     "the emitter current is NOT armed. Pass: no brightness change.", "c0a"),
-    ("c1-sw", "C1 (SW)", "GPIO 1 strobing with a long exposure and 8 software pulses at 25 mA per channel, "
-     "10 ms each. Stops on a short-circuit bit.", "c0b"),
-    ("c1-hw", "C1 (HW)", "Hardware strobe armed for about 0.7 s at 12.5 and then 25 mA per channel while the "
-     "sensor strobes GPIO 1. Stops on a short-circuit bit.", "c1-sw"),
+    ("c0b", "C0b", "The finding: the sensor strobes GPIO 1 with led_mode=1 at Windows' timing (exposure 100 lines, "
+     "frame 1750 lines) for about 1.3 s, the emitter current is NOT armed, compared with led_mode=0. Recorded OK "
+     "when the frames are brighter: GPIO 1 drives the emitter.", None),
     ("t0b", "T0b", "One 12.5 mA per channel pulse on ir:flash-23 (channels 2 and 3). Expect STATUS1 0x28 "
-     "(CH2 and CH3 open).", "c1-hw"),
+     "(CH2 and CH3 open).", "c0a"),
 ]
 STAGE_LINE = re.compile(r"(STAGE_[A-Z_]+.*)$")
 INSET_SHOW_S = 10
@@ -156,33 +162,68 @@ class Camera:
         self.markers = collections.deque(maxlen=32)  # monotonic fire times
         self.watch = None  # pulse tracking, see begin_watch
         self.paused = threading.Event()
+        self.emitter_note = ""  # the bridge's own report of the session, from its journal
 
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
+
+    @staticmethod
+    def release(p, wait=2.0):
+        """Stop a v4l2-ctl reader gracefully: SIGTERM so it closes the device (the bridge then
+        stops its stream), a wait for it to exit, SIGKILL only if it hangs."""
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+            try:
+                p.wait(timeout=wait)
+            except subprocess.TimeoutExpired:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
 
     def close(self):
         self.stop.set()
         p = self.proc
         if p is not None:
             try:
-                p.kill()
+                p.terminate()
             except OSError:
                 pass
 
     def pause(self):
-        """Release the camera (a stage test starts the sensor itself) and wait until it is released."""
+        """Release the camera (a stage test starts the sensor itself): close the reader
+        gracefully, wait until it is gone, then give the bridge time to stop its stream
+        and let the sensor power down. Blocks for up to about 3 s; run it off the UI thread."""
         self.paused.set()
         self.status = "paused: a Stage C test owns the camera"
         p = self.proc
         if p is not None:
-            try:
-                p.kill()
-            except OSError:
-                pass
+            self.release(p)
         for _ in range(60):
             if self.proc is None:
                 break
             time.sleep(0.05)
+        time.sleep(BRIDGE_STOP_GRACE_S)
+
+    def query_emitter(self):
+        """What the bridge logged for the session that just started (needs journal access)."""
+        time.sleep(1.5)
+        try:
+            r = subprocess.run(["journalctl", "-u", "sl7-ir-bridge", "-n", "40", "--no-pager", "-o", "cat"],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                               timeout=4)
+        except (OSError, subprocess.SubprocessError):
+            return
+        for line in reversed(r.stdout.splitlines()):
+            if "emitter ON:" in line:
+                self.emitter_note = "bridge: " + line.split("emitter ON:", 1)[1].strip()
+                return
+            if "running unlit" in line or "emitter OFF" in line or "IR emitter OFF" in line:
+                self.emitter_note = "bridge: emitter dark (" + line.strip()[:70] + ")"
+                return
 
     def resume(self):
         self.status = "reconnecting"
@@ -217,13 +258,11 @@ class Camera:
             self.proc = p
             self.sessions += 1
             self.status = "streaming (session %d)" % self.sessions
+            threading.Thread(target=self.query_emitter, daemon=True).start()
             try:
                 self.read_session(p)
             finally:
-                try:
-                    p.kill()
-                except OSError:
-                    pass
+                self.release(p)
                 p.wait()
                 self.proc = None
             if not self.stop.is_set() and not self.paused.is_set():
@@ -465,8 +504,9 @@ class Lab(Gtk.Application):
             now = time.monotonic()
             with self.cam.lock:
                 fps = sum(1 for h in self.cam.history if h[0] > now - 1.0)
-            self.readout.set_text("frame %d   mean %6.2f   max %3d   %d fps   %s" % (
-                seq, mean, mx, fps, self.cam.status))
+            self.readout.set_text("frame %d   mean %6.2f   max %3d   %d fps   %s   %s%s" % (
+                seq, mean, mx, fps, self.cam.status, "LIT" if mx >= LIT_MAX else "dark",
+                ("   " + self.cam.emitter_note) if self.cam.emitter_note else ""))
         else:
             with self.cam.lock:
                 last_t = self.cam.history[-1][0] if self.cam.history else 0.0
@@ -857,14 +897,16 @@ class Lab(Gtk.Application):
         self.stage_events = []
         self.stage_graph.queue_draw()
         self.inset_box.set_visible(False)
-        self.stage_verdict.set_text("Stage %s: waiting for the emitter test (authenticate if asked); live view paused..." % name)
-        self.cam.pause()
+        self.stage_verdict.set_text("Stage %s: stopping the live view, then waiting for the emitter test (authenticate if asked)..." % name)
         threading.Thread(target=self.stage_worker, args=(name, outdir), daemon=True).start()
 
     def stage_worker(self, name, outdir):
         cmd = ["pkexec", TOOL, "--i-have-read-the-plan", "--stage", name, "--confirmed"]
         rc = -1
         res = {"name": name, "rc": rc, "result": None, "summary": "", "csv": None, "outdir": outdir}
+        # close the live view's reader gracefully and let the bridge stop, before the tool starts the sensor
+        self.cam.pause()
+        self.ui(self.stage_verdict.set_text, "Stage %s: live view paused, waiting for the emitter test (authenticate if asked)..." % name)
         try:
             p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)

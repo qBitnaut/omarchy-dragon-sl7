@@ -101,49 +101,40 @@
 #       no approval file and no typed phrase, but still needs root and the IR
 #       test boot entry, and the same bridge.
 #
-#   sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c0a|c0b|c1-sw|c1-hw|t0b [--confirmed]
+#   sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c0a|c0b|t0b [--confirmed]
 #       Stage C of the plan (linux-sl7 7.2.8-21 or later, omarchy-surface-sl7 39 or
-#       later). Hypothesis H2: the sensor's GPIO 1 strobe output enables the emitter
-#       path, and Windows arms the PMIC for a hardware strobe. Evidence so far: a software
-#       strobe gave STATUS1 0x82 (CH1 and CH4 open circuit), INT_RT_STS 0x49 (fault and
-#       ramp-down, ramp-up never) and no current. The stages run in this order and each
-#       refuses to run unless the one before it is recorded OK, for the running kernel, in
-#       /var/lib/omarchy-surface-sl7/ir-stage-c/<stage> (the tool writes the record, with
-#       the register evidence, and a time-stamped copy; --status shows them). Every stage
-#       keeps all the gates of the other modes (root, IR test boot, the approval file,
-#       the per-boot pulse and arm count: at most 24, a full pass is 12, the hardware
-#       timer always on, the ir_max_ua cap) and is at most 25 mA per channel, enforced in
-#       this file and, for the hardware strobe, in the kernel.
+#       later). RESULT, stage C0b: the sensor's GPIO 1 strobe drives the emitter on
+#       its own (led_mode=1 with the PMIC not armed made the frames brighter: exposure
+#       100 lines mean 15.7 -> 20.1, p99 16 -> 38; exposure 6268 lines mean 81.9, p99
+#       255). The PMIC current limits therefore do not apply; the safety control is the
+#       strobe duration = exposure, which linux-sl7 7.2.8-22 (patch 0098) holds to
+#       Windows' 100 lines / 1750 lines whenever led_mode is on, and sl7-ir-bridge uses
+#       the emitter this way in normal operation. The stages c1-sw and c1-hw (PMIC
+#       current on top of the strobe) are retired. c0a and t0b stay as PMIC checks.
+#       Every stage keeps all the gates of the other modes (root, IR test boot, the
+#       approval file, the per-boot pulse and arm count: at most 24, the hardware
+#       timer always on, the ir_max_ua cap) and is at most 25 mA per channel, enforced
+#       in this file and, for the hardware strobe, in the kernel. A stage that must pass
+#       first is recorded in /var/lib/omarchy-surface-sl7/ir-stage-c/<stage> (the tool
+#       writes the record, with the evidence, and a time-stamped copy; --status shows
+#       them); t0b needs c0a, c0b needs nothing.
 #       The camera must be idle: close the sl7-ir-lab live view (the lab pauses it by
 #       itself for these stages). The sensor's led_mode is set BEFORE the stream starts
-#       (the GPIO configuration latches at stream start) and the vd55g needs
-#       illuminator=Y, which only the IR test boot sets. On every exit path: strobe off,
-#       then led_mode 0, then the stream off, then exposure, blanking and auto exposure
-#       back to what they were, and ir_max_ua back to 25000.
+#       (the GPIO configuration latches at stream start). While c0b runs the tool keeps
+#       /run/sl7-ir-bridge.hands-off fresh, so the bridge does not set led_mode itself.
+#       On every exit path: strobe off, then led_mode 0, then the stream off, then
+#       exposure, blanking and auto exposure back to what they were, and ir_max_ua back
+#       to 25000.
 #         c0a    Hardware strobe armed (ir:flash-14, 12.5 mA per channel, about 0.7 s) with
 #                the sensor NOT streaming. PASS: STATUS1 stays 0 and no ramp or fault bit
 #                appears in the first 30 ms or in the samples taken while armed. Otherwise
 #                STOP (recorded FAIL): the strobe input is not idle.
 #         c0b    Sensor streaming with led_mode=1 set before stream-on, the PMIC NOT armed,
-#                at exposure 100 lines / frame 1750 lines (about 1.3 s) and at exposure
-#                6268 / frame 12600 (about 2 s), each compared with the same sensor setup
-#                at led_mode=0. PASS: no brightness change (median of the frame means and
-#                99th percentiles within 5 robust sd and 0.5 / 4 grey levels). Lit: STOP,
-#                GPIO 1 drives the emitter on its own.
-#         c1-sw  (T3) GPIO 1 strobing with the long exposure (about 100 ms high in a 200 ms
-#                frame), 8 software pulses at 25 mA per channel, 10 ms, 300 to 700 ms
-#                apart. Logs per pulse STATUS1, STATUS2, INT_RT_STS at +0, +1, +3 and +15
-#                ms and STATUS3 at +15 ms (from the kernel snapshots), the pulse's phase
-#                against the frame arrivals, and whether the frames spiked. Reports how
-#                many pulses had STATUS1 == 0, the ramp-up bit (INT_RT_STS bit 4) and a
-#                brightness spike. STOP on any short-circuit bit (an even STATUS1 bit),
-#                STATUS2 not 0, a fault, or missing kernel evidence. Open-circuit bits
-#                are a finding, not a stop.
-#         c1-hw  (T4) Exposure 100 lines / frame 1750 lines, hardware strobe armed for
-#                about 0.7 s at 12.5 mA per channel, then again at 25 mA per channel (two
-#                sub-steps, two arms), STATUS polled back to back for 30 ms by the kernel
-#                and sampled while armed, frames compared with the unarmed ones. STOP as
-#                for c1-sw. The kernel disarms by itself after 1 s at the latest.
+#                at Windows' timing, exposure 100 lines / frame 1750 lines (about 1.3 s),
+#                compared with the same sensor setup at led_mode=0. Recorded OK, as the
+#                finding "GPIO 1 drives the emitter", when the frames are brighter (median
+#                of the frame means and 99th percentiles beyond 5 robust sd and 0.5 / 4
+#                grey levels); FAIL when they are not.
 #         t0b    (optional) ir:flash-23 (channels 2 and 3), one software pulse at 12.5 mA
 #                per channel, 10 ms. Expect STATUS1 0x28 (CH2 and CH3 open circuit): it
 #                cross-checks how the 0x82 of channels 1 and 4 is read.
@@ -196,7 +187,7 @@ readonly FIRE_TIMEOUT_US=10000
 readonly MAX_REPEAT=3
 readonly MAX_PULSES_PER_BOOT=12
 # --stage runs: at most 25 mA per channel, at most 24 pulses or arms per boot (a
-# full stage C pass is 12: c0a 1, c1-sw 8, c1-hw 2, t0b 1), shared counter.
+# full stage C pass is 2: c0a 1, t0b 1), shared counter.
 readonly STAGE_MAX_CH_UA=25000
 readonly STAGE_MAX_PULSES_PER_BOOT=24
 readonly PRE_PULSE_GAP_S=1
@@ -234,6 +225,10 @@ irparam=$R/sys/module/leds_qcom_flash/parameters/ir_max_ua
 approval=$R/etc/omarchy-surface-sl7/ir-stage-b-approved
 logf=$R/var/log/sl7-ir-emitter-test.log
 rundir=$R/run/sl7-ir-emitter-test
+# While this file is younger than 120 s the sl7-ir-bridge leaves led_mode alone
+# (it neither sets nor clears it), so a stage that sets led_mode itself is not
+# overridden by the bridge's own emitter handling. Removed on every exit.
+handsoff=$R/run/sl7-ir-bridge.hands-off
 debugfs_regmap=$R/sys/kernel/debug/regmap
 subdev_sys=$R/sys/class/video4linux
 camdev=$R/dev/v4l/by-id/sl7-ir-camera
@@ -438,8 +433,6 @@ readonly SENSOR_FRAME_DEF=1860 # VD55G_FRAME_LENGTH_DEF of the vd55g driver (lin
 readonly SENSOR_ACTIVE_H=604
 readonly SHORT_EXPO=100
 readonly SHORT_FRAME=1750
-readonly LONG_EXPO=6268
-readonly LONG_FRAME=12600
 sd_h=0
 mark=
 c0b_out=
@@ -756,10 +749,7 @@ stage_result() { # NAME -> OK, FAIL, stale (another kernel) or none
 
 stage_prev() { # NAME -> the stage that must have passed first
   case $1 in
-    c0b) echo c0a ;;
-    c1-sw) echo c0b ;;
-    c1-hw) echo c1-sw ;;
-    t0b) echo c1-hw ;;
+    t0b) echo c0a ;;
     *) echo "" ;;
   esac
 }
@@ -1016,19 +1006,10 @@ stage_banner() {
   PASS: STATUS1 stays 0 and no ramp or fault bit appears. 0x82, a ramp or a fault: STOP."
       ;;
     c0b)
-      what="STAGE C0b: sensor strobes GPIO 1, PMIC NOT armed (negative control)"
-      detail="No PMIC current at all. The sensor streams with led_mode=1 (short exposure, then
-  long exposure), compared with led_mode=0. PASS: no brightness change. Lit: STOP."
-      ;;
-    c1-sw)
-      what="STAGE C1 (SW, T3): GPIO 1 strobing with a long exposure, 8 software pulses"
-      detail="8 pulses of ir:flash-14 at 25 mA per channel, 10 ms, 300 to 700 ms apart.
-  STOP on any short-circuit bit in STATUS1, or STATUS2 not 0."
-      ;;
-    c1-hw)
-      what="STAGE C1 (HW, T4): hardware strobe armed while the sensor strobes GPIO 1"
-      detail="Two arms of ir:flash-14, 12.5 then 25 mA per channel, about 0.7 s each, 10 ms hardware timer,
-  exposure 100 lines (1.6 ms). STOP on any short-circuit bit in STATUS1, or STATUS2 not 0."
+      what="STAGE C0b: sensor strobes GPIO 1, PMIC NOT armed (the finding: GPIO 1 drives the emitter)"
+      detail="No PMIC current at all. The sensor streams with led_mode=1 at Windows' timing (exposure 100
+  lines, frame 1750 lines, about 1.3 s), compared with led_mode=0. Recorded OK when the frames are
+  brighter: GPIO 1 drives the emitter."
       ;;
     t0b)
       what="STAGE T0b: ir:flash-23 (channels 2 and 3), one software pulse"
@@ -1105,12 +1086,14 @@ c0b_phase() { # LABEL EXPOSURE FRAME_LENGTH MIN_INDEX TIMEOUT: base (led_mode 0)
   base=$watchdir/c0b-$label-base.txt
   tst=$watchdir/c0b-$label-test.txt
   sd_wait_idle
+  touch -- "$handsoff" 2>/dev/null || log "WARN cannot create ${handsoff#"$R"}: the bridge may set led_mode itself"
   sd_setup 0 "$expo" "$flen"
   log "C0B $label: baseline, led_mode 0, exposure $expo lines, frame $flen lines"
   grab_start "$base"
   grab_wait "$idx" "$tmo"
   grab_stop
   sd_wait_idle
+  touch -- "$handsoff" 2>/dev/null || true
   sd_ctl_set led_mode 1
   stage_started=1
   log "C0B $label: test, led_mode 1 set before the stream starts, PMIC not armed"
@@ -1130,175 +1113,17 @@ stage_c0b() {
   mkdir -p "$rundir" && watchdir=$(mktemp -d "$rundir/watch.XXXXXX") || die 8 "cannot create a private directory under ${rundir#"$R"}"
   chmod 0700 "$watchdir" 2>/dev/null || true
   stage_prep 12500
+  # Windows' own timing: exposure 100 lines, frame length 1750 lines. The kernel
+  # (linux-sl7 7.2.8-22) refuses anything longer or faster while led_mode is on,
+  # so there is no long-exposure phase any more (it was measured on 7.2.8-21).
   c0b_phase short "$SHORT_EXPO" "$SHORT_FRAME" 45 10
-  c0b_phase long "$LONG_EXPO" "$LONG_FRAME" 9 12
   stage_ev "c0b: $(tr '\n' ' ' <<<"$c0b_out")"
   if grep -q 'verdict=LIT' <<<"$c0b_out"; then
-    log "STOP c0b: the sensor strobe alone changed the brightness"
-    stage_finish FAIL "STOP: GPIO 1 drives the emitter on its own (brightness changed with the PMIC not armed). Re-plan: the current limits would not apply."
-  elif grep -q 'verdict=INSUFFICIENT' <<<"$c0b_out" || [[ $(grep -c 'verdict=DARK' <<<"$c0b_out") -ne 2 ]]; then
-    stage_finish FAIL "not enough frames for a verdict (see the STAGE_CMP lines); run it again"
+    stage_finish OK "FINDING: GPIO 1 drives the emitter. With led_mode 1 set before stream-on and the PMIC not armed, the frames are brighter at Windows' timing (exposure 100 lines, frame 1750 lines). The PMIC current limits do not apply; the safety control is the strobe duration, held to Windows' by the kernel."
+  elif grep -q 'verdict=INSUFFICIENT' <<<"$c0b_out"; then
+    stage_finish FAIL "not enough frames for a verdict (see the STAGE_CMP line); run it again"
   else
-    stage_finish OK "no brightness change with led_mode 1 and the PMIC not armed, short and long exposure"
-  fi
-}
-
-# ---- c1-sw: software pulses while the sensor strobes GPIO 1 -----------------------
-stage_c1_sw() {
-  local i gap_ms tmark ktxt snaps m s1 s2 rt s3 line lbl stop_msg="" clear_n=0 ramp_n=0 spike_n=0
-  local -a lbls=("t0" "t0+1ms" "t0+3ms" "t0+15ms")
-  local ev csvf ana re_s3=' 09=([0-9a-f]{2})' re_sp='spikes=([0-9]+)'
-  sd_open
-  watch_prereqs
-  mkdir -p "$rundir" && watchdir=$(mktemp -d "$rundir/watch.XXXXXX") || die 8 "cannot create a private directory under ${rundir#"$R"}"
-  chmod 0700 "$watchdir" 2>/dev/null || true
-  stage_prep 25000
-  sd_wait_idle
-  sd_setup 1 "$LONG_EXPO" "$LONG_FRAME"
-  mark_klog
-  tmark=$mark
-  grab_start "$watchdir/c1sw.txt"
-  grab_wait 9 15
-  stage_started=1
-  sample_regs "c1-sw idle, streaming with GPIO 1 strobing"
-  for ((i = 1; i <= stage_pulses; i++)); do
-    gap_ms=$((300 + RANDOM % 401))
-    sleep "$(printf '%d.%03d' $((gap_ms / 1000)) $((gap_ms % 1000)))"
-    wr "$led/flash_strobe" 0
-    wr "$led/flash_brightness" "$fire_ua"
-    rdback "$led/flash_brightness" "$fire_ua"
-    wr "$led/flash_timeout" "$FIRE_TIMEOUT_US"
-    rdback "$led/flash_timeout" "$FIRE_TIMEOUT_US"
-    fault_soft "armed"
-    [[ -z $fault_text ]] || { stop_msg="fault on $ledname before pulse $i:$fault_text"; break; }
-    count_pulse
-    log "FIRE $ledname $fire_ua uA ($per_ch_ua uA x $nch), pulse $i/$stage_pulses after a ${gap_ms} ms gap (count this boot: $pulses)"
-    wr "$led/flash_strobe" 1
-    sleep "$POST_STROBE_WAIT_S"
-    wr "$led/flash_strobe" 0
-    snaps=$(dmesg 2>/dev/null | grep -F 'SL7 IR strobe snapshot' | tail -n 8)
-    local s1l="" s2l="" rtl="" unsafe=0 have=0 clear=yes ramp=no
-    for lbl in "${lbls[@]}"; do
-      s1=$(getreg "$snaps" "$lbl" 06)
-      s2=$(getreg "$snaps" "$lbl" 07)
-      rt=$(getreg "$snaps" "$lbl" 10)
-      s1l+="${s1:-??},"
-      s2l+="${s2:-??},"
-      rtl+="${rt:-??},"
-      if [[ -n $s1 ]]; then
-        have=1
-        [[ $(hexv "$s1") -eq 0 ]] || clear=no
-      fi
-      if unsafe_s1s2 "$s1" "$s2"; then unsafe=1; fi
-      if (($(hexv "$rt") & 0x10)); then ramp=yes; fi
-    done
-    line=$(grep -F 'STATUS3 at t0+15ms' <<<"$snaps" | tail -n 1)
-    s3=""
-    if [[ $line =~ $re_s3 ]]; then s3=${BASH_REMATCH[1]}; fi
-    m=$(getreg "$snaps" "t0+3ms" 06)
-    log "STAGE_PULSE i=$i gap_ms=$gap_ms STATUS1[t0,+1,+3,+15ms]=${s1l%,} STATUS2=${s2l%,} INT_RT_STS=${rtl%,} STATUS3@15ms=${s3:-??} s1_clear=$clear rampup=$ramp | STATUS1@+3ms: $(dec_s1 "$m") | STATUS3@+15ms: $(dec_s3 "$s3")"
-    stage_ev "pulse $i: STATUS1 ${s1l%,} STATUS2 ${s2l%,} INT_RT_STS ${rtl%,} STATUS3@15ms ${s3:-??}"
-    if ((!have)); then
-      stop_msg="no kernel snapshot for pulse $i (linux-sl7 7.2.8-21 running? dmesg readable?): cannot verify it was safe"
-      break
-    fi
-    if ((unsafe)); then
-      stop_msg="pulse $i: a short-circuit bit in STATUS1 (${s1l%,}) or STATUS2 not 0 (${s2l%,})"
-      break
-    fi
-    [[ $clear == yes ]] && clear_n=$((clear_n + 1))
-    [[ $ramp == yes ]] && ramp_n=$((ramp_n + 1))
-    fault_soft "after"
-    [[ -z $fault_text ]] || { stop_msg="fault on $ledname after pulse $i:$fault_text"; break; }
-  done
-  wr "$led/flash_strobe" 0
-  sleep 1.2
-  grab_stop
-  ktxt=$(klog_since "$tmark")
-  ev=$watchdir/events.txt
-  events_from_klog pulse "$ktxt" "$ev"
-  csvf=${logf%.log}-stage-$stage-$(date +%Y%m%dT%H%M%S).csv
-  ana=$(python3 -c "$STAGE_PY" frames "$watchdir/c1sw.txt" "$ev" "$csvf" pulse 2>&1) || true
-  while IFS= read -r line; do [[ -z $line ]] || log "$line"; done <<<"$ana"
-  if [[ $ana =~ $re_sp ]]; then spike_n=${BASH_REMATCH[1]}; fi
-  log "STAGE_FRAMES csv=$csvf"
-  if [[ -n $stop_msg ]]; then
-    log "STOP c1-sw: $stop_msg"
-    stage_finish FAIL "STOP: $stop_msg"
-  else
-    stage_finish OK "$stage_pulses pulses at 25 mA per channel with GPIO 1 strobing: STATUS1 == 0 on $clear_n, ramp-up bit on $ramp_n, brightness spike on $spike_n (no stop condition)"
-  fi
-}
-
-# ---- c1-hw: hardware strobe armed, sensor strobing -------------------------------
-stage_c1_hw() {
-  local ua tmark ktxt ev csvf ana line i k stop_msg="" subsum="" spike_n=0 re_sp='spikes=([0-9]+)'
-  [[ -e $led/hw_strobe_arm ]] || die 4 "$ledname has no hw_strobe_arm attribute (linux-sl7 7.2.8-21 or later)"
-  sd_open
-  watch_prereqs
-  mkdir -p "$rundir" && watchdir=$(mktemp -d "$rundir/watch.XXXXXX") || die 8 "cannot create a private directory under ${rundir#"$R"}"
-  chmod 0700 "$watchdir" 2>/dev/null || true
-  sd_wait_idle
-  sd_setup 1 "$SHORT_EXPO" "$SHORT_FRAME"
-  mark_klog
-  tmark=$mark
-  grab_start "$watchdir/c1hw.txt"
-  grab_wait 40 10
-  stage_started=1
-  sample_regs "c1-hw idle, streaming with GPIO 1 strobing, PMIC not armed"
-  for ua in 12500 25000; do
-    stage_prep "$ua"
-    fault_soft "armed"
-    [[ -z $fault_text ]] || { stop_msg="fault on $ledname before the $((ua / 1000)) mA arm:$fault_text"; break; }
-    mark_klog
-    count_pulse
-    log "FIRE hardware strobe arm $ledname: $((ua * nch)) uA total ($ua uA x $nch), timer 10 ms (count this boot: $pulses)"
-    wr "$led/hw_strobe_arm" 1
-    for ((i = 1; i <= 3; i++)); do
-      sleep 0.15
-      sample_regs "c1-hw $((ua / 1000)).$(((ua % 1000) / 100)) mA armed, sample $i"
-      if unsafe_s1s2 "$g_s1" "$g_s2"; then
-        stop_msg="armed at $ua uA per channel: STATUS1 0x$g_s1 or STATUS2 0x$g_s2"
-        break
-      fi
-    done
-    sleep 0.1
-    wr "$led/hw_strobe_arm" 0
-    sample_regs "c1-hw $ua uA after disarm"
-    sleep 0.2
-    ktxt=$(klog_since "$mark")
-    hw_eval "$ktxt"
-    if ((!k_have)); then
-      stop_msg=${stop_msg:-"no kernel poll line for the $ua uA arm (linux-sl7 7.2.8-21 running, dmesg readable?)"}
-    else
-      show_reg "c1-hw $ua uA per channel, kernel poll union (first 30 ms)" "$k_u1" "$k_u2" "$k_u3" "$k_urt"
-      if unsafe_s1s2 "$k_u1" "$k_u2"; then
-        stop_msg=${stop_msg:-"$ua uA per channel: short-circuit bit in STATUS1 0x$k_u1 or STATUS2 0x$k_u2 in the first 30 ms"}
-      fi
-      k=no
-      if (($(hexv "$k_urt") & 0x10)); then k=yes; fi
-      subsum+="$((ua / 1000)) mA/ch: STATUS1 union 0x$k_u1, STATUS3 union 0x$k_u3, ramp-up $k; "
-      stage_ev "hw arm $ua uA/ch: poll union STATUS1=0x$k_u1 STATUS2=0x$k_u2 STATUS3=0x$k_u3 INT_RT_STS=0x$k_urt"
-    fi
-    [[ -z $stop_msg ]] || break
-    sleep 0.5
-  done
-  wr "$led/hw_strobe_arm" 0
-  sleep 0.6
-  grab_stop
-  ktxt=$(klog_since "$tmark")
-  ev=$watchdir/events.txt
-  events_from_klog arm "$ktxt" "$ev"
-  csvf=${logf%.log}-stage-$stage-$(date +%Y%m%dT%H%M%S).csv
-  ana=$(python3 -c "$STAGE_PY" frames "$watchdir/c1hw.txt" "$ev" "$csvf" arm 2>&1) || true
-  while IFS= read -r line; do [[ -z $line ]] || log "$line"; done <<<"$ana"
-  if [[ $ana =~ $re_sp ]]; then spike_n=${BASH_REMATCH[1]}; fi
-  log "STAGE_FRAMES csv=$csvf"
-  if [[ -n $stop_msg ]]; then
-    log "STOP c1-hw: $stop_msg"
-    stage_finish FAIL "STOP: $stop_msg"
-  else
-    stage_finish OK "hardware strobe armed twice with the sensor strobing: ${subsum}brightness spike in $spike_n of 2 arm windows (no stop condition)"
+    stage_finish FAIL "no brightness change with led_mode 1 and the PMIC not armed: the sensor strobe alone did not light the emitter in this run (expected lit since stage C0b of 7.2.8-21)"
   fi
 }
 
@@ -1367,8 +1192,6 @@ run_stage() {
   case $stage in
     c0a) stage_c0a ;;
     c0b) stage_c0b ;;
-    c1-sw) stage_c1_sw ;;
-    c1-hw) stage_c1_hw ;;
     t0b) stage_t0b ;;
   esac
   log "DONE stage $stage"
@@ -1378,6 +1201,7 @@ run_stage() {
 # Emitter first (strobe off), then the stage sensor state (led_mode 0, stream off, exposure and
 # blanking back), exposure and the limit, then the capture, then the raw frames (never kept).
 on_exit() {
+  rm -f -- "$handsoff"
   disarm_all
   stage_sensor_restore
   expo_restore
@@ -1466,7 +1290,7 @@ print_status() {
     if [[ -e $d/hw_strobe_arm ]]; then echo "${d##*/}: hw_strobe_arm present"; fi
   done
   echo "Stage C records (OK / FAIL / none; stale = recorded on another kernel):"
-  for d in c0a c0b c1-sw c1-hw t0b; do
+  for d in c0a c0b t0b; do
     echo "stage-c $d: $(stage_result "$d")"
   done
 }
@@ -1521,10 +1345,9 @@ elif [[ -n $stage ]]; then
   case $stage in
     c0a) stage_pulses=1; per_ch_ua=12500; step_label=12.5; ledid=14 ;;
     c0b) stage_pulses=0; per_ch_ua=12500; step_label=12.5; ledid=14 ;;
-    c1-sw) stage_pulses=8; per_ch_ua=25000; step_label=25; ledid=14 ;;
-    c1-hw) stage_pulses=2; per_ch_ua=25000; step_label=25; ledid=14 ;;
+    c1-sw | c1-hw) echo "sl7-ir-emitter-test: stage $stage is retired: stage C0b found that sensor GPIO 1 drives the emitter, the PMIC current is not in the path (linux-sl7 7.2.8-22 and the sl7-ir-bridge use it directly)" >&2; exit 2 ;;
     t0b) stage_pulses=1; per_ch_ua=12500; step_label=12.5; ledid=23 ;;
-    *) echo "sl7-ir-emitter-test: --stage takes: c0a, c0b, c1-sw, c1-hw or t0b (got '$stage')" >&2; usage ;;
+    *) echo "sl7-ir-emitter-test: --stage takes: c0a, c0b or t0b (got '$stage')" >&2; usage ;;
   esac
   ((per_ch_ua <= STAGE_MAX_CH_UA)) || { echo "sl7-ir-emitter-test: internal error: stage current above the 25 mA per channel limit" >&2; exit 2; }
   led_kind=ir
@@ -1669,7 +1492,7 @@ if [[ -n $stage ]]; then
     [[ -r $illumparam && $(rd "$illumparam") == Y ]] || die 4 "vd55g is not loaded with illuminator=Y (IR test boot of linux-sl7 7.2.8-21 or later, with omarchy-surface-sl7 39 or later)"
   fi
   case $stage in
-    c0a | c1-hw) [[ -e $led/hw_strobe_arm ]] || die 4 "$ledname has no hw_strobe_arm attribute (linux-sl7 7.2.8-21 or later)" ;;
+    c0a) [[ -e $led/hw_strobe_arm ]] || die 4 "$ledname has no hw_strobe_arm attribute (linux-sl7 7.2.8-21 or later)" ;;
   esac
   run_stage
   exit "$stage_rc"

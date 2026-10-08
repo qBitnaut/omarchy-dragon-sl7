@@ -27,7 +27,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
 | 8d | optional kernel test boot entries, PSR (known broken), the IR emitter test boot (`ir-test`), and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
-| 8g | IR emitter and IR sensor illuminator load gates, the disabled Stage B and Stage C channel test tool and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
+| 8g | IR emitter load gate (`leds_qcom_flash`, IR test boot only), the disabled Stage B and Stage C channel test tool and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
 | 8h | opt-in USB runtime PM, one dwc3 controller at a time, off by default (section 8h) | `/usr/bin/sl7-usb-rpm`, `/usr/lib/udev/rules.d/80-omarchy-sl7-usb-rpm.rules`, `/etc/omarchy-surface-sl7/usb-rpm.conf` |
 | 8i | real panel refresh rate: vblank loop, or the read-only DPU frame counter as root (section 8i) | `/usr/bin/sl7-vrr-rate` |
@@ -761,59 +761,66 @@ action `org.omarchy.sl7.ir-emitter-test` (`allow_active=auth_admin_keep`) means 
 covers the pulses of the next few minutes; a polkit agent must be running in the session. Needs
 v4l-utils, gtk4, python-gobject, python-cairo and polkit (optional dependencies of the package).
 
-**Stage C (omarchy-surface-sl7 39, with linux-sl7 7.2.8-21): does the sensor's strobe output enable
-the emitter?** Evidence so far: a software strobe gave STATUS1 `0x82` (CH1 and CH4 open circuit),
+**Stage C (omarchy-surface-sl7 39 to 41, with linux-sl7 7.2.8-21 and -22): result, GPIO 1 drives the
+emitter.** Evidence going in: a software strobe gave STATUS1 `0x82` (CH1 and CH4 open circuit),
 INT_RT_STS `0x49` (fault and ramp-down, ramp-up never) and no current. Hypothesis H2: the sensor's
-GPIO 1 strobe output (Windows writes `0x0468 = 0x02`) enables the emitter path, and Windows arms the
-PMIC for a hardware strobe (`CHAN_STROBE = 0x05`, strobe source bits 6:4 = 0, timer left at reset).
-Everything is at most 25 mA per channel, the hardware timer is always on (10 ms), every stage stops
-on any fault, and the stages are gated in order. Kernel side (patches 0094 to 0097): the `vd55g`
-module parameter `illuminator` (read-only, default 0, set to 1 only by the modprobe rule of this
-package on the IR test boot) makes the driver honour the device tree's `st,leds = <1>` and expose
-the `led_mode` control (the GPIO 1 configuration latches at stream start, so `led_mode` is set
-before the stream starts); `leds-qcom-flash` gets a `hw_strobe_arm` attribute on the IR LEDs (write 1
-to arm the PMIC for a hardware strobe, 0 to disarm; refuses above 25 mA per channel; disarms by
-itself after 1 s, on remove, shutdown and suspend), more registers and timestamps in the strobe
-snapshot, and a second ganged LED `ir:flash-23` (channels 2 and 3) for the T0b decode check.
+GPIO 1 strobe output (Windows writes `0x0468 = 0x02`) enables the emitter path. **Stage C0b
+confirmed it:** with `led_mode=1` set before stream-on and the PMIC not armed, the frames were
+brighter (exposure 100 lines: mean 15.7 to 20.1, p99 16 to 38; exposure 6268 lines: mean 81.9, p99
+255). The emitter is lit by the sensor's strobe alone, so the PMIC current caps and timers do not
+apply and the only safety control is the strobe duration, which is the exposure, and its
+repetition, the frame length. Since linux-sl7 7.2.8-22 (patch 0098) the `vd55g` driver holds both
+to what Windows Hello programs whenever `led_mode` is on: exposure at most 100 lines (1.59 ms),
+frame length at least 1750 lines (27.8 ms, 36 fps, duty 5.7 %), at control set time, on `led_mode`
+change and at stream start, whatever user space asks. The `illuminator` parameter now defaults to 1,
+so this package no longer gates `vd55g` on the IR test boot (only `leds_qcom_flash`, the PMIC flash
+driver, keeps its gate), and `sl7-ir-bridge` lights the emitter for each camera session. Kernel side
+of the earlier stages (patches 0094 to 0097): `leds-qcom-flash` has a `hw_strobe_arm` attribute on
+the IR LEDs (write 1 to arm the PMIC for a hardware strobe, 0 to disarm; refuses above 25 mA per
+channel; disarms by itself after 1 s, on remove, shutdown and suspend), more registers and
+timestamps in the strobe snapshot, and a second ganged LED `ir:flash-23` (channels 2 and 3) for the
+T0b decode check.
+
+Stages `c1-sw` and `c1-hw` (PMIC current on top of the strobe) are **retired** (omarchy-surface-sl7
+41): the tool exits 2 with an explanation. `c0b` is recorded as the finding and needs no earlier
+stage; `t0b` needs `c0a`.
 
 ```
 sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c0a
 sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c0b
-sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c1-sw
-sudo sl7-ir-emitter-test --i-have-read-the-plan --stage c1-hw
 sudo sl7-ir-emitter-test --i-have-read-the-plan --stage t0b      # optional
 ```
 
-| Stage | What it does | Pass / stop |
+| Stage | What it does | Result |
 |---|---|---|
 | `c0a` | PMIC armed for a hardware strobe, ir:flash-14 at 12.5 mA per channel for about 0.7 s, **sensor not streaming** (negative control: is the strobe input idle?) | PASS: STATUS1 0 and no ramp or fault bit in the kernel's 30 ms back-to-back poll and in the samples while armed. STOP and FAIL on `0x82` or any ramp-up or fault bit. |
-| `c0b` | Sensor streaming with `led_mode=1` set before stream-on, PMIC **not** armed, at exposure 100 lines / frame 1750 lines and at exposure 6268 / frame 12600, each compared with `led_mode=0` at the same setup (negative control: does GPIO 1 light the emitter by itself?) | PASS: median frame mean and p99 within 5 robust sd and 0.5 / 4 grey levels of the baseline. Lit: STOP and FAIL, re-plan. |
-| `c1-sw` (T3) | GPIO 1 strobing at the long exposure (about 100 ms high in a 200 ms frame) and 8 software pulses at 25 mA per channel, 10 ms, 300 to 700 ms apart; per pulse STATUS1, STATUS2, INT_RT_STS at +0, +1, +3, +15 ms and STATUS3 at +15 ms, the pulse's phase against the frame arrivals, and whether the frames spiked | Reports how many pulses had STATUS1 0, the ramp-up bit (INT_RT_STS bit 4) and a brightness spike. STOP and FAIL on a short-circuit bit (an even STATUS1 bit), STATUS2 not 0, a fault, or missing kernel evidence. Open-circuit bits are a finding, not a stop. |
-| `c1-hw` (T4) | Exposure 100 lines / frame 1750 lines, hardware strobe armed about 0.7 s at 12.5 mA per channel, then again at 25, with the sensor strobing; STATUS polled back to back by the kernel for 30 ms and sampled while armed; frames compared with the unarmed ones | Same stop rules as `c1-sw`; the lit / not lit result is reported. |
+| `c0b` | Sensor streaming with `led_mode=1` set before stream-on, PMIC **not** armed, at Windows' timing (exposure 100 lines / frame 1750 lines), compared with `led_mode=0` at the same setup. While it runs the tool keeps `/run/sl7-ir-bridge.hands-off` fresh so the bridge does not set `led_mode` itself | Recorded OK as the finding "GPIO 1 drives the emitter" when the median frame mean and p99 are beyond 5 robust sd and 0.5 / 4 grey levels brighter than the baseline. FAIL if not brighter. The long-exposure phase of 7.2.8-21 is gone: the driver now refuses exposures above 100 lines while `led_mode` is on. |
 | `t0b` | `ir:flash-23` (channels 2 and 3), one software pulse at 12.5 mA per channel | Expect STATUS1 `0x28` (CH2 and CH3 open): confirms how the `0x82` of CH1 and CH4 is read. FAIL if different (still harmless). |
 
-Each stage refuses unless the stage before it is recorded OK for the running kernel
-(`/var/lib/omarchy-surface-sl7/ir-stage-c/<stage>`, written by the tool with the register evidence
-and a time-stamped copy; `sl7-ir-emitter-test --status` lists them as `stage-c NAME: OK|FAIL|none|stale`).
-The order is c0a, c0b, c1-sw, c1-hw, t0b. All other gates stay: root, the IR test boot,
+Records: `/var/lib/omarchy-surface-sl7/ir-stage-c/<stage>`, written by the tool with the register
+evidence and a time-stamped copy; `sl7-ir-emitter-test --status` lists them as `stage-c NAME:
+OK|FAIL|none|stale`. All other gates stay: root, the IR test boot,
 `/etc/omarchy-surface-sl7/ir-stage-b-approved`, one run at a time, the per-boot counter (a hardware
-arm counts like a pulse; stage runs may use 24 per boot, a full pass is 12), `ir_max_ua` (restored to
-25000), the typed phrase `FIRE STAGE C0A` (and so on) or `--confirmed` from the lab. The camera must
-be idle (close the lab's live view if you run the tool by hand). On every exit path, in order:
-strobe off, `led_mode` 0, stream off, exposure, blanking and auto exposure restored. Output lines
-for programs: `STAGE_REG` (with the bits decoded: "CH1 open", "ramp-up done", "timer expired"),
-`STAGE_PULSE`, `STAGE_CMP`, `STAGE_PULSE_FRAMES`, `STAGE_ARM_FRAMES`, `STAGE_ANALYSIS`,
-`STAGE_FRAMES csv=FILE` (per-frame means and event times), `STAGE_RESULT`, `STAGE_SUMMARY`. The
-INT_RT_STS bit names (bit 4 ramp-up done, bit 3 ramp-down done, bit 0 fault) are assumptions from
-the first `0x49` read, not from a datasheet.
+arm counts like a pulse; stage runs may use 24 per boot), `ir_max_ua` (restored to 25000), the typed
+phrase `FIRE STAGE C0A` (and so on) or `--confirmed` from the lab. The camera must be idle (close
+the lab's live view if you run the tool by hand). On every exit path, in order: strobe off,
+`led_mode` 0, stream off, exposure, blanking and auto exposure restored. Output lines for programs:
+`STAGE_REG` (with the bits decoded: "CH1 open", "ramp-up done", "timer expired"), `STAGE_PULSE`,
+`STAGE_CMP`, `STAGE_PULSE_FRAMES`, `STAGE_ARM_FRAMES`, `STAGE_ANALYSIS`, `STAGE_FRAMES csv=FILE`
+(per-frame means and event times), `STAGE_RESULT`, `STAGE_SUMMARY`. The INT_RT_STS bit names (bit 4
+ramp-up done, bit 3 ramp-down done, bit 0 fault) are assumptions from the first `0x49` read, not
+from a datasheet.
 
-`sl7-ir-lab` has a Stage C section under the pulse buttons: C0a, C0b, C1 (SW), C1 (HW) and T0b,
-each enabled only when the stage before it is recorded OK (press Status once to read the records),
-each behind a Fire / Cancel dialog (`--confirmed`). The stage tool starts the sensor itself with
-`led_mode` set before the stream starts, so the lab pauses its own camera reader for the run (the
-live view freezes and the readout says so), then reconnects; the result (PASS or FAIL, the decoded
-STATUS bits, the per-pulse lines) is shown in the window, the stage's frame means with the pulse
-or arm times are drawn in a small graph and also fed to the 10 s graph, and the files go under
+`sl7-ir-lab` (omarchy-surface-sl7 41) shows the lit camera: the frames come through the bridge with
+the emitter strobing at Windows' timing, and the readout adds `LIT` or `dark` (frame maximum) and the
+bridge's own report for the session (`emitter ON: led_mode=flash exposure=100 ...`, read from its
+journal when your user may read it). Its Stage C section has C0a, C0b and T0b, behind a Fire / Cancel
+dialog (`--confirmed`). The stage tool starts the sensor itself, so the lab stops its own camera
+reader gracefully for the run (SIGTERM so the device closes, a wait for the reader to exit, then a
+1.2 s wait for the bridge's 0.5 s stop grace; never SIGKILL unless the reader hangs), the live view
+freezes and the readout says so, then it reconnects; the result (PASS or FAIL, the decoded STATUS
+bits, the per-pulse lines) is shown in the window, the stage's frame means with the pulse or arm
+times are drawn in a small graph and also fed to the 10 s graph, and the files go under
 `~/sl7-ir-lab/<timestamp>/`.
 
 **IR stage A safety fix (omarchy-surface-sl7 26, with linux-sl7 7.2.8-14).** The PMIC safety timer
