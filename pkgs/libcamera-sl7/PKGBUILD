@@ -7,6 +7,8 @@
 # sensor. Differences from the ALARM package:
 #   - pkgrel 4.1 sorts above ALARM's 4, so the omarchy-sl7 repository wins
 #   - 0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch
+#   - -Dwerror=false: ALARM's GCC 16 reports a false -Warray-bounds in libcamera's
+#     logger (std::make_shared<LogOutput>) that libcamera's -Werror turns fatal
 #   - no libcamera-docs package (documentation disabled: it needs TeX Live),
 #     tests not built or run (check() dropped)
 #   - the python patch has its trailing whitespace stripped (CI lint)
@@ -90,6 +92,7 @@ build() {
     -D test=false
     -D documentation=disabled
     -D rpi-awb-nn=disabled
+    -D werror=false
   )
 
   arch-meson $pkgbase build "${meson_options[@]}"
