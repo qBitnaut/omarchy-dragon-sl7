@@ -16,7 +16,8 @@ struct ir_hop {
 
 /* One IR capture path through the qcom-camss media graph:
  * vd55g sensor -> msm_csiphy0 -> msm_csidN -> msm_vfeM_rdi0 -> video node,
- * by default csid2 / vfe2 (libcamera's RGB route is csid0 / vfe0). Nothing
+ * by default csid1 / vfe1 (libcamera's RGB route is csid0 / vfe0; csid2+ and
+ * vfe2+ are lite blocks that deliver no frames). Nothing
  * outside this path is touched (no media-ctl -r equivalent). */
 struct ir_camss {
 	int media_fd;
@@ -38,9 +39,12 @@ struct ir_camss {
 void ir_camss_init(struct ir_camss *c);
 /* Set the preferred CSID and VFE RDI entity (IR_CSID, IR_VFE_RDI): a full
  * entity name, or just the number. NULL or empty keeps the default
- * (msm_csid2, msm_vfe2_rdi0). If the route is taken by another camera, the
+ * (msm_csid1, msm_vfe1_rdi0). If the route is taken by another camera, the
  * next free CSID/VFE combination is used. */
 void ir_camss_configure(const char *csid, const char *rdi);
+/* The route of c (still open or just closed) set up but delivered no frames:
+ * never pick it again until the daemon restarts, and log a WARN naming it. */
+void ir_camss_mark_bad(const struct ir_camss *c);
 /* Find the CAMSS media device, enable the IR links, set Y8_1X8 w x h on every
  * pad of the path, set GREY on the video node and map the buffers.
  * 0 or -errno (a message is logged). */

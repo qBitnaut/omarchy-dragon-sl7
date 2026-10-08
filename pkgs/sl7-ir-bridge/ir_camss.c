@@ -21,10 +21,13 @@
 #define SENSOR_PREFIX "vd55g"
 /* Default IR route. libcamera's simple pipeline takes the first route for the
  * RGB camera (msm_csiphy4 -> msm_csid0 -> msm_vfe0_rdi0) and keeps it enabled
- * while the session runs, so the IR path starts on a CSID and VFE well away
- * from that. IR_CSID and IR_VFE_RDI in /etc/sl7-ir-bridge.conf override it. */
-#define DEFAULT_IR_CSID "msm_csid2"
-#define DEFAULT_IR_RDI "msm_vfe2_rdi0"
+ * while the session runs, so the IR path uses the other FULL block pair,
+ * msm_csid1 -> msm_vfe1_rdi0 (verified on the SL7: 18.6 fps). CSID/VFE 2 and
+ * up are LITE blocks that set up fine but deliver no frames for this sensor,
+ * so they are the last resort. IR_CSID and IR_VFE_RDI in
+ * /etc/sl7-ir-bridge.conf override the default. */
+#define DEFAULT_IR_CSID "msm_csid1"
+#define DEFAULT_IR_RDI "msm_vfe1_rdi0"
 #define NAME_LEN 32
 #define MAX_ROUTES 32
 /* Enabling a link fails with EBUSY while a stream still runs through one of its
@@ -284,58 +287,121 @@ static unsigned name_index(const char *name, const char *fmt)
 	return sscanf(name, fmt, &n) == 1 ? n : 0;
 }
 
-/* Candidate routes, the configured one first, then every other CSID x VFE
- * combination with the highest VFE and CSID numbers first (libcamera takes
- * the lowest). The RDI suffix of the configured name (e.g. "_rdi0") is kept. */
+/* Routes that set up but delivered no frames, bad for the life of the daemon. */
+static struct route bad_routes[MAX_ROUTES];
+static unsigned n_bad;
+
+static int route_is_bad(const struct route *r)
+{
+	unsigned i;
+
+	for (i = 0; i < n_bad; i++)
+		if (!strcmp(bad_routes[i].csid, r->csid) && !strcmp(bad_routes[i].rdi, r->rdi))
+			return 1;
+	return 0;
+}
+
+void ir_camss_mark_bad(const struct ir_camss *c)
+{
+	struct route r;
+
+	if (!c->csid_name[0] || !c->rdi_name[0])
+		return;
+	snprintf(r.csid, NAME_LEN, "%s", c->csid_name);
+	snprintf(r.rdi, NAME_LEN, "%s", c->rdi_name);
+	if (route_is_bad(&r) || n_bad >= MAX_ROUTES)
+		return;
+	bad_routes[n_bad++] = r;
+	ir_log(IR_LOG_WARN, "IR route %s / %s delivered no frames, marked bad until the daemon "
+	       "restarts; the next session uses the next candidate", r.csid, r.rdi);
+}
+
+/* Preference of a CSID or VFE index: 1 is the IR camera's FULL block, 0 the
+ * other FULL block (libcamera's RGB camera, usable only if free), everything
+ * else is a LITE block, a last resort that has not delivered frames. */
+static unsigned block_rank(unsigned idx)
+{
+	return idx == 1 ? 0 : idx == 0 ? 1 : 2;
+}
+
+static unsigned route_rank(const struct route *r)
+{
+	return block_rank(name_index(r->csid, "msm_csid%u")) +
+	       block_rank(name_index(r->rdi, "msm_vfe%u"));
+}
+
+/* Candidate routes: the configured one first, then every other CSID x VFE
+ * combination, best rank first (csid1/vfe1, then the full csid0/vfe0, then the
+ * lite blocks last), higher numbers first within a rank. Routes marked bad are
+ * left out, unless that would leave none: then the configured route and the
+ * rest are tried again. The RDI suffix of the configured name (e.g. "_rdi0")
+ * is kept. */
 static unsigned build_routes(const struct topo *t, struct route *out, unsigned max)
 {
-	unsigned csids[16], vfes[16], nc = 0, nv = 0, i, j, n = 0;
+	unsigned csids[16], vfes[16], nc = 0, nv = 0, i, j, n = 0, k;
+	struct route all[MAX_ROUTES];
+	unsigned na = 0, nonbad = 0;
 	char suffix[NAME_LEN] = "";
 	unsigned pv = 0;
 	int have_suffix = sscanf(pref.rdi, "msm_vfe%u_%15s", &pv, suffix) == 2;
 
-	snprintf(out[n].csid, NAME_LEN, "%s", pref.csid);
-	snprintf(out[n].rdi, NAME_LEN, "%s", pref.rdi);
-	n++;
-	if (!have_suffix)
-		return n;
-	for (i = 0; i < t->nents && (nc < 16 || nv < 16); i++) {
-		const char *nm = t->ents[i].name;
-		char suf[NAME_LEN];
-		unsigned v;
+	snprintf(all[na].csid, NAME_LEN, "%s", pref.csid);
+	snprintf(all[na].rdi, NAME_LEN, "%s", pref.rdi);
+	na++;
+	if (have_suffix) {
+		for (i = 0; i < t->nents && (nc < 16 || nv < 16); i++) {
+			const char *nm = t->ents[i].name;
+			char suf[NAME_LEN];
+			unsigned v;
 
-		if (!strncmp(nm, "msm_csid", 8) && nc < 16) {
-			csids[nc++] = name_index(nm, "msm_csid%u");
-		} else if (sscanf(nm, "msm_vfe%u_%15s", &v, suf) == 2 && !strcmp(suf, suffix) &&
-			   nv < 16) {
-			vfes[nv++] = v;
+			if (!strncmp(nm, "msm_csid", 8) && nc < 16) {
+				csids[nc++] = name_index(nm, "msm_csid%u");
+			} else if (sscanf(nm, "msm_vfe%u_%15s", &v, suf) == 2 &&
+				   !strcmp(suf, suffix) && nv < 16) {
+				vfes[nv++] = v;
+			}
+		}
+		for (i = 0; i < nv; i++) {
+			for (j = 0; j < nc && na < MAX_ROUTES; j++) {
+				struct route r;
+
+				snprintf(r.csid, NAME_LEN, "msm_csid%u", csids[j]);
+				snprintf(r.rdi, NAME_LEN, "msm_vfe%u_%s", vfes[i], suffix);
+				if (!strcmp(r.csid, pref.csid) && !strcmp(r.rdi, pref.rdi))
+					continue;
+				all[na++] = r;
+			}
 		}
 	}
-	for (i = 1; i < nc; i++) /* descending */
-		for (j = i; j > 0 && csids[j] > csids[j - 1]; j--) {
-			unsigned x = csids[j];
+	/* stable insertion sort of everything after the configured route: rank
+	 * ascending, then higher VFE, then higher CSID */
+	for (i = 2; i < na; i++) {
+		struct route x = all[i];
+		unsigned rx = route_rank(&x);
 
-			csids[j] = csids[j - 1];
-			csids[j - 1] = x;
-		}
-	for (i = 1; i < nv; i++)
-		for (j = i; j > 0 && vfes[j] > vfes[j - 1]; j--) {
-			unsigned x = vfes[j];
+		for (j = i; j > 1; j--) {
+			unsigned rj = route_rank(&all[j - 1]);
+			int swap = rx < rj;
 
-			vfes[j] = vfes[j - 1];
-			vfes[j - 1] = x;
-		}
-	for (i = 0; i < nv; i++) {
-		for (j = 0; j < nc && n < max; j++) {
-			struct route r;
+			if (rx == rj) {
+				unsigned vx = name_index(x.rdi, "msm_vfe%u");
+				unsigned vj = name_index(all[j - 1].rdi, "msm_vfe%u");
 
-			snprintf(r.csid, NAME_LEN, "msm_csid%u", csids[j]);
-			snprintf(r.rdi, NAME_LEN, "msm_vfe%u_%s", vfes[i], suffix);
-			if (!strcmp(r.csid, pref.csid) && !strcmp(r.rdi, pref.rdi))
-				continue;
-			out[n++] = r;
+				swap = vx > vj || (vx == vj && name_index(x.csid, "msm_csid%u") >
+						   name_index(all[j - 1].csid, "msm_csid%u"));
+			}
+			if (!swap)
+				break;
+			all[j] = all[j - 1];
 		}
+		all[j] = x;
 	}
+	for (k = 0; k < na; k++)
+		if (!route_is_bad(&all[k]))
+			nonbad++;
+	for (k = 0; k < na && n < max; k++)
+		if (!nonbad || !route_is_bad(&all[k]))
+			out[n++] = all[k];
 	return n;
 }
 

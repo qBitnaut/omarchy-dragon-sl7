@@ -45,7 +45,7 @@ Point howdy-next at `/dev/v4l/by-id/sl7-ir-camera` (it accepts `/dev/video*`,
    count is effectively 0 or 1.
 3. Count 1: the daemon opens the CAMSS media device (the one whose driver is
    `qcom-camss`), reads the topology, finds the path `vd55g* -> msm_csiphy ->
-   msm_csid2 -> msm_vfe2_rdi0 -> video node` by entity name (the CSID and VFE are
+   msm_csid1 -> msm_vfe1_rdi0 -> video node` by entity name (the CSID and VFE are
    `IR_CSID` / `IR_VFE_RDI`, see below), enables the links on
    that path (only those not already enabled), sets `Y8_1X8` 644x604 on every pad
    of the path, sets GREY 644x604 on the video node (reading back the stride, 656
@@ -68,17 +68,28 @@ route it finds (`msm_csiphy4 -> msm_csid0 -> msm_vfe0_rdi0`, `/dev/video2`) and
 keeps those links and nodes open while the desktop session runs. A CSID sink
 accepts one enabled source link, so the IR camera cannot share `msm_csid0`:
 enabling `msm_csiphy0 -> msm_csid0` fails with EBUSY and face unlock times out.
-The bridge therefore defaults to `msm_csiphy0 -> msm_csid2 -> msm_vfe2_rdi0`
-(`/dev/video10` on the SL7 today; always resolved by entity name, never by
-number). `IR_CSID` and `IR_VFE_RDI` in `/etc/sl7-ir-bridge.conf` change it. The
-bridge touches only links on its own path (sources `msm_csiphy0`, its CSID and
-its RDI); it never changes anything involving `msm_csiphy4` or another camera's
-CSID/VFE. If the configured CSID sink or RDI is already enabled for another
-source (libcamera moved, or the setting was changed), it picks the next free
-CSID/VFE combination, highest numbers first, and logs `IR route: ...`. The start
-up cleanup of leftover links is limited to the same path. After an update and a
-reboot, `media-ctl -p` shows the IR sensor on `msm_csid2` / `msm_vfe2_rdi0` and
-the RGB camera on `msm_csid0` / `msm_vfe0_rdi0`; the journal has no EBUSY.
+The bridge therefore defaults to `msm_csiphy0 -> msm_csid1 -> msm_vfe1_rdi0`
+(`/dev/video6` on the SL7 today; always resolved by entity name, never by
+number). csid0/vfe0 and csid1/vfe1 are the FULL CAMSS blocks; csid2 and up and
+vfe2 and up are LITE blocks. Verified on the SL7 (0.1.0-5): the lite route
+`msm_csid2 -> msm_vfe2_rdi0` sets up without error but delivers 0 frames, while
+`msm_csid1 -> msm_vfe1_rdi0` streams at 18.6 fps with lit frames. Automatic
+selection therefore tries csid1/vfe1 first, then the other full blocks
+(csid0/vfe0) only if free, and the lite blocks last as a last resort.
+`IR_CSID` and `IR_VFE_RDI` in `/etc/sl7-ir-bridge.conf` change the preferred
+route. The bridge touches only links on its own path (sources `msm_csiphy0`,
+its CSID and its RDI); it never changes anything involving `msm_csiphy4` or
+another camera's CSID/VFE. If the configured CSID sink or RDI is already
+enabled for another source (libcamera moved, or the setting was changed), it
+picks the next free CSID/VFE combination in that order and logs `IR route: ...`.
+No-frame fallback: if a route sets up but delivers no frame within 2 s (or the
+session ends with 0 frames after 1.5 s or more), the bridge logs a WARN naming
+the route, marks it bad until the daemon restarts, and the next session uses the
+next candidate. If every candidate has been marked bad, the configured route is
+used again. Sessions that deliver frames are not affected. The start up cleanup
+of leftover links is limited to the same path. After an update and a reboot,
+`media-ctl -p` shows the IR sensor on `msm_csid1` / `msm_vfe1_rdi0` and the RGB
+camera on `msm_csid0` / `msm_vfe0_rdi0`; the journal has no EBUSY.
 
 Session cap: one CAMSS streaming session lasts at most 10 s (`IR_SESSION_MAX_MS`,
 clamped to 10000). After that the bridge stops the stream, logs it, and waits for
@@ -93,7 +104,7 @@ arrive and the consumer times out (no fake frames are sent). Enabling a media li
 with `EBUSY` while a stream still runs through the IR path (a test tool, or a consumer that was
 killed and whose pipeline the kernel is still stopping): the bridge waits up to 2 s for it,
 then releases the links it enabled and retries later instead of looping. When the daemon
-starts it releases IR path links that a killed predecessor left enabled (links in use stay). If no frame arrives for 4 s (first) or 1.5 s
+starts it releases IR path links that a killed predecessor left enabled (links in use stay). If no frame arrives for 2 s (first) or 1.5 s
 (later) the session is stopped. If the loopback disappears the daemon exits and
 systemd restarts it.
 

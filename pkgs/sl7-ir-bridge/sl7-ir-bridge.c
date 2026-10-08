@@ -56,9 +56,11 @@
 #define V4L2LOOPBACK_EVENT_CLIENT_USAGE (V4L2_EVENT_PRIVATE_START + 0x08E00000 + 1)
 
 #define LOOPBACK_WAIT_MS 60000
-#define FIRST_FRAME_TIMEOUT_MS 4000
+/* A route that set up but delivers nothing in this long is marked bad. */
+#define FIRST_FRAME_TIMEOUT_MS 2000
 #define FRAME_GAP_TIMEOUT_MS 1500
 #define RETRY_MS 5000
+#define NO_FRAME_BAD_MS 1500
 #define RETRY_MAX_SHIFT 2	/* retry delay 5 s, 10 s, 20 s, then stays at 20 s */
 #define CAPPED_RESYNC_MS 1000
 #define MAX_LB_ERRORS 100
@@ -233,6 +235,10 @@ static void session_stop(struct bridge *b, const char *reason)
 	int64_t now = ir_now_ms();
 	double secs = (double)(now - b->t_start) / 1000.0;
 
+	/* No frame in the whole session, and long enough that the route (not a
+	 * quick consumer exit) is at fault: use the next candidate next time. */
+	if (b->frames == 0 && !b->seen_frame && now - b->t_start >= NO_FRAME_BAD_MS)
+		ir_camss_mark_bad(&b->cam);
 	/* The emitter goes dark first, then the stream and the sensor stop. */
 	ir_emitter_post_stream(&b->cam);
 	ir_camss_stop(&b->cam);
