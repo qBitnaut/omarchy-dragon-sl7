@@ -40,7 +40,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Feature | Status | Notes |
 |---|---|---|
 | Keyboard | Works | Surface Aggregator modules in the initramfs, so it also works at the LUKS prompt. The prompt can be blank for the first boots: type blind. |
-| Touchpad | Works | `iptsd-sl7` (a fork with Surface Laptop 7 fixes). Tap-to-click is off by default (it caused false clicks while scrolling; set `tap_to_click = true` in `~/.config/hypr/input.lua` to bring it back). Drag latch keeps click-and-drag held, lift-and-continue bridges brief lifts, and a watchdog re-enables multitouch if the pad falls back to mouse mode. |
+| Touchpad | Works | `iptsd-sl7` (a fork with Surface Laptop 7 fixes). Tap-to-click is off by default (it caused false clicks while scrolling; set `tap_to_click = true` in `~/.config/hypr/input.lua` to bring it back). Drag latch keeps click-and-drag held, and lift-and-continue works: the drag stays while the physical click is held (iptsd-sl7 patch 0008, verified on the SL7). Disable-while-typing is active. A watchdog re-enables multitouch if the pad falls back to mouse mode. Haptic strength and click force follow Windows' settings (see [Touchpad settings](#touchpad-settings)). Gestures are your own Hyprland (Lua) config. |
 | Touchscreen | Partial | SPI touch modules only (the 13.8" unit here). Units with the I2C module are not covered. Pen is untested. |
 | Display | Works | Native 2304x1536 at 120 Hz. |
 | Variable refresh (VRR) | Works | 24-120 Hz, on by default (`msm.vrr_enabled=1`; Hyprland `misc.vrr` set by the power mode service). Panel measured at 24 Hz idle, about 116 Hz under motion, no flicker. No chip-rail power change; battery power not measurable yet. Off: remove the `msm.vrr_enabled=1` line from `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, `sudo limine-mkinitcpio`, reboot. |
@@ -51,15 +51,30 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Bluetooth | Partial | Works with the factory address restored (it does not work at all without it); less tested than Wi-Fi. |
 | Audio | Partial | Speakers and microphones work with the kernel volume caps. The Pro Audio profile is deliberately blocked to protect the speakers. Headphone jack quality is unverified. |
 | Battery percentage and charging | Works | `qcom_battmgr` patch for capacity; Omarchy's battery scripts are patched to see the Qualcomm gauge. |
-| USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s), in either plug orientation (linux-sl7 7.2.8-18 or later), with DisplayPort alt mode and docks. USB4 and Thunderbolt bandwidth is not available yet. |
-| Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume. See [power results](#power-and-performance-results-so-far) for the drain. |
-| Front webcam | Partial | OV02C10 through libcamera's software ISP (the `libcamera` package in the omarchy-sl7 repository adds the sensor helper). Colour tuning is built on your machine from the Surface driver package you download (`sudo sl7-camera-tuning`); Microsoft's tuning is never redistributed. Not yet verified on the SL7. See the [webcam section](pkgs/omarchy-surface-sl7/README.md#8k-front-webcam-sl7-camera-tuning-sl7-camera-check) for browser setup. |
-| IR camera | Works | ST VD55G0, 644x604 greyscale, through `sl7-ir-bridge`, lit by the built-in IR emitter (verified 2026-10-07: self-test frames brighter than unlit, no black frames). |
-| Face unlock | Works | Verified on the SL7 (2026-10-07), on the normal boot (there is no IR test boot entry): face registered in the setup app, lock screen unlocked by face, no external IR source needed. howdy-next plus a setup app (Omarchy menu: Setup > Security > Face Unlock). The built-in IR emitter is driven by the sensor's own strobe (stage C found that GPIO 1 lights it), held by the kernel (linux-sl7 7.2.8-22) to Windows Hello's 100-line exposure and frame time, whatever user space asks: on the SL7 sensor clock that is 0.8 ms of light per 27.8 ms frame (2.9 % duty, Windows 5.7 %). `sl7-ir-bridge` lights it only while a scan streams, 10 s at most per session, with analog gain 24 for faster matches; `IR_EMITTER=off` in `/etc/sl7-ir-bridge.conf` keeps it dark. |
+| USB-C charging and USB 3 | Works | Both ports charge and run USB 3 (10 Gb/s), in either plug orientation (SuperSpeed on the reversed orientation fixed by ps883x patch 0090, on by default since linux-sl7 7.2.8-18), with DisplayPort alt mode and docks. USB4 and Thunderbolt bandwidth is not available yet. |
+| Suspend and resume | Works | Deep suspend (`deep`), touch restarted after resume, about 0.35 W overnight. See [power results](#power-and-performance-results-so-far) for the drain. |
+| Front webcam | Works | OV02C10 through libcamera's GPU software ISP (Adreno, EGL); the hardware ISP is not used, because CAMSS delivers raw frames only. Our `libcamera-sl7` build (0.7.2-4.2) adds the sensor helper, a fast auto-exposure start, a fix for GPU-mode 720p metering and Adjust defaults read from the tuning file. Colour tuning is generated at install from your own Surface driver package and never redistributed; defaults chosen on the SL7: set 1, blend 0.6, contrast 1.2, saturation 1.05 (`sl7-camera-tuning` adjusts them, `sl7-camera-check` collects diagnostics). Verified on the SL7: much better colour, no grey start. The sensor runs from a 12 MHz clock; `linux-sl7` 7.2.8-23 (patches 0099/0100) fixes the frame rate from 18.8 to 30 fps and the exposure timing (published, the on-device 30 fps check is pending). See the [webcam section](pkgs/omarchy-surface-sl7/README.md#8k-front-webcam-sl7-camera-tuning-sl7-camera-check) for browser setup. |
+| IR camera | Works | ST VD55G0, 644x604 greyscale, through `sl7-ir-bridge`, lit by the built-in IR emitter (verified 2026-10-07: self-test frames brighter than unlit, no black frames). Known issue: libcamera/PipeWire can grab the IR camera and block face unlock; workaround `systemctl --user restart pipewire wireplumber && sudo systemctl restart sl7-ir-bridge`. A package update that hides the IR camera from libcamera and PipeWire is in progress (not yet published). |
+| Face unlock | Works | Verified on the SL7 (2026-10-07), on the normal boot (there is no IR test boot entry): face registered in the setup app, lock screen and `sudo` unlocked by face, no external IR source needed. howdy-next plus a setup app (Omarchy menu: Setup > Security > Face Unlock). The built-in IR emitter is driven by the sensor's own strobe (stage C found that GPIO 1 lights it), held by the kernel (linux-sl7 7.2.8-22) to Windows Hello's 100-line exposure and frame time, whatever user space asks: on the SL7 sensor clock that is 0.8 ms of light per 27.8 ms frame (2.9 % duty, Windows 5.7 %). `sl7-ir-bridge` lights it only while a scan streams, 10 s at most per session, with analog gain 24 as the default; `howdy-next` 2 silences a harmless OpenCV warning; `IR_EMITTER=off` in `/etc/sl7-ir-bridge.conf` keeps it dark. |
 | CPU frequency scaling | Works | All three clusters, `schedutil`, with the SCMI sustained-frequency fix. |
 | Power mode on AC/battery | Works | Caps CPU and GPU frequency and enables Wi-Fi power save on battery; restores everything on AC. 60 Hz switching on battery is opt-in. |
 | Firmware | Works | Fetched from Microsoft's Surface Laptop 7 driver MSI, never shipped here. |
-| Hibernation | Not yet | Blocked upstream. |
+| Hibernation | Not yet | The image write hangs, and the RTC alarm is owned by the ADSP. |
+
+### Touchpad settings
+
+Set in `/etc/iptsd.d/94-local.conf` (restart `iptsd` after editing). Full list in the
+[iptsd-sl7 README](pkgs/iptsd-sl7/README.md).
+
+| Setting | Values | Status |
+|---|---|---|
+| `[Touchpad] HapticIntensity` | 0 to 100 (Windows semantics) | Applied on the SL7 (patch 0009, iptsd-sl7 16) |
+| `[Touchpad] ClickForce` | `low`, `medium`, `high` (Windows semantics) | Applied on the SL7 (patch 0009, iptsd-sl7 16) |
+| `[Touchpad] PalmMode` | `windows` (default), `freeze` | Published, not yet verified (patch 0010, iptsd-sl7 17) |
+
+`PalmMode = windows` ignores a resting palm while the other fingers and the click keep
+working; `freeze` is the older behaviour. It is published, and the feel test on the SL7 is
+pending.
 
 ## Install
 
@@ -183,9 +198,9 @@ All ship in `omarchy-surface-sl7` unless noted.
 ## Power and performance results so far
 
 Measured on the 13.8" X1P-64-100 (16 GB). Numbers are from `sl7-powertest` and the
-battery gauge. The gauge reports `energy_now` in whole percent (about 496 mWh), so idle
-watts are now the integral of `power_now`; the older numbers below were taken with the
-earlier, finer-stepped gauge.
+battery gauge. For a while the gauge reported `energy_now` in whole percent (about 496 mWh),
+so idle watts were taken as the integral of `power_now`. It now reports fine-grained energy
+again; each figure below says which method it used.
 
 ### Idle
 
@@ -196,8 +211,8 @@ the savings; these are the corrected numbers.
 ### Awake, against Windows 11 (preliminary)
 
 Same-spec Surface Laptop 7 13.8" (X1P-64-100) pair, on battery, 50% brightness locked,
-30 minute idle desktop, average discharge power. **Preliminary: to be re-run and updated
-after the 2026-10-07 run.**
+30 minute idle desktop, average discharge power. **Preliminary: a re-run with the latest
+fixes (kernel and packages) is pending.**
 
 | Bench | Windows 11 | Linux (7.2.8-15) |
 |---|---|---|
@@ -221,8 +236,8 @@ Deep suspend, 8 to 10 minute traces with `sl7-sleepstats --trace`:
 | ADSP wakeups | ~104/s | ~11.5/s |
 | XO (crystal) | held | still held (one prepare) |
 | CX power collapse (`cxsd`) | no | not yet |
-| Suspend power (overnight) | 0.8-0.9 W (8 h 25 min, 16% of 48.6 Wh, 7.2.8-4) | **0.31 W** (9 h 20 min, 2948 mWh, 7.2.8-13) |
-| Battery life asleep, full charge | about 2.4 days | **about 6.5 days** |
+| Suspend power (overnight) | 0.8-0.9 W (8 h 25 min, 16% of 48.6 Wh, 7.2.8-4) | **about 0.35 W average** (0.31-0.42 W range; 7.2.8-13 and -22) |
+| Battery life asleep, full charge | about 2.4 days | **about 6 days** |
 
 To our knowledge, this is the first published DDR self-refresh in suspend on a
 shipping Snapdragon X (X1E/X1P) laptop under Linux, with all DSPs running. The only
@@ -230,12 +245,20 @@ earlier CX/DDR collapse we found was on Qualcomm's reference CRD with an experim
 branch that disables the ADSP. Reports from the Dell Inspiron 7441, Latitude 7455,
 Yoga Slim 7x and IdeaPad Slim 5x show `ddr` at 0.
 
-Overnight on 7.2.8-13 (`sl7-sleepstats --suspend-test`, charger unplugged): 2948 mWh
-over 9 h 20 min, **0.31 W**, about 63% less than before the power work. DDR was in
-self-refresh for 94% of the time asleep and the ADSP woke about 10 times a second.
-The night included one spurious wake (02:04, re-suspended by logind after 26 s), so
-the pure suspend figure is at most this. CX power collapse is not reached yet
+Latest overnight, 7.2.8-22, 7-8 October (charger unplugged): the whole night, 20:24 to
+07:37 (11.2 h), took the battery from 75% to 67%, about **0.35 W** on average, roughly 6
+days of standby on a full charge. A 5.1 h stretch of it was measured precisely at **0.42
+W**, because the gauge now reports fine-grained energy; the whole-night figure comes from
+whole-percent readings. DDR was in self-refresh for about 94% of the time asleep.
+
+The earlier night on 7.2.8-13 (`sl7-sleepstats --suspend-test`) gave 2948 mWh over 9 h 20
+min, **0.31 W**, but was measured with whole-percent quantisation (about 0.05 W of
+uncertainty), so read the range as 0.31 to 0.42 W rather than a single figure. Both are about half or less of
+the Windows figure of 0.8 to 0.9 W. CX power collapse is not reached yet
 because one XO prepare still holds.
+
+One harmless stray wake happened about 5 h into the suspend (about 26 s awake, then it
+suspended again). Wake-source logging is now on: `journalctl -t omarchy-surface-sl7 | grep wake`.
 
 ### What made the difference
 
@@ -251,6 +274,16 @@ From the `linux-sl7` README (Power sections):
 - The Qualcomm Crypto Engine driver disabled (it held a permanent DDR vote).
 - `schedutil` with the SCMI sustained-frequency fix for cpufreq.
 
+### Bag guard and USB power
+
+- **Bag guard** (`omarchy-sl7-bag-guard`, on by default): lid closed, on battery and no
+  external display, and still awake after 120 s, so it suspends again. After 3 failed
+  suspends, or more than 60 degC for 60 s, it powers off. `omarchy-sl7-bag-guard --check`
+  shows the decision without acting.
+- **USB-A** runtime power management is on by default. **USB-C** stays always on, because
+  of a wake-on-plug issue (future research).
+- **USB-C reverse orientation** now runs at SuperSpeed (ps883x patch 0090, on by default).
+
 ### Known
 
 - VRR: no chip-rail power change measured; battery-gauge power is not measurable yet.
@@ -258,9 +291,14 @@ From the `linux-sl7` README (Power sections):
 
 ## Roadmap
 
-- **IR emitter and face unlock:** working (lock screen verified). Still to do: verify sudo and
-  login prompts, recognition in daylight and darkness, the bridge delivering 18 of the sensor's
-  36 fps, and Windows' runtime gain (not decoded).
+- **IR camera and face unlock:** working (lock screen and `sudo` verified). Still to do: stop
+  libcamera/PipeWire from grabbing the IR camera (package update in progress), check
+  recognition in daylight and darkness, the bridge delivering 18 of the sensor's 36 fps, and
+  Windows' runtime gain (not decoded).
+- **Front webcam:** confirm 30 fps on the device after `linux-sl7` 7.2.8-23.
+- **Touchpad:** feel test of `PalmMode = windows`.
+- **Awake power:** re-run the Windows comparison with the latest fixes.
+- **USB-C runtime power management** (wake-on-plug issue) and **hibernation**.
 - **Runtime power tuning** with a per-rail power meter.
 - **Rebase on Linux 7.3** when it is released, dropping the patches that land in it.
 - **USB4** once a host-router driver is posted upstream.
