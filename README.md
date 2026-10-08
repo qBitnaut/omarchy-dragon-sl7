@@ -17,6 +17,8 @@
 
 > Unofficial community port. Not affiliated with or endorsed by Omarchy/Basecamp, Microsoft or Qualcomm.
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support%20my%20work-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/qBitnaut)
+
 The logo above is Omarchy's (MIT licensed).
 
 This project is a thin overlay on upstream omacom/omarchy and omarchy-iso (dragon
@@ -444,6 +446,13 @@ Surface Laptop 7 driver MSI. The .gitignore blocks firmware and captures.
 - iptsd-sl7 (the iptsd fork) is GPL-2.0-or-later; howdy-next is GPL-3.0-or-later.
 - Microsoft/Qualcomm firmware is never included and remains under its own license.
 - The Omarchy logo is Omarchy's, under the MIT license.
+
+## Support
+
+If this port makes your Surface Laptop 7 better, consider buying me a coffee. It helps
+keep the kernel rebases, testing and updates coming.
+
+<a href="https://buymeacoffee.com/qBitnaut" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="60" width="217"></a>
 
 ## Credits
 
