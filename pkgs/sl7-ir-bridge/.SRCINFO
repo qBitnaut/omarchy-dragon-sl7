@@ -1,7 +1,7 @@
 pkgbase = sl7-ir-bridge
 	pkgdesc = On-demand bridge from the Surface Laptop 7 IR camera to a v4l2loopback device (GREY 644x604) for face unlock
 	pkgver = 0.1.0
-	pkgrel = 2
+	pkgrel = 3
 	url = https://github.com/qBitnaut/omarchy-dragon-sl7
 	install = sl7-ir-bridge.install
 	arch = aarch64

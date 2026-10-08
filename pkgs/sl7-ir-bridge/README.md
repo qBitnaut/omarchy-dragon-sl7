@@ -109,8 +109,9 @@ With `IR_EMITTER=on` (the default in `/etc/sl7-ir-bridge.conf`) every session do
 `ir_emitter.c`:
 
 - before STREAMON (the strobe configuration latches when the stream starts): vblank = 1750 -
-  604, auto exposure to manual, exposure 100, analogue and digital gain to the driver defaults
-  (Windows' init writes no gain register; `IR_GAIN_ANALOG` and `IR_GAIN_DIGITAL` override), then
+  604, auto exposure to manual, exposure 100, analogue gain 24 from the shipped config (driver
+  default 19; Windows' init writes no gain register; 24 gave faster face matches on the SL7) and
+  digital gain at the driver default (`IR_GAIN_ANALOG` and `IR_GAIN_DIGITAL` override), then
   `led_mode` = flash. The values are read back; if the sensor does not report exposure <= 100 and
   frame length >= 1750 with manual exposure, or `led_mode` does not read back flash, the session
   runs unlit. A kernel without the `led_mode` control (older than 7.2.8-22, or
