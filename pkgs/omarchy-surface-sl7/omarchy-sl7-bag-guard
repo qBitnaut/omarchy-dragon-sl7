@@ -11,7 +11,7 @@
 # source online, no external display connected. Docked/clamshell use is never
 # touched. Anything it cannot read counts as "do not act".
 #
-#   awake with the lid closed for AWAKE_GRACE_S   -> systemctl suspend
+#   awake with the lid closed for AWAKE_GRACE_S   -> systemctl suspend -i (inhibitors ignored, as logind does for the lid)
 #   MAX_SUSPEND_FAILS consecutive failures        -> systemctl poweroff
 #   zone above TEMP_LIMIT_C for TEMP_GRACE_S      -> systemctl poweroff
 #
@@ -210,8 +210,8 @@ try_suspend() {
   local s0 f0 s1 f1 rc ok=0
   s0=$(stat_val success)
   f0=$(stat_val fail)
-  log notice "lid closed on battery, awake for ${awake}s (grace ${AWAKE_GRACE_S}s): systemctl suspend"
-  timeout 60 systemctl suspend
+  log notice "lid closed on battery, awake for ${awake}s (grace ${AWAKE_GRACE_S}s): systemctl suspend -i"
+  timeout 60 systemctl suspend -i
   rc=$?
   s1=$(stat_val success)
   f1=$(stat_val fail)
