@@ -6,6 +6,7 @@
 #
 #   1. take the installer ISO from the latest GitHub release (default, or
 #      --from-release), a CI run (--from-ci) or a file (--iso) and verify its sha256
+#      (a release ISO also needs a valid signature by the repository key)
 #   2. write it to a removable device (or an image file with --image)
 #   3. relocate the backup GPT, add partition SL7DATA (FAT32, Microsoft basic
 #      data) in the free space
@@ -50,6 +51,7 @@ ISO=""
 ISO_SHA256=""
 CI_RUN=""
 FROM_RELEASE=0
+INSECURE_SKIP_SIG=0
 LOOPDEV=""
 MNT=""
 
@@ -59,7 +61,7 @@ MNT=""
 source "$KIT_DIR/../lib/usb.sh"
 
 usage() {
-	sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	cat <<'USAGE'
 
 options:
@@ -75,6 +77,9 @@ options:
   --size SIZE      image size for --image (default: ISO size + 512M)
   --loop           with --image: attach with losetup -P (needs root) and use the
                    same code path as a real device
+  --insecure-skip-signature
+                   do NOT verify the signature of the release checksum (unsafe:
+                   by default a missing or invalid signature aborts)
   --no-firmware    do not copy Microsoft firmware onto SL7DATA
   --force-large    allow devices larger than 256 GB
 USAGE
@@ -90,6 +95,7 @@ while [ $# -gt 0 ]; do
 	--iso) ISO="${2:?--iso needs a file}"; shift 2 ;;
 	--sha256) ISO_SHA256="${2:?--sha256 needs a hex digest}"; shift 2 ;;
 	--loop) USE_LOOP=1; shift ;;
+	--insecure-skip-signature) INSECURE_SKIP_SIG=1; shift ;;
 	--no-firmware) WITH_FW=0; shift ;;
 	--force-large) FORCE_LARGE=1; shift ;;
 	-h | --help) usage; exit 0 ;;
@@ -140,6 +146,41 @@ check_tools() {
 }
 
 # ---------------------------------------------------------------- 1. the ISO
+# Fingerprint of the repository signing key (the same one as
+# tools/bootstrap/omarchy-sl7-bootstrap.sh and omarchy-sl7-keyring). The key file
+# in the release is NOT trusted by itself: the signature must verify against
+# exactly this fingerprint. Rotate: update all three places and SECURITY.md.
+EXPECTED_FPR="${SL7_EXPECTED_FPR:-6387C619EF246F6F20C536B72C3331C78353BA04}"
+
+# verify_release_signature DEST ISO: fail closed unless ISO.sha256.sig is a valid
+# signature of ISO.sha256 by EXPECTED_FPR (checked from gpg --status-fd output).
+verify_release_signature() {
+	local dest="$1" iso="$2" gh status
+	if [ "$INSECURE_SKIP_SIG" = 1 ]; then
+		echo "!!! WARNING: --insecure-skip-signature: the checksum signature of $(basename "$iso").sha256 is NOT verified." >&2
+		echo "!!! Anyone who can alter the release can alter this ISO. Continue only if you know why." >&2
+		return 0
+	fi
+	command -v gpg >/dev/null 2>&1 ||
+		die "gpg is required to verify the release signature (Arch: pacman -S gnupg; Debian/Ubuntu: apt install gnupg). Not recommended: --insecure-skip-signature"
+	[ -f "$iso.sha256.sig" ] || die "the release has no $(basename "$iso").sha256.sig: refusing an unsigned ISO (not recommended: --insecure-skip-signature)"
+	[ -f "$dest/omarchy-sl7.pub.asc" ] || die "the release has no omarchy-sl7.pub.asc: cannot verify the signature (not recommended: --insecure-skip-signature)"
+	gh="$(mktemp -d)"
+	chmod 700 "$gh"
+	if ! GNUPGHOME="$gh" gpg --batch -q --import "$dest/omarchy-sl7.pub.asc" 2>/dev/null; then
+		rm -rf "$gh"
+		die "cannot import omarchy-sl7.pub.asc"
+	fi
+	status="$(GNUPGHOME="$gh" gpg --batch --status-fd 1 --verify "$iso.sha256.sig" "$iso.sha256" 2>/dev/null || true)"
+	rm -rf "$gh"
+	# VALIDSIG <signing-key-fpr> ... <primary-key-fpr> (the last field)
+	if awk -v want="$EXPECTED_FPR" '$1 == "[GNUPG:]" && $2 == "VALIDSIG" && ($3 == want || $NF == want) { ok = 1 } END { exit !ok }' <<<"$status"; then
+		echo "    checksum signature OK (key $EXPECTED_FPR)"
+	else
+		die "the signature of $(basename "$iso").sha256 is missing, invalid or not from key $EXPECTED_FPR"
+	fi
+}
+
 # The ISO is larger than GitHub's 2 GiB asset limit, so the release holds it in
 # parts (NAME.iso.part-00, -01, ...) plus NAME.iso.sha256 and NAME.iso.parts.sha256.
 fetch_release_iso() {
@@ -169,18 +210,7 @@ for a in json.load(sys.stdin)["assets"]:
 	info "Checking the parts and reassembling $(basename "$iso")"
 	(cd "$dest" && sha256sum -c --quiet "$(basename "$iso").parts.sha256") || die "a release part is corrupt: delete $dest and retry"
 	cat "$iso".part-* >"$iso.tmp" && mv "$iso.tmp" "$iso"
-	if [ -f "$iso.sha256.sig" ] && [ -f "$dest/omarchy-sl7.pub.asc" ] && command -v gpg >/dev/null 2>&1; then
-		local gh
-		gh="$(mktemp -d)"
-		if GNUPGHOME="$gh" gpg --batch -q --import "$dest/omarchy-sl7.pub.asc" 2>/dev/null &&
-			GNUPGHOME="$gh" gpg --batch --verify "$iso.sha256.sig" "$iso.sha256" 2>&1 | grep -q "Good signature"; then
-			echo "    checksum signature OK"
-		else
-			rm -rf "$gh"
-			die "the signature of $(basename "$iso").sha256 does not verify"
-		fi
-		rm -rf "$gh"
-	fi
+	verify_release_signature "$dest" "$iso"
 	ISO="$iso"
 	CI_FETCHED_RUN="release $RELEASE_TAG"
 }

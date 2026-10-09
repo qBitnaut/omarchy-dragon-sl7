@@ -60,8 +60,14 @@ does not keep Windows. Details for every step are in
    ```
    cat NAME.iso.part-* > NAME.iso     # NAME = the ISO's file name on the release page
    sha256sum -c NAME.iso.sha256
+   gpg --import omarchy-sl7.pub.asc   # from the same release
+   gpg --status-fd 1 --verify NAME.iso.sha256.sig NAME.iso.sha256   # needs VALIDSIG 6387C619EF246F6F20C536B72C3331C78353BA04
    ```
-   `make-install-usb.sh` (step 2) does the download, reassembly and checksum for you.
+   The `.sha256` only proves the download is intact; the signature proves it came from the
+   project. Trust the key only if its fingerprint is `6387C619EF246F6F20C536B72C3331C78353BA04`
+   (also in [SECURITY.md](SECURITY.md)); the key file on the release is not trusted by itself.
+   `make-install-usb.sh` (step 2) does the download, reassembly, checksum and signature check
+   for you and refuses an ISO whose signature is missing or not from that key.
    The ISO contains no Microsoft or Qualcomm firmware.
 2. **Make the install stick** on any Linux machine (16 GB or larger USB stick):
    ```
@@ -109,7 +115,11 @@ larger one for the ISO, and a small one (any size, FAT32) for the firmware.
    Get-Content "$iso.sha256"        # the two hashes must be identical (case does not matter)
    ```
    (`cmd /c copy /b NAME.iso.part-00+NAME.iso.part-01+NAME.iso.part-02 NAME.iso` joins
-   them too.) The `.sig` can be checked with Gpg4win; the hashes above are the required check.
+   them too.) Also check the signature: install [Gpg4win](https://www.gpg4win.org), then in
+   PowerShell `gpg --import omarchy-sl7.pub.asc` and
+   `gpg --status-fd 1 --verify "$iso.sha256.sig" "$iso.sha256"`. It must print
+   `VALIDSIG` followed by `6387C619EF246F6F20C536B72C3331C78353BA04` (the key's fingerprint,
+   also in [SECURITY.md](SECURITY.md)); do not use the ISO otherwise.
 2. **Write the ISO** to the large stick with [Rufus](https://rufus.ie) or
    [balenaEtcher](https://etcher.balena.io). In Rufus choose the ISO, then **DD Image mode**
    when it asks (not ISO Image mode: the ISO is a hybrid image and must be copied as is). Etcher
@@ -432,6 +442,10 @@ Server = https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-a
   the repository is unsigned. The key must match `pkgs/omarchy-sl7-keyring`; rotate with
   `tools/repo/make-keyring-files.sh`.
 - Immutable releases must stay disabled for this repository.
+- Signing runs in a pinned, network-less container in a job of the protected `release`
+  environment (main only). To verify what you download, check the signing key's fingerprint
+  (`6387C619EF246F6F20C536B72C3331C78353BA04`); see [SECURITY.md](SECURITY.md) for the trust
+  model and how to report a problem.
 
 ## Firmware and licensing
 

@@ -35,11 +35,12 @@ which is gone after the disk is wiped.
 
 The default is the `installer-latest` release
 (https://github.com/qBitnaut/omarchy-dragon-sl7/releases/tag/installer-latest), which
-`installer-iso.yml` recreates after every successful build on `main`. The ISO is larger
+`installer-iso.yml` updates in place after every successful build on `main`. The ISO is larger
 than GitHub's 2 GiB asset limit, so it is split into 1900 MiB parts
 (`NAME.iso.part-00`, ...); `make-install-usb.sh --from-release` downloads them, checks
 `NAME.iso.parts.sha256`, reassembles the ISO and checks `NAME.iso.sha256` (and its
-signature, when published). By hand: `cat NAME.iso.part-* > NAME.iso; sha256sum -c NAME.iso.sha256`.
+signature, which must be a valid one by key `6387C619EF246F6F20C536B72C3331C78353BA04`; without it the
+script aborts unless you pass `--insecure-skip-signature`). By hand: `cat NAME.iso.part-* > NAME.iso; sha256sum -c NAME.iso.sha256`.
 
 The workflow takes the newest signed `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`,
 `howdy-next`, `sl7-ir-bridge` and `omarchy-sl7-faceunlock` from the non-expiring
