@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 19:08:04 -0500
+Subject: [PATCH] SL7 local: arm64: dts: qcom: x1e80100-romulus: Light
+ the camera indicator for both cameras
+
+The white camera indicator (GPIO 225) was only a panic indicator for lack
+of a "camera on" trigger. The V4L2 core has one: a sensor with a "privacy"
+LED reference turns that LED on while it streams.
+
+Label the LED camera_privacy_led, drop panic-indicator, and reference it
+as "privacy" from the front RGB OV02C10 and, on the 13.8 inch model, the
+IR VD55G0 (which needs the previous patch to look it up). Windows lights
+the LED for the front RGB camera only (ACPI CAMP owns GPIO 225, CAMI has
+none); lighting it for the IR camera too is deliberate, so that a face
+scan is visible.
+
+Both sensors share the one LED. led_get() allows several consumers and
+the sysfs-disable flag is not counted, but the core keeps no reference
+count either: if one camera stops while the other still streams, the LED
+goes off. Both cameras streaming at the same time is rare enough to leave
+as is.
+
+Upstream-Status: Inappropriate (SL7 specific)
+---
+ .../boot/dts/qcom/x1e80100-microsoft-romulus.dtsi | 15 ++++++++++++---
+ .../dts/qcom/x1e80100-microsoft-romulus13.dts     |  7 ++++++-
+ 2 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+index 12827c0bffec..8f0448d42b0c 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus.dtsi
+@@ -94,15 +94,21 @@ leds {
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&cam_indicator_en>;
+
+-		led-camera-indicator {
++		/*
++		 * The camera indicator. Both cameras reference it as their
++		 * "privacy" LED, so the V4L2 core lights it while either one
++		 * streams. Windows lights it for the front RGB camera only
++		 * (ACPI CAMP, GPIO 225); the IR camera lights it here by
++		 * choice. The core has no reference count: when one camera
++		 * stops while the other still streams, the LED goes off.
++		 */
++		camera_privacy_led: led-camera-indicator {
+ 			label = "white:camera-indicator";
+ 			function = LED_FUNCTION_INDICATOR;
+ 			color = <LED_COLOR_ID_WHITE>;
+ 			gpios = <&tlmm 225 GPIO_ACTIVE_HIGH>;
+ 			linux,default-trigger = "none";
+ 			default-state = "off";
+-			/* Reuse as a panic indicator until we get a "camera on" trigger */
+-			panic-indicator;
+ 		};
+ 	};
+
+@@ -959,6 +965,9 @@ camera@36 {
+
+ 		orientation = <0>; /* front facing */
+
++		leds = <&camera_privacy_led>;
++		led-names = "privacy";
++
+ 		avdd-supply = <&vreg_l5m_2p8>;
+ 		dvdd-supply = <&vreg_l1m_1p2>;
+ 		dovdd-supply = <&vreg_l3m_1p8>;
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+index 0ff200622136..c048795edd00 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-romulus13.dts
+@@ -89,7 +89,8 @@ &cci0_i2c0 {
+ 	 * "linux-sl7 (IR test)" boot entry alone (patch "vd55g: illuminator").
+ 	 * On every other boot the property is ignored: no GPIO is a strobe output
+ 	 * and there is no led_mode control. There is no `leds = <...>` link to a
+-	 * flash LED and no led-names: the driver never drives the PMIC.
++	 * flash LED: the driver never drives the PMIC. The only `leds` link is the
++	 * "privacy" camera indicator below.
+ 	 *
+ 	 * The illuminator is the PM8550 flash (QCOM0C27, 700 mA), probably
+ 	 * channels 1 and 4 together. The ganged test LED under &pm8550_flash
+@@ -120,6 +121,10 @@ camera@10 {
+
+ 		orientation = <0>; /* front facing */
+
++		/* The camera indicator lights while this sensor streams */
++		leds = <&camera_privacy_led>;
++		led-names = "privacy";
++
+ 		/* GPIO 1 is the strobe output; ignored unless vd55g.illuminator=1 */
+ 		st,leds = <1>;
+

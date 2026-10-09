@@ -15,7 +15,7 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.8
-pkgrel=23
+pkgrel=24
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -134,6 +134,8 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0098-SL7-media-i2c-vd55g-Windows-IR-strobe-timing-and-illuminator-on-by-default.patch'
         'patches/0099-media-i2c-ov02c10-Support-a-12-MHz-external-clock.patch'
         'patches/0100-SL7-arm64-dts-qcom-x1e80100-romulus-Clock-the-front-camera-from-12-MHz.patch'
+        'patches/0101-SL7-local-media-i2c-vd55g-Look-up-the-privacy-LED.patch'
+        'patches/0102-SL7-arm64-dts-qcom-x1e80100-romulus-Light-the-camera-indicator-for-both-cameras.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
@@ -236,6 +238,8 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
          'SKIP'
          'SKIP'
          'SKIP'
+            'SKIP'
+            'SKIP'
          '968ce7359fa90078e15e7fd544ebd9fa74a28f1e7fb83bd8fd310e7e9ca7daee'
          'SKIP'
          '21a17702648aa6a937b88a93bd71ef9f547815ead28719cafcfcc247396643dc')

@@ -161,3 +161,7 @@
 # 22. OV02C10 12 MHz external clock: 250 MHz link, default frame length scaled with the link frequency; front camera clocked from a 12 MHz fixed clock (Cragun report, linux-media 2026-07-02)
 0099-media-i2c-ov02c10-Support-a-12-MHz-external-clock.patch
 0100-SL7-arm64-dts-qcom-x1e80100-romulus-Clock-the-front-camera-from-12-MHz.patch
+
+# 23. Camera indicator LED (GPIO 225) as the "privacy" LED of both cameras: vd55g registers as a sensor subdev so the V4L2 core finds it; the romulus DT links the OV02C10 and the VD55G0 to it (SL7 local)
+0101-SL7-local-media-i2c-vd55g-Look-up-the-privacy-LED.patch
+0102-SL7-arm64-dts-qcom-x1e80100-romulus-Light-the-camera-indicator-for-both-cameras.patch

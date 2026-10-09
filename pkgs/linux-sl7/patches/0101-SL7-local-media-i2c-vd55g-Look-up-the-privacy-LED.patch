@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 19:07:45 -0500
+Subject: [PATCH] SL7 local: media: i2c: vd55g: Look up the privacy LED
+
+The VD55G driver registers its subdev with v4l2_async_register_subdev(),
+which does not look up the optional "privacy" LED that the V4L2 core
+turns on while a sensor streams (v4l2_subdev_get_privacy_led(), called
+only from v4l2_async_register_subdev_sensor()). The OV02C10 uses the
+sensor variant, so a "leds"/"led-names" pair on the VD55G node was
+silently ignored.
+
+Register the VD55G subdev with v4l2_async_register_subdev_sensor(). The
+extra work it does is parsing the optional flash-leds and lens-focus
+references, which the SL7 does not set, so an empty notifier results,
+the same as for the OV02C10. A privacy LED that is not bound yet defers
+the probe, and the failure is reported with dev_err_probe() so that a
+deferral does not log as an error.
+
+Upstream-Status: Inappropriate (SL7 local, but the change is generic)
+---
+ drivers/media/i2c/vd55g.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/i2c/vd55g.c b/drivers/media/i2c/vd55g.c
+index 932877698946..1d4c3ec985b7 100644
+--- a/drivers/media/i2c/vd55g.c
++++ b/drivers/media/i2c/vd55g.c
+@@ -2475,9 +2475,13 @@ static int vd55g_probe(struct i2c_client *client)
+ 		goto err_power_off;
+ 	}
+
+-	ret = v4l2_async_register_subdev(&sensor->sd);
++	/*
++	 * The sensor variant also looks up the optional "privacy" LED, which
++	 * the V4L2 core then turns on whenever the sensor streams.
++	 */
++	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
+ 	if (ret) {
+-		dev_err(dev, "async subdev register failed %d\n", ret);
++		dev_err_probe(dev, ret, "async subdev register failed\n");
+ 		goto err_subdev;
+ 	}
+
