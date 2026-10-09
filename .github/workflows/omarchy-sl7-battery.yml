@@ -1,0 +1,103 @@
+name: omarchy-sl7-battery
+
+on:
+  push:
+    paths:
+      - 'pkgs/omarchy-sl7-battery/**'
+      - '.github/workflows/omarchy-sl7-battery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Arch Linux ARM build environment (omacom/omarchy-pkg-builder, aarch64),
+  # pinned by digest, the same image as linux-sl7.
+  BUILDER_IMAGE: ghcr.io/omacom/omarchy-pkg-builder@sha256:a0cedbe8fb2f15aa34217ddd8a74a5e12003dc442f16f1825ab2b9e023488a63
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Lint, JS tests (node --test) and Rust tests (cargo test)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck jq
+          if grep -rIn '[[:space:]]$' pkgs/omarchy-sl7-battery; then
+            echo "trailing whitespace found" >&2
+            exit 1
+          fi
+          cd pkgs/omarchy-sl7-battery
+          shellcheck -x -s bash -S warning omarchy-sl7-battery-plugin omarchy-sl7-battery.install
+          jq -e . plugin/manifest.json >/dev/null
+          node --version
+          node --test tests/js/*.test.js
+          cd daemon
+          cargo --version
+          cargo test --locked
+
+      - name: Build package in ALARM container
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm --platform linux/arm64 --user 0 \
+            -v "$PWD/pkgs/omarchy-sl7-battery:/src:ro" \
+            -v "$PWD/out:/out" \
+            "$BUILDER_IMAGE" bash -euxc '
+              grep -q "^DisableSandbox" /etc/pacman.conf || sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+              pacman -Syu --noconfirm --needed base-devel git cargo
+              id builder >/dev/null 2>&1 || useradd -m builder
+              cp -r /src /home/builder/build
+              chown -R builder:builder /home/builder/build
+              cd /home/builder/build
+              su builder -c "makepkg --printsrcinfo" > /tmp/SRCINFO.new
+              diff -u .SRCINFO /tmp/SRCINFO.new
+              # --nodeps: omarchy-surface-sl7 and power-profiles-daemon are runtime
+              # dependencies only; the build needs cargo, installed above.
+              su builder -c "PKGEXT=.pkg.tar.zst makepkg --nodeps --noconfirm --cleanbuild"
+              cp /home/builder/build/*.pkg.tar.* /out/
+            '
+
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          pkg=$(ls out/*.pkg.tar.* | head -n1)
+          tar -tf "$pkg" | sort > out/contents.txt
+          for f in \
+            usr/lib/omarchy-sl7-battery/sl7-batteryd \
+            usr/lib/systemd/user/sl7-batteryd.service \
+            usr/lib/systemd/user/omarchy-sl7-battery-plugin.service \
+            usr/lib/systemd/user/graphical-session.target.wants/sl7-batteryd.service \
+            usr/lib/systemd/user/graphical-session.target.wants/omarchy-sl7-battery-plugin.service \
+            usr/bin/omarchy-sl7-battery-plugin \
+            usr/share/applications/omarchy-sl7-battery.desktop \
+            usr/share/omarchy-sl7-battery/plugin/manifest.json \
+            usr/share/omarchy-sl7-battery/plugin/Panel.qml \
+            usr/share/omarchy-sl7-battery/plugin/Service.qml \
+            usr/share/omarchy-sl7-battery/plugin/ui/PopupContent.qml \
+            usr/share/omarchy-sl7-battery/plugin/ui/StatsTab.qml \
+            usr/share/omarchy-sl7-battery/plugin/ui/components/DotChart.qml \
+            usr/share/omarchy-sl7-battery/plugin/lib/Projection.js \
+            usr/share/licenses/omarchy-sl7-battery/LICENSE; do
+            grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
+          done
+          if grep -E '/__pycache__/|\.pyc$|/target/' out/contents.txt; then
+            echo "build leftovers in the package" >&2
+            exit 1
+          fi
+          mkdir x && tar -C x -xf "$pkg"
+          file x/usr/lib/omarchy-sl7-battery/sl7-batteryd | grep -q 'ARM aarch64'
+          grep -q 'arch = aarch64' x/.PKGINFO
+          grep -E '^depend = ' x/.PKGINFO
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omarchy-sl7-battery-aarch64
+          path: out/*.pkg.tar.*
+          if-no-files-found: error
