@@ -70,7 +70,7 @@ Firmware is installed to $dest_root
 Get the MSI ($msi_version, sha256 $msi_sha256):
   $msi_url
 Older MSIs that are also accepted:
-$(for e in "${known_msis[@]:1}"; do read -r v h n <<<"$e"; echo "  $v  sha256 $h"; done)
+$(for e in "${known_msis[@]:1}"; do read -r v h _ <<<"$e"; echo "  $v  sha256 $h"; done)
 If Microsoft has moved the file, download the current Surface Laptop 7 driver
 MSI from $msi_page and pass it with --from-msi; it must match one of the
 sha256 values above.
