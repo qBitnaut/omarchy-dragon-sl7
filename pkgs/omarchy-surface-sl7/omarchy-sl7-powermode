@@ -53,7 +53,7 @@ PROFILE_AWARE=yes
 CPU_MAX_FREQ_POWERSAVER=1708800
 GPU_MAX_FREQ_POWERSAVER=lowest
 PARK_POWERSAVER=no
-REFRESH_POWERSAVER=60
+REFRESH_POWERSAVER=off
 DISABLE_ANIMATIONS_POWERSAVER=yes
 DISABLE_BLUR_POWERSAVER=yes
 PLATFORM_PROFILE_PERFORMANCE=
@@ -351,11 +351,11 @@ user_refresh() { # level
   read -r w h x y scale cur < <(jq -r '[.width, .height, .x, .y, .scale, .refreshRate] | @tsv' <<<"$info")
   saved=$user_state/refresh
   case $1 in
-    saver) hz=${REFRESH_POWERSAVER:-$REFRESH_ON_BATTERY} ;;
+    saver) hz=$REFRESH_POWERSAVER ;;  # empty or off: leave the refresh rate alone
     battery) hz=$REFRESH_ON_BATTERY ;;
   esac
   if [[ $1 == saver || $1 == battery ]]; then
-    [[ -n $hz ]] || return 0
+    [[ -n $hz && $hz != off ]] || return 0
     mode=$(jq -r --argjson want "$hz" --arg res "${w}x${h}" '
       [.availableModes[] | capture("^(?<r>[0-9]+x[0-9]+)@(?<hz>[0-9.]+)Hz$")
         | select(.r == $res) | .hz | tonumber | select((. - $want) < 1 and ($want - .) < 1)]

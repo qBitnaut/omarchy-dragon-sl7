@@ -226,8 +226,10 @@ use this tool for the SL7.
   reads the profile (never sets it) and picks the knobs from the power source and the profile:
   `power-saver` (either source) is stricter (`CPU_MAX_FREQ_POWERSAVER`, default 1708800 kHz;
   GPU at its lowest frequency; Wi-Fi power save on; optional parking with `PARK_POWERSAVER=yes`;
-  60 Hz, animations and blur off through the user part, `REFRESH_POWERSAVER`,
-  `DISABLE_*_POWERSAVER`), `performance` (either source) is uncapped like AC, and `balanced`
+  animations and blur off through the user part, `DISABLE_*_POWERSAVER`; the refresh rate is
+  left alone by default because VRR already idles at 24 Hz, `REFRESH_POWERSAVER=60` opts into
+  a 60 Hz switch; installs that kept an older `/etc/omarchy-surface-sl7/power.conf` with
+  `REFRESH_POWERSAVER=60` set `REFRESH_POWERSAVER=` there to turn it off), `performance` (either source) is uncapped like AC, and `balanced`
   keeps the battery caps on battery and uncapped on AC. The root side is a long-running
   `omarchy-sl7-powermode --system watch` (`omarchy-surface-sl7-powermode.service`) that applies
   at start and on each `ActiveProfile` change from PPD's D-Bus `PropertiesChanged`; plug/unplug

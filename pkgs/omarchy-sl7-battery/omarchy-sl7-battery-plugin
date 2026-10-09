@@ -14,6 +14,11 @@
 # after omarchy.power, then omarchy.power is disabled. A state file records it; after that
 # the bar belongs to the user again (re-adding the Power widget, moving or removing ours
 # sticks). If omarchy.power is not on the bar (the user removed it), nothing is placed.
+# SUPER+CTRL+P (Omarchy's default: the omarchy.power panel) is rebound ONCE to open this app.
+# A marked block (BEGIN/END omarchy-sl7-battery) is appended to ~/.config/hypr/bindings.lua:
+# it unbinds the default first, so both do not fire. Nothing else in the file is touched;
+# if the file already mentions that key outside the block, nothing is added. `uninstall`
+# removes the block.
 # `uninstall` re-enables omarchy.power where ours was, removes ours and records that the
 # user opted out, so the login service leaves things alone until `install --force`.
 set -u
@@ -31,6 +36,10 @@ dst=${SL7_BATTERY_PLUGIN_DST:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/
 state_dir=${SL7_BATTERY_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-sl7-battery}
 state=$state_dir/widget-swap
 wait_s=${SL7_BATTERY_SHELL_WAIT:-90}
+bindings=${SL7_BATTERY_HYPR_BINDINGS:-${XDG_CONFIG_HOME:-$HOME/.config}/hypr/bindings.lua}
+bind_state=$state_dir/key-binding
+bind_begin='-- BEGIN omarchy-sl7-battery (managed by omarchy-sl7-battery-plugin; removed by its uninstall)'
+bind_end='-- END omarchy-sl7-battery'
 
 say() { echo "omarchy-sl7-battery-plugin: $*"; }
 
@@ -49,9 +58,11 @@ state_word() {
   [[ -r $state ]] && read -r word _ <"$state" && echo "$word"
 }
 
-record() {
-  mkdir -p "$state_dir" && echo "$1 $(date -u +%Y-%m-%dT%H:%M:%SZ) ${2:-}" >"$state"
+record_to() { # file word [note]
+  mkdir -p "$state_dir" && echo "$2 $(date -u +%Y-%m-%dT%H:%M:%SZ) ${3:-}" >"$1"
 }
+
+record() { record_to "$state" "$@"; }
 
 # Copies the plugin when it differs. Returns 0 if it changed something.
 sync_plugin() {
@@ -116,6 +127,50 @@ swap_widget() {
   fi
 }
 
+# Appends the SUPER+CTRL+P block once. Never rewrites anything outside the block.
+bind_key() {
+  [[ -e $bind_state ]] && return 0
+  if [[ ! -f $bindings ]]; then
+    record_to "$bind_state" skipped "no $bindings"
+    return 0
+  fi
+  if grep -qF "$bind_begin" "$bindings"; then
+    record_to "$bind_state" present "block already in $bindings"
+    return 0
+  fi
+  if grep -v '^[[:space:]]*--' "$bindings" | grep -qiE 'SUPER[[:space:]]*\+[[:space:]]*CTRL[[:space:]]*\+[[:space:]]*P["[:space:]]'; then
+    record_to "$bind_state" skipped "SUPER + CTRL + P is already set in $bindings"
+    say "SUPER + CTRL + P is already set in $bindings; not touching it"
+    return 0
+  fi
+  {
+    [[ -s $bindings && $(tail -c1 "$bindings" | wc -l) -eq 0 ]] && echo
+    echo
+    echo "$bind_begin"
+    echo 'hl.unbind("SUPER + CTRL + P")'
+    echo 'o.bind("SUPER + CTRL + P", "Battery", "omarchy-shell qbit.sl7battery toggle")'
+    echo "$bind_end"
+  } >>"$bindings" || return 0
+  record_to "$bind_state" added "SUPER + CTRL + P opens $id"
+  say "SUPER + CTRL + P now opens the battery app (block added to $bindings)"
+  command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null 2>&1
+  return 0
+}
+
+unbind_key() {
+  if [[ -f $bindings ]] && grep -qF "$bind_begin" "$bindings"; then
+    local tmp=$bindings.sl7tmp.$$
+    awk -v b="$bind_begin" -v e="$bind_end" '
+      $0 == b { skip = 1; next }
+      skip && $0 == e { skip = 0; next }
+      !skip { print }' "$bindings" >"$tmp" && cat "$tmp" >"$bindings"
+    rm -f "$tmp"
+    say "removed the SUPER + CTRL + P block from $bindings"
+    command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null 2>&1
+  fi
+  rm -f "$bind_state"
+}
+
 do_install() {
   local force=0
   [[ ${1:-} == --force ]] && force=1
@@ -133,6 +188,7 @@ do_install() {
     rescan
   fi
   swap_widget
+  bind_key
 }
 
 do_uninstall() {
@@ -149,6 +205,7 @@ do_uninstall() {
     say "omarchy-shell is not running; after logging in run: omarchy plugin enable omarchy.power"
   fi
   rm -rf "$dst"
+  unbind_key
   rescan
   record uninstalled "was: ${was:-none}"
   say "removed $id; Omarchy's Power widget is back"
@@ -158,6 +215,7 @@ do_status() {
   echo "plugin source:  $src"
   echo "plugin copy:    $dst $([[ -d $dst ]] && { diff -rq "$src" "$dst" >/dev/null 2>&1 && echo '(current)' || echo '(differs)'; } || echo '(missing)')"
   echo "widget swap:    $(cat "$state" 2>/dev/null || echo 'not done')"
+  echo "key binding:    $(cat "$bind_state" 2>/dev/null || echo 'not done')"
 }
 
 case ${1:-install} in

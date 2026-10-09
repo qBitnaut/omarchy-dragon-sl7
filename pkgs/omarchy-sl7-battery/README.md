@@ -52,8 +52,12 @@ Log out and in. Three things then happen in your session:
    stays that way). If `omarchy.power` is not on your bar nothing is placed
    (`omarchy plugin enable qbit.sl7battery`). Your `shell.json` is only edited through
    `omarchy plugin enable|disable`, never by hand.
+4. **Once**, it also rebinds `SUPER + CTRL + P` (Omarchy's default for the `omarchy.power` panel)
+   to `omarchy-shell qbit.sl7battery toggle`, by appending a marked block (`BEGIN/END
+   omarchy-sl7-battery`) to `~/.config/hypr/bindings.lua` that unbinds the default first. If that
+   file already sets the key, nothing is added. Delete the block to get the old key back.
 
-Undo: `omarchy-sl7-battery-plugin uninstall` re-enables `omarchy.power` where ours was, removes
+Undo: `omarchy-sl7-battery-plugin uninstall` re-enables `omarchy.power` where ours was, removes the key binding block, removes
 the plugin and records that you opted out (the login service then leaves things alone until
 `omarchy-sl7-battery-plugin install --force`). Do it before `pacman -R`. `omarchy-sl7-battery-plugin
 status` shows the state. Omarchy's `SUPER + CTRL + P` binding targets `omarchy.power`, so it does
