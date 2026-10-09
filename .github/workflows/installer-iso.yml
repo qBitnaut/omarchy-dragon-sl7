@@ -170,13 +170,13 @@ jobs:
           installer/scripts/fetch-upstreams.sh "$RUNNER_TEMP/build" omarchy-iso omarchy omarchy-pkgs
 
       - name: Download the repository artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: omarchy-sl7-repo
           path: ${{ runner.temp }}/build/repo
 
       - name: Download the package versions
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: package-versions
 
@@ -264,13 +264,13 @@ jobs:
       contents: write # release upload and tag move (installer-latest)
     steps:
       - name: Download the ISO artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: omarchy-sl7-installer-iso
           path: out
 
       - name: Download the package versions
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: package-versions
 
