@@ -23,11 +23,12 @@ import "../../lib/Spark.js" as Spark
 //                          is drawn in markColor instead of color (on-battery bands)
 //   markColor: color
 //   futureFrom: int        first projected column (-1: none). Projected columns draw their
-//                          lit dots hollow and faint, and a vertical "now" divider is
-//                          drawn between futureFrom - 1 and futureFrom
+//                          lit dots hollow and faint in futureColor, and a vertical "now"
+//                          divider (dividerColor, dividerWidth) is drawn between
+//                          futureFrom - 1 and futureFrom
 //   gapMarks: var          optional bool[]; a marked column is a gap (asleep) and its
 //                          track is drawn in gapColor
-//   gapColor, dividerColor: color
+//   gapColor, dividerColor, futureColor: color; dividerWidth: real
 //   readonly columns: int  how many columns fit the current width -- request that many
 //                          history points so no resampling is needed
 //
@@ -52,6 +53,8 @@ Canvas {
     property var gapMarks: []
     property color gapColor: Util.alpha(Color.foreground, 0.2)
     property color dividerColor: Util.alpha(Color.foreground, 0.35)
+    property real dividerWidth: 1
+    property color futureColor: Util.alpha(Color.foreground, 0.45)
 
     readonly property int columns: Spark.columnsFor(width, dotSize, dotGap)
     readonly property real rowPitch: dotSize + dotGap
@@ -72,6 +75,8 @@ Canvas {
     onGapMarksChanged: requestPaint()
     onGapColorChanged: requestPaint()
     onDividerColorChanged: requestPaint()
+    onDividerWidthChanged: requestPaint()
+    onFutureColorChanged: requestPaint()
     onWidthChanged: requestPaint()
     onHeightChanged: requestPaint()
 
@@ -107,15 +112,16 @@ Canvas {
                 ctx.beginPath()
                 ctx.arc(cx, cy, r, 0, 2 * Math.PI)
                 if (on && future) {
-                    // Projection: a faint fill and a hollow ring.
-                    ctx.fillStyle = root.color
-                    ctx.globalAlpha = 0.25
+                    // Projection: a faint light-grey fill and a hollow ring, so the
+                    // forecast never reads as measured data.
+                    ctx.fillStyle = root.futureColor
+                    ctx.globalAlpha = 0.35
                     ctx.fill()
                     ctx.beginPath()
                     ctx.arc(cx, cy, Math.max(0.5, r - 0.5), 0, 2 * Math.PI)
-                    ctx.strokeStyle = root.color
+                    ctx.strokeStyle = root.futureColor
                     ctx.lineWidth = 1
-                    ctx.globalAlpha = 0.65
+                    ctx.globalAlpha = 0.8
                     ctx.stroke()
                 } else {
                     ctx.fillStyle = on ? (hot ? root.markColor : root.color) : (gap ? root.gapColor : root.trackColor)
@@ -126,10 +132,10 @@ Canvas {
         }
 
         if (fut > 0 && fut < cols) {
-            var x = Math.round(r + (fut - 0.5) * stepX) + 0.5
+            var x = Math.round(r + (fut - 0.5) * stepX) + (root.dividerWidth % 2 ? 0.5 : 0)
             ctx.globalAlpha = 1
             ctx.strokeStyle = root.dividerColor
-            ctx.lineWidth = 1
+            ctx.lineWidth = root.dividerWidth
             ctx.beginPath()
             ctx.moveTo(x, 0)
             ctx.lineTo(x, root.height)

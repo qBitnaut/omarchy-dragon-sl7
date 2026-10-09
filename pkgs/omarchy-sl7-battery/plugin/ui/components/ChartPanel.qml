@@ -7,7 +7,8 @@ import qs.Commons
 // ("● 1 on battery · 3m") keyed in the chart's mark colour.
 //
 //   values, minValue, maxValue, rows, marks, bodyOpacity, color, markColor,
-//   trackColor, futureFrom, gapMarks, gapColor, dividerColor: forwarded to DotChart
+//   trackColor, futureFrom, gapMarks, gapColor, dividerColor, dividerWidth,
+//   futureColor: forwarded to DotChart
 //   maxText, minText: string     y-axis notes (top / bottom of the chart)
 //   startText, endText: string   x-axis notes (left / right under the chart)
 //   noteText: string             optional legend note, right-aligned before endText
@@ -37,6 +38,8 @@ Item {
     property var gapMarks: []
     property color gapColor: Util.alpha(foreground, 0.2)
     property color dividerColor: Util.alpha(foreground, 0.35)
+    property real dividerWidth: 1
+    property color futureColor: Util.alpha(foreground, 0.45)
     property string fontFamily: Style.font.family
 
     readonly property int columns: chart.columns
@@ -98,6 +101,8 @@ Item {
         gapMarks: root.gapMarks
         gapColor: root.gapColor
         dividerColor: root.dividerColor
+        dividerWidth: root.dividerWidth
+        futureColor: root.futureColor
     }
 
     Text {
