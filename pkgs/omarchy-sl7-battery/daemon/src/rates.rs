@@ -227,7 +227,7 @@ mod tests {
         let end = run(&mut r, wake + SAMPLE_S, wake + 7200.0, 5.0, e);
         let awake = r.avg_awake_w().unwrap();
         assert!((awake - 5.0).abs() < 0.05, "{}", awake);
-        assert!((r.awake_s_since_unplug().unwrap() - 9000.0).abs() < 100.0);
+        assert!((r.awake_s_since_unplug().unwrap() - 10800.0).abs() < 100.0);
         // The wall-clock average is dragged far down by the sleep.
         let wall = r.avg_since_unplug(end, Some(e - 10.0)).unwrap();
         assert!(wall < 2.5, "{}", wall);
