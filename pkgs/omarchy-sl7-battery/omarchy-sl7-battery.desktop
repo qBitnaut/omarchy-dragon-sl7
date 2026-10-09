@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SL7 Battery
+GenericName=Battery
+Comment=Surface Laptop 7 battery: charge, time left, history and power profile
+Exec=omarchy-shell qbit.sl7battery toggle
+Icon=battery
+Terminal=false
+Categories=System;Monitor;
+Keywords=battery;power;sl7;surface;

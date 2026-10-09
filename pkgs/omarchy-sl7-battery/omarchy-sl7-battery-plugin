@@ -1,0 +1,173 @@
+#!/bin/bash
+# Installs the SL7 Battery plugin for the current user and swaps it in for Omarchy's
+# Power bar widget, reversibly.
+#
+#   omarchy-sl7-battery-plugin [install] [--force]   copy/update the plugin, swap the widget once
+#   omarchy-sl7-battery-plugin uninstall              put Omarchy's Power widget back, remove the plugin
+#   omarchy-sl7-battery-plugin status
+#
+# Run by the user service omarchy-sl7-battery-plugin.service at each login. Omarchy loads
+# third-party plugins only from ~/.config/omarchy/plugins (copies, not symlinks), so the
+# files in /usr/share/omarchy-sl7-battery/plugin are copied there whenever they differ.
+#
+# The bar swap happens ONCE, through Omarchy's own commands: the plugin is enabled right
+# after omarchy.power, then omarchy.power is disabled. A state file records it; after that
+# the bar belongs to the user again (re-adding the Power widget, moving or removing ours
+# sticks). If omarchy.power is not on the bar (the user removed it), nothing is placed.
+# `uninstall` re-enables omarchy.power where ours was, removes ours and records that the
+# user opted out, so the login service leaves things alone until `install --force`.
+set -u
+
+export OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy}
+case ":$PATH:" in
+  *:/usr/share/omarchy/bin:*) ;;
+  *) PATH=$PATH:/usr/share/omarchy/bin ;;
+esac
+export PATH
+
+id=qbit.sl7battery
+src=${SL7_BATTERY_PLUGIN_SRC:-/usr/share/omarchy-sl7-battery/plugin}
+dst=${SL7_BATTERY_PLUGIN_DST:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$id}
+state_dir=${SL7_BATTERY_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-sl7-battery}
+state=$state_dir/widget-swap
+wait_s=${SL7_BATTERY_SHELL_WAIT:-90}
+
+say() { echo "omarchy-sl7-battery-plugin: $*"; }
+
+shell_ready() {
+  local i
+  for ((i = 0; i < wait_s; i++)); do
+    omarchy-shell shell ping >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+
+rescan() { omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true; }
+
+state_word() {
+  [[ -r $state ]] && read -r word _ <"$state" && echo "$word"
+}
+
+record() {
+  mkdir -p "$state_dir" && echo "$1 $(date -u +%Y-%m-%dT%H:%M:%SZ) ${2:-}" >"$state"
+}
+
+# Copies the plugin when it differs. Returns 0 if it changed something.
+sync_plugin() {
+  local stage=$state_dir/stage.$$
+  if [[ -d $dst ]] && diff -rq "$src" "$dst" >/dev/null 2>&1; then
+    return 1
+  fi
+  mkdir -p "$state_dir" "$(dirname "$dst")" || return 1
+  rm -rf "$stage"
+  cp -rL "$src" "$stage" || { rm -rf "$stage"; return 1; }
+  rm -rf "$dst"
+  mv "$stage" "$dst" || return 1
+  say "installed the plugin to $dst"
+  return 0
+}
+
+on_bar() { # id, config json
+  jq -e --arg id "$1" '
+    [(.bar.layout // {}) | to_entries[] | .value[]? | if type == "object" then .id else . end]
+    | index($id) != null' <<<"$2" >/dev/null 2>&1
+}
+
+swap_widget() {
+  local cfg
+  if [[ -e $state ]]; then
+    return 0
+  fi
+  if ! shell_ready; then
+    say "omarchy-shell is not running; the widget swap will be tried at the next login"
+    return 0
+  fi
+  cfg=$(omarchy-shell shell listShellConfig 2>/dev/null) || cfg=
+  if [[ -z $cfg ]]; then
+    say "could not read the shell config; will retry at the next login"
+    return 0
+  fi
+  if on_bar "$id" "$cfg"; then
+    record present "$id is already on the bar"
+    return 0
+  fi
+  if ! on_bar omarchy.power "$cfg"; then
+    record skipped "omarchy.power is not on the bar; add $id yourself: omarchy plugin enable $id"
+    say "omarchy.power is not on the bar; not placing the widget (omarchy plugin enable $id)"
+    return 0
+  fi
+  rescan
+  if ! omarchy-plugin-enable "$id" --after omarchy.power >/dev/null 2>&1; then
+    sleep 2
+    rescan
+    sleep 1
+    if ! omarchy-plugin-enable "$id" --after omarchy.power >/dev/null 2>&1; then
+      say "could not enable $id; will retry at the next login"
+      return 0
+    fi
+  fi
+  if omarchy-plugin-disable omarchy.power >/dev/null 2>&1; then
+    record swapped "omarchy.power replaced by $id"
+    say "replaced the Power widget with $id"
+  else
+    omarchy-plugin-disable "$id" >/dev/null 2>&1
+    say "could not disable omarchy.power; left the bar as it was"
+  fi
+}
+
+do_install() {
+  local force=0
+  [[ ${1:-} == --force ]] && force=1
+  if [[ ! -d $src ]]; then
+    say "plugin files not found in $src"
+    return 1
+  fi
+  if ((force)); then
+    rm -f "$state"
+  elif [[ $(state_word) == uninstalled ]]; then
+    say "uninstalled by the user; run 'omarchy-sl7-battery-plugin install --force' to bring it back"
+    return 0
+  fi
+  if sync_plugin; then
+    rescan
+  fi
+  swap_widget
+}
+
+do_uninstall() {
+  local was
+  was=$(state_word)
+  if command -v omarchy-shell >/dev/null 2>&1 && omarchy-shell shell ping >/dev/null 2>&1; then
+    if [[ $was == swapped ]]; then
+      omarchy-plugin-enable omarchy.power --after "$id" >/dev/null 2>&1 ||
+        omarchy-plugin-enable omarchy.power >/dev/null 2>&1 ||
+        say "could not re-enable omarchy.power; run: omarchy plugin enable omarchy.power"
+    fi
+    omarchy-plugin-disable "$id" >/dev/null 2>&1 || true
+  else
+    say "omarchy-shell is not running; after logging in run: omarchy plugin enable omarchy.power"
+  fi
+  rm -rf "$dst"
+  rescan
+  record uninstalled "was: ${was:-none}"
+  say "removed $id; Omarchy's Power widget is back"
+}
+
+do_status() {
+  echo "plugin source:  $src"
+  echo "plugin copy:    $dst $([[ -d $dst ]] && { diff -rq "$src" "$dst" >/dev/null 2>&1 && echo '(current)' || echo '(differs)'; } || echo '(missing)')"
+  echo "widget swap:    $(cat "$state" 2>/dev/null || echo 'not done')"
+}
+
+case ${1:-install} in
+  install) do_install "${2:-}" ;;
+  --force) do_install --force ;;
+  uninstall) do_uninstall ;;
+  status) do_status ;;
+  -h | --help) sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0" ;;
+  *)
+    echo "usage: omarchy-sl7-battery-plugin [install [--force]|uninstall|status]" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,28 @@
+# Package scriptlet for omarchy-sl7-battery.
+#
+# Everything per user (the plugin copy and the bar widget swap) happens in the user
+# session, so the scriptlet only enables the user units globally and says what to do.
+
+post_install() {
+  systemctl --global enable sl7-batteryd.service omarchy-sl7-battery-plugin.service >/dev/null 2>&1 || true
+  echo '[sl7 battery] Log out and in (or: systemctl --user start sl7-batteryd omarchy-sl7-battery-plugin).'
+  echo '[sl7 battery] The plugin is copied to ~/.config/omarchy/plugins/qbit.sl7battery and replaces the'
+  echo '[sl7 battery] Power bar widget once. Open it from the bar, or: omarchy-shell qbit.sl7battery toggle'
+}
+
+post_upgrade() {
+  systemctl --global enable sl7-batteryd.service omarchy-sl7-battery-plugin.service >/dev/null 2>&1 || true
+  echo '[sl7 battery] Restart the daemon to pick up the new version: systemctl --user restart sl7-batteryd'
+  echo '[sl7 battery] The plugin copy is refreshed at your next login (or: omarchy-sl7-battery-plugin).'
+}
+
+pre_remove() {
+  systemctl --global disable sl7-batteryd.service omarchy-sl7-battery-plugin.service >/dev/null 2>&1 || true
+}
+
+post_remove() {
+  echo '[sl7 battery] Per-user leftovers: run  omarchy-sl7-battery-plugin uninstall  BEFORE removing the package'
+  echo '[sl7 battery] to put the Power widget back. If you already removed it: omarchy plugin enable omarchy.power,'
+  echo '[sl7 battery] omarchy plugin remove qbit.sl7battery, and delete ~/.config/omarchy-sl7-battery and'
+  echo '[sl7 battery] ~/.local/state/sl7-battery (history) if you want them gone.'
+}

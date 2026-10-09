@@ -1,0 +1,16 @@
+[Unit]
+Description=Surface Laptop 7 battery history, rate model and auto power saver
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/usr/share/omarchy/bin
+ExecStart=/usr/lib/omarchy-sl7-battery/sl7-batteryd
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=graphical-session.target

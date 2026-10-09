@@ -1,0 +1,72 @@
+# shellcheck shell=bash disable=SC2034,SC2154
+# Maintainer: qBitnaut <19711592+qBitnaut@users.noreply.github.com>
+#
+# SL7 Battery: a battery app for Omarchy on the Microsoft Surface Laptop 7. It replaces
+# Omarchy's Power bar widget with a Quickshell plugin (qbit.sl7battery) backed by
+# sl7-batteryd, a small Rust user daemon that samples the qcom-battmgr battery every
+# 20 s, keeps a week of one-minute and a year of 15-minute history, records sleep
+# periods and runs the auto power saver. The popup's styling and chart components are
+# adapted from CyberPowerPanel (also by qBitnaut, MIT); the daemon is written fresh.
+#
+# Local files carry SKIP checksums: they are covered by the repository's git history,
+# as in the other packages here. plugin/ and daemon/ are used straight from $startdir
+# (the checkout): makepkg's source array only handles top-level files.
+
+pkgname=omarchy-sl7-battery
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Surface Laptop 7 battery app for Omarchy: charge, time left with a projection, history, sleep drain, power profiles and an auto power saver (replaces the Power bar widget)'
+arch=('aarch64')
+url='https://github.com/qBitnaut/omarchy-dragon-sl7'
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'glib2' 'systemd' 'bash' 'jq' 'diffutils' 'coreutils'
+         'power-profiles-daemon' 'omarchy-surface-sl7>=0.1.0-55')
+makedepends=('cargo')
+optdepends=('omarchy: the shell, bar and plugin manager this app plugs into'
+            'hyprland: hyprctl, for the screen-on figures')
+install=omarchy-sl7-battery.install
+source=('omarchy-sl7-battery-plugin'
+        'omarchy-sl7-battery-plugin.user.service'
+        'sl7-batteryd.user.service'
+        'omarchy-sl7-battery.desktop'
+        'README.md'
+        'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+  cd "$startdir/daemon"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$startdir/daemon"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked
+}
+
+package() {
+  # daemon and its user unit
+  install -Dm755 "$srcdir/target/release/sl7-batteryd" "$pkgdir/usr/lib/omarchy-sl7-battery/sl7-batteryd"
+  install -Dm644 sl7-batteryd.user.service "$pkgdir/usr/lib/systemd/user/sl7-batteryd.service"
+  install -dm755 "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
+  ln -s ../sl7-batteryd.service "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/sl7-batteryd.service"
+
+  # the Quickshell plugin, copied per user into ~/.config/omarchy/plugins by the oneshot
+  local f
+  while IFS= read -r -d '' f; do
+    install -Dm644 "$startdir/plugin/$f" "$pkgdir/usr/share/omarchy-sl7-battery/plugin/$f"
+  done < <(cd "$startdir/plugin" && find . -type f -printf '%P\0')
+
+  # per-user install/update of the plugin and the one-time Power widget swap (reversible)
+  install -Dm755 omarchy-sl7-battery-plugin "$pkgdir/usr/bin/omarchy-sl7-battery-plugin"
+  install -Dm644 omarchy-sl7-battery-plugin.user.service \
+    "$pkgdir/usr/lib/systemd/user/omarchy-sl7-battery-plugin.service"
+  ln -s ../omarchy-sl7-battery-plugin.service \
+    "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/omarchy-sl7-battery-plugin.service"
+
+  install -Dm644 omarchy-sl7-battery.desktop "$pkgdir/usr/share/applications/omarchy-sl7-battery.desktop"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

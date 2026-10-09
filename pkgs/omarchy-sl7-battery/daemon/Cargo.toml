@@ -1,0 +1,30 @@
+[package]
+name = "sl7-batteryd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Battery history, rate model and auto power saver daemon for the Surface Laptop 7"
+
+[lib]
+name = "sl7_batteryd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sl7-batteryd"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

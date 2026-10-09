@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "qbit.sl7battery",
+  "name": "SL7 Battery",
+  "version": "0.1.0",
+  "author": "qBitnaut",
+  "license": "MIT",
+  "description": "Surface Laptop 7 battery: charge, time left, history with a projection, sleep drain and an auto power saver, backed by sl7-batteryd.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": { "service": "Service.qml", "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "SL7 Battery",
+    "description": "Battery charge, time left and power profile. Click for the full panel.",
+    "category": "System",
+    "aliases": ["battery", "power", "sl7", "surface"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "showPercentage": true },
+    "schema": [
+      { "key": "showPercentage", "type": "boolean", "label": "Show percentage", "defaultValue": true }
+    ]
+  }
+}

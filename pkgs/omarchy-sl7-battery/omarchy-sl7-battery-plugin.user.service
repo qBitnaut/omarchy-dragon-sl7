@@ -1,0 +1,13 @@
+[Unit]
+Description=Install the SL7 Battery plugin and swap it in for the Power widget (once)
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionPathExists=/usr/share/omarchy-sl7-battery/plugin/manifest.json
+
+[Service]
+Type=oneshot
+TimeoutStartSec=180
+ExecStart=/usr/bin/omarchy-sl7-battery-plugin install
+
+[Install]
+WantedBy=graphical-session.target
