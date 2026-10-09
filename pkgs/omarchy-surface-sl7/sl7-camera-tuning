@@ -39,11 +39,15 @@ import tempfile
 PROG = os.path.basename(sys.argv[0])
 BIN_NAME = "com.surface.tuned.ffc_ov02c10.bin"
 KNOWN_SHA256 = {
-    "5a66898fa9fb1273776e509186e24847acda2de48911c8097459503b669d665b": "Surface Laptop 7 driver MSI 26.053.36539.0",
+    # Byte-identical in both driver MSIs below.
+    "5a66898fa9fb1273776e509186e24847acda2de48911c8097459503b669d665b": "Surface Laptop 7 driver MSI 26.091.9400.0 and 26.053.36539.0",
 }
-# The driver MSI itself (omarchy-surface-sl7-firmware pins the same hash).
-MSI_SHA256 = "66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b"
-MSI_VERSION = "26.053.36539.0"
+# The driver MSIs themselves, newest first (omarchy-surface-sl7-firmware pins the same hashes).
+KNOWN_MSIS = {
+    "0917d206fb35278b4df4be980240318475300f3a130a86edac836519059a453d": "26.091.9400.0",
+    "66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b": "26.053.36539.0",
+}
+MSI_VERSION = "26.091.9400.0"
 CACHE_DIR = "/var/lib/omarchy-surface-sl7/camera"
 OUTPUT = "/etc/libcamera/ipa/simple/ov02c10.yaml"
 IPA_SO = "/usr/lib/libcamera/ipa/ipa_soft_simple.so"
@@ -233,15 +237,15 @@ def extract_from_msi(msi, tmp, allow_unverified):
     except OSError as e:
         die("cannot read %s: %s" % (msi, e))
     digest = sha256_of(copy)
-    if digest == MSI_SHA256:
-        info("MSI sha256 matches the pinned Surface Laptop 7 driver package %s" % MSI_VERSION)
+    if digest in KNOWN_MSIS:
+        info("MSI sha256 matches the pinned Surface Laptop 7 driver package %s" % KNOWN_MSIS[digest])
     elif allow_unverified:
-        warn("%s sha256 %s is not the pinned driver MSI %s (%s); continuing because --force/--allow-unverified "
-             "was given" % (msi, digest, MSI_VERSION, MSI_SHA256))
+        warn("%s sha256 %s matches no known driver MSI (newest %s); continuing because --force/--allow-unverified "
+             "was given" % (msi, digest, MSI_VERSION))
     else:
-        die("%s sha256 %s does not match the pinned driver MSI %s (%s); not parsing it. "
+        die("%s sha256 %s matches no known driver MSI (newest %s: %s); not parsing it. "
             "Use --force (or --allow-unverified) only if you accept that risk"
-            % (msi, digest, MSI_VERSION, MSI_SHA256))
+            % (msi, digest, MSI_VERSION, next(iter(KNOWN_MSIS))))
     cmd = ["msiextract", "-C", out, copy]
     if root:
         try:

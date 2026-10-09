@@ -85,7 +85,7 @@ _sl7_setup() {
     echo "  panel stays black after the initramfs. Fetch the driver MSI (download id 106120):"
     echo "    https://www.microsoft.com/en-us/download/details.aspx?id=106120"
     echo "  then run:"
-    echo "    sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi"
+    echo "    sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.091.9400.0.msi"
     echo "  (or --from DIR with qcom/x1e80100/microsoft/ staged). See --help."
   fi
 

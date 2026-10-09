@@ -6,13 +6,22 @@
 # The files are licensed by Microsoft/Qualcomm and are never part of this
 # package; they come from the public driver MSI (download id 106120) or from
 # a directory you staged yourself. Every file is checked against the sha256
-# list below (MSI 26.053.36539.0) before it is installed.
+# list below (identical in MSI 26.091.9400.0 and 26.053.36539.0) before it is installed.
 set -euo pipefail
 
 prog=${0##*/}
-msi_version="26.053.36539.0"
-msi_sha256="66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b"
-msi_url="https://download.microsoft.com/download/b7ca2c3f-d320-4795-be0f-529a0117abb4/SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi"
+# Known driver MSIs, newest first: "version sha256 file name". Microsoft replaces
+# the MSI under download id 106120 from time to time (the old URL then returns
+# 404); the files pinned below were identical in both packages. Any listed MSI
+# is accepted by --from-msi.
+known_msis=(
+  "26.091.9400.0 0917d206fb35278b4df4be980240318475300f3a130a86edac836519059a453d SurfaceLaptop7_ARM_Win11_26100_26.091.9400.0.msi"
+  "26.053.36539.0 66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi"
+)
+msi_base_url="https://download.microsoft.com/download/b7ca2c3f-d320-4795-be0f-529a0117abb4"
+msi_page="https://www.microsoft.com/download/details.aspx?id=106120"
+read -r msi_version msi_sha256 msi_name <<<"${known_msis[0]}"
+msi_url="$msi_base_url/$msi_name"
 
 # Plain files: linux-sl7 reads plain, .zst and .xz, but the DSP remoteproc
 # loader and the initramfs hook are simplest with uncompressed files.
@@ -52,7 +61,7 @@ Usage:
   --allow-unverified
                     parse an MSI, or install files, whose sha256 differs from
                     the pinned values (newer MSI). Without it an MSI that is
-                    not the pinned one is refused before msiextract sees it. Not recommended: DSP firmware is signed
+                    not a known one is refused before msiextract sees it. Not recommended: DSP firmware is signed
                     and a wrong file only fails at boot.
   --status          show which firmware files are installed and verified
   --list            print the embedded sha256 list
@@ -60,6 +69,11 @@ Usage:
 Firmware is installed to $dest_root
 Get the MSI ($msi_version, sha256 $msi_sha256):
   $msi_url
+Older MSIs that are also accepted:
+$(for e in "${known_msis[@]:1}"; do read -r v h n <<<"$e"; echo "  $v  sha256 $h"; done)
+If Microsoft has moved the file, download the current Surface Laptop 7 driver
+MSI from $msi_page and pass it with --from-msi; it must match one of the
+sha256 values above.
 USAGE
 }
 
@@ -249,12 +263,17 @@ else
   mkdir -m 0700 "$tmp/out"
   cp -- "$from_msi" "$tmp/in.msi"
   actual_msi=$(hash_of "$tmp/in.msi")
-  if [[ $actual_msi == "$msi_sha256" ]]; then
-    echo "MSI sha256 matches the pinned $msi_version package"
+  known_ver=""
+  for e in "${known_msis[@]}"; do
+    read -r v h _ <<<"$e"
+    [[ $h == "$actual_msi" ]] && known_ver=$v
+  done
+  if [[ -n $known_ver ]]; then
+    echo "MSI sha256 matches the pinned $known_ver package"
   elif ((allow_unverified)); then
-    echo "$prog: WARNING: MSI sha256 $actual_msi is not the pinned $msi_sha256 ($msi_version); continuing because --allow-unverified was given" >&2
+    echo "$prog: WARNING: MSI sha256 $actual_msi matches no known MSI (newest $msi_version, $msi_sha256); continuing because --allow-unverified was given" >&2
   else
-    die "MSI sha256 $actual_msi does not match the pinned $msi_sha256 ($msi_version); not parsing it (--allow-unverified overrides, at your own risk)"
+    die "MSI sha256 $actual_msi matches no known MSI (newest $msi_version, $msi_sha256; see --help); not parsing it (--allow-unverified overrides, at your own risk)"
   fi
   if ((EUID == 0)); then
     command -v runuser >/dev/null 2>&1 || die "runuser not found; refusing to run msiextract as root"

@@ -41,7 +41,7 @@
 
     Set-ExecutionPolicy -Scope Process Bypass
     .\Make-SL7DATA.ps1 -Drive E
-    .\Make-SL7DATA.ps1 -Drive E -Msi C:\Users\you\Downloads\SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
+    .\Make-SL7DATA.ps1 -Drive E -Msi C:\Users\you\Downloads\SurfaceLaptop7_ARM_Win11_26100_26.091.9400.0.msi
 
   The execution policy change applies to this PowerShell window only.
 
@@ -80,11 +80,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is very slow with a progress bar in 5.1
 
-# Same pin as tools/installer-kit/get-sl7-firmware.sh and omarchy-surface-sl7-firmware.
-$MsiVersion = '26.053.36539.0'
-$MsiName = 'SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi'
-$MsiSha256 = '66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b'
-$MsiUrl = "https://download.microsoft.com/download/b7ca2c3f-d320-4795-be0f-529a0117abb4/$MsiName"
+# Same pins as tools/installer-kit/get-sl7-firmware.sh and omarchy-surface-sl7-firmware.
+# Known driver packages, newest first. Microsoft replaces the MSI under download id
+# 106120 from time to time and the old URL then returns 404; the firmware files
+# pinned below were identical in both packages. Fields: version, sha256, name.
+$KnownMsis = @(
+    @('26.091.9400.0', '0917d206fb35278b4df4be980240318475300f3a130a86edac836519059a453d', 'SurfaceLaptop7_ARM_Win11_26100_26.091.9400.0.msi'),
+    @('26.053.36539.0', '66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b', 'SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi')
+)
+$MsiBaseUrl = 'https://download.microsoft.com/download/b7ca2c3f-d320-4795-be0f-529a0117abb4'
+$MsiPage = 'https://www.microsoft.com/download/details.aspx?id=106120'
 
 # Source (below SurfaceUpdate\), destination (below firmware\ on SL7DATA), pinned sha256 or ''.
 # Same list and destinations as stage_firmware in tools/lib/usb.sh.
@@ -170,47 +175,67 @@ if ($Msi) {
     $msiPath = (Resolve-Path -LiteralPath $Msi).Path
 }
 else {
-    $msiPath = Join-Path $WorkDir $MsiName
-    $have = $false
-    if (Test-Path -LiteralPath $msiPath) {
-        if ((Get-Sha256 $msiPath) -eq $MsiSha256) {
-            Info "MSI already downloaded and verified: $msiPath"
-            $have = $true
-        }
-        else {
-            # A complete file with the wrong hash is not a partial download.
-            Move-Item -LiteralPath $msiPath -Destination "$msiPath.part" -Force
+    $msiPath = $null
+    foreach ($k in $KnownMsis) {
+        $cand = Join-Path $WorkDir $k[2]
+        if ((Test-Path -LiteralPath $cand) -and ((Get-Sha256 $cand) -eq $k[1])) {
+            Info "MSI already downloaded and verified: $cand"
+            $msiPath = $cand
+            break
         }
     }
-    if (-not $have) {
-        Info "Downloading $MsiName (about 1 GB; run the script again if it is interrupted)"
-        $part = "$msiPath.part"
-        $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-        if ($curl) {
-            & $curl.Source -fL --retry 3 -C - -o $part $MsiUrl
-            if ($LASTEXITCODE -ne 0) {
-                Fail "download failed (run again to resume): $MsiUrl"
+    if ($null -eq $msiPath) {
+        foreach ($k in $KnownMsis) {
+            $cand = Join-Path $WorkDir $k[2]
+            if (Test-Path -LiteralPath $cand) {
+                # A complete file with the wrong hash is not a partial download.
+                Move-Item -LiteralPath $cand -Destination "$cand.part" -Force
             }
+            Info "Downloading $($k[2]) (about 1 GB; run the script again if it is interrupted)"
+            $part = "$cand.part"
+            $url = "$MsiBaseUrl/$($k[2])"
+            $ok = $false
+            $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+            if ($curl) {
+                & $curl.Source -fL --retry 3 -C - -o $part $url
+                $ok = ($LASTEXITCODE -eq 0)
+            }
+            else {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing
+                    $ok = $true
+                }
+                catch {
+                    $ok = $false
+                }
+            }
+            if ($ok) {
+                Move-Item -LiteralPath $part -Destination $cand -Force
+                $msiPath = $cand
+                break
+            }
+            Write-Warning "not available (Microsoft may have replaced it): $url; trying the next known package."
         }
-        else {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $MsiUrl -OutFile $part -UseBasicParsing
+        if ($null -eq $msiPath) {
+            Fail "no known MSI could be downloaded. Microsoft has probably replaced the package again. Download the current Surface Laptop 7 driver MSI from $MsiPage and run this again with -Msi FILE (it must match a known sha256, or add -AllowUnverified)."
         }
-        Move-Item -LiteralPath $part -Destination $msiPath -Force
     }
 }
 
 # ---------------------------------------------------------------- 2. verify
 Info 'Verifying the MSI sha256'
 $got = Get-Sha256 $msiPath
-if ($got -eq $MsiSha256) {
-    Write-Host "    sha256 OK: $got"
+$known = $KnownMsis | Where-Object { $_[1] -eq $got } | Select-Object -First 1
+if ($null -ne $known) {
+    Write-Host "    sha256 OK: $got (MSI $($known[0]))"
 }
 elseif ($AllowUnverified) {
-    Write-Warning "sha256 $got does not match the pin $MsiSha256; continuing because of -AllowUnverified."
+    Write-Warning "sha256 $got matches no known MSI; continuing because of -AllowUnverified (the firmware files are still checked)."
 }
 else {
-    Fail "sha256 mismatch for ${msiPath}: got $got, pinned $MsiSha256 (MSI $MsiVersion). Delete the file and retry, or use -AllowUnverified for a newer MSI."
+    $list = ($KnownMsis | ForEach-Object { "$($_[0]) $($_[1])" }) -join '; '
+    Fail "sha256 mismatch for ${msiPath}: got $got, which is none of the known MSIs ($list). Delete the file and retry, or use -AllowUnverified for a newer MSI."
 }
 
 # ---------------------------------------------------------------- 3. extract

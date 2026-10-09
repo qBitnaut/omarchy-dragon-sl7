@@ -58,10 +58,19 @@ not have to be on the ISO stick. Steps in the top-level README, "From Windows".
 ## 2. Get the firmware
 
 `tools/installer-kit/get-sl7-firmware.sh [--dir DIR] [--msi FILE]` downloads Microsoft's
-public driver MSI, checks its pinned sha256 (the pin of `omarchy-surface-sl7-firmware`),
-extracts it with `msiextract` (msitools) and writes `DIR/extracted/ProgramFiles64Folder/SurfaceUpdate`
+public driver MSI, checks its sha256 against the known packages (the pins of
+`omarchy-surface-sl7-firmware`), extracts it with `msiextract` (msitools) and writes `DIR/extracted/ProgramFiles64Folder/SurfaceUpdate`
 and `DIR/SHA256SUMS.extracted`. `DIR` defaults to `$SL7_MSI`, else `./sl7-msi`. It runs on
 any Linux machine or macOS, and nothing is read from Windows.
+
+Microsoft replaces the driver MSI from time to time and the old URL then returns 404. The
+script knows the current and the previous package (26.091.9400.0 and 26.053.36539.0; the
+firmware files this kit uses are identical in both), tries the newest URL first and falls
+back to the older one. If every URL fails, download the current Surface Laptop 7 driver MSI
+from https://www.microsoft.com/download/details.aspx?id=106120 and pass it with `--msi FILE`;
+it is accepted only if its sha256 is one of the known ones (`--help` lists them).
+`--allow-unverified` accepts an unknown MSI but still requires every firmware file to
+match its pinned hash.
 
 The stick also carries the camera tuning file from that MSI (`camera/` on SL7DATA).
 The live system hands it to the installer next to the firmware; on first boot of the

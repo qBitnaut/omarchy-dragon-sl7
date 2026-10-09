@@ -147,7 +147,7 @@ This is a belt and braces measure; never run a kernel without the 7.1 volume cap
 ### 7. Firmware installer
 
 ```
-sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
+sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.091.9400.0.msi
 sudo omarchy-surface-sl7-firmware --from /path/to/stage      # stage/qcom/x1e80100/microsoft/...
 omarchy-surface-sl7-firmware --status
 ```
@@ -157,9 +157,13 @@ shader `qcdxkmsuc8380.mbn` (in `microsoft/`, not `Romulus/`), `Romulus/{qcadsp83
 adsp_dtbs.elf,qccdsp8380.mbn,cdsp_dtbs.elf}` (required) and `Romulus/*.jsn` plus the Iris video
 firmware `Romulus/qcvss8380.mbn` (optional, see 7b). `updates/` is searched before
 `/usr/lib/firmware`, so the kernel finds it at `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn`.
-Each file is checked against an embedded sha256 list for MSI 26.053.36539.0 before
+Each file is checked against an embedded sha256 list (identical in MSI 26.091.9400.0 and
+26.053.36539.0, the two known packages) before
 anything is installed (all-or-nothing); `--allow-unverified` overrides for a newer MSI.
-`--from-msi` first hashes a private copy of the MSI against the pinned sha256 and refuses a
+Microsoft replaces the driver MSI from time to time and the old URL then returns 404; `--help`
+lists the known MSIs and their sha256, and a manually downloaded MSI that matches one of them
+is accepted with `--from-msi`.
+`--from-msi` first hashes a private copy of the MSI against the known sha256 values and refuses a
 different file before `msiextract` parses it (unless `--allow-unverified`), then extracts as the
 unprivileged user `nobody` into a directory only that user can write and takes ownership of the
 result before reading it. It needs `msiextract` (msitools); pymsi is not supported. Afterwards it runs
@@ -523,7 +527,7 @@ Two parts:
 2. **The tuning file**, built from the Microsoft driver package:
 
 ```
-sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
+sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.091.9400.0.msi
                                   # also keeps the camera tuning in /var/lib/omarchy-surface-sl7/camera/
                                   # and generates the tuning file from it (skipped if one exists)
 sudo sl7-camera-tuning            # regenerate or adjust: uses that copy (or: --from-msi FILE.msi, --bin FILE;

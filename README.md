@@ -132,7 +132,7 @@ larger one for the ISO, and a small one (any size, FAT32) for the firmware.
    Set-ExecutionPolicy -Scope Process Bypass
    .\Make-SL7DATA.ps1 -Drive E        # E = the SL7DATA stick; add -Msi FILE if you have the MSI
    ```
-   It downloads Microsoft's public Surface Laptop 7 driver MSI (about 1 GB, pinned sha256),
+   It downloads Microsoft's public Surface Laptop 7 driver MSI (about 1 GB, known sha256; the previous package is the fallback, and `-Msi FILE` takes one you downloaded by hand),
    unpacks it without installing, checks the firmware files, and copies firmware and camera
    tuning to the stick. It refuses any drive that is not FAT32 labelled `SL7DATA`, never
    formats, and verifies what it wrote. The live installer finds `SL7DATA` on any USB
@@ -224,7 +224,9 @@ The installer **wipes the disk you pick** and does not keep Windows.
    `gh workflow run installer-iso.yml`.
 2. **Get the firmware.** On any Linux machine (x86 or arm) or macOS, run
    `tools/installer-kit/get-sl7-firmware.sh`. It downloads Microsoft's Surface Laptop 7
-   driver MSI, checks its pinned sha256, extracts it with `msiextract` (`msitools`) and
+   driver MSI, checks its sha256 against the known packages (the newest, with the previous one
+   as fallback; if Microsoft has replaced both, pass the MSI you downloaded by hand with
+   `--msi FILE`), extracts it with `msiextract` (`msitools`) and
    writes `./sl7-msi` (or `$SL7_MSI`) in the layout the kit reads
    (`extracted/ProgramFiles64Folder/SurfaceUpdate` and `SHA256SUMS.extracted`). Pass
    `--msi FILE` to use an MSI you already have. The stick carries firmware for your own
