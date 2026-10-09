@@ -139,7 +139,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 330
     permissions:
-      contents: write # release upload (installer-latest)
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -248,13 +248,38 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+      - name: Disk at end
+        if: ${{ !cancelled() }}
+        run: df -h
+
+  publish:
+    name: Publish to the installer-latest release
+    needs: iso
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    # Holds the signing secrets; the environment only deploys from main.
+    environment: release
+    timeout-minutes: 60
+    permissions:
+      contents: write # release upload and tag move (installer-latest)
+    steps:
+      - name: Download the ISO artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: omarchy-sl7-installer-iso
+          path: out
+
+      - name: Download the package versions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: package-versions
+
       # GitHub release assets are limited to 2 GiB each and this ISO is larger,
       # so the release carries it as parts of 1900 MiB (cat them back together;
-      # the README and make-install-usb.sh do). The release is recreated on every
-      # successful main build, so the tag always points at the commit that built
-      # it and https://github.com/<repo>/releases/tag/installer-latest is stable.
+      # the README and make-install-usb.sh do). The release is edited in place on
+      # every successful main build (never deleted, so the tag can be protected
+      # against deletion) and the tag is moved to the commit that built it.
       - name: Publish the ISO to the installer-latest release
-        if: ${{ github.ref == 'refs/heads/main' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_SIGNING_KEY: ${{ secrets.REPO_SIGNING_KEY }}
@@ -306,14 +331,33 @@ jobs:
           SL7 packages on this ISO (newest signed builds from the repo-aarch64 release):
           $pkgs
           NOTES
-          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
-          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-            --title "Surface Laptop 7 installer ISO (latest)" --notes-file notes.md rel/*
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+              --title "Surface Laptop 7 installer ISO (latest)" --notes-file notes.md
+          fi
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort > have.txt
+          # parts first, the checksums and signature last
+          for f in rel/*; do
+            case "$f" in *.part-*) gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "$f" ;; esac
+          done
+          for f in rel/*; do
+            case "$f" in *.part-*) ;; *) gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "$f" ;; esac
+          done
+          # drop assets of the previous build that this build does not have
+          (cd rel && ls) | sort > want.txt
+          comm -23 have.txt want.txt | while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "delete stale asset $f"
+            gh release delete-asset "$TAG" "$f" -R "$GITHUB_REPOSITORY" -y
+          done
+          # point the tag at the commit that built this ISO (an update of the
+          # existing ref, not a delete and create), then the release text
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Surface Laptop 7 installer ISO (latest)" --notes-file notes.md
           {
             echo
             echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Disk at end
-        if: ${{ !cancelled() }}
-        run: df -h
+
