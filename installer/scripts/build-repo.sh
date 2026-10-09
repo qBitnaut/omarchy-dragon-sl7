@@ -18,7 +18,7 @@ prebuilt="${SL7_PREBUILT:-/prebuilt}"
 src="${SL7_SOURCES:-/src}"
 repo="${SL7_REPO:-/repo}"
 work=/build
-expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 omarchy-sl7-keyring qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
+expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 omarchy-sl7-keyring omarchy-sl7-battery qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
 
 grep -q '^DisableSandbox' /etc/pacman.conf ||
 	sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf

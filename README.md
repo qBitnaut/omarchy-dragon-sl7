@@ -170,7 +170,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Face unlock | Works | Verified on the SL7 (2026-10-07), on the normal boot (there is no IR test boot entry): face registered in the setup app, lock screen and `sudo` unlocked by face, no external IR source needed. howdy-next plus a setup app (Omarchy menu: Setup > Security > Face Unlock). The built-in IR emitter is driven by the sensor's own strobe (stage C found that GPIO 1 lights it), held by the kernel (linux-sl7 7.2.8-22) to Windows Hello's 100-line exposure and frame time, whatever user space asks: on the SL7 sensor clock that is 0.8 ms of light per 27.8 ms frame (2.9 % duty, Windows 5.7 %). `sl7-ir-bridge` lights it only while a scan streams, 10 s at most per session, with analog gain 24 as the default; `howdy-next` 2 silences a harmless OpenCV warning; `IR_EMITTER=off` in `/etc/sl7-ir-bridge.conf` keeps it dark. |
 | CPU frequency scaling | Works | All three clusters, `schedutil`, with the SCMI sustained-frequency fix. |
 | Power mode on AC/battery | Works | Caps CPU and GPU frequency and enables Wi-Fi power save on battery; restores everything on AC. 60 Hz switching on battery is opt-in. |
-| Battery app | Works (pending first run on the SL7) | `omarchy-sl7-battery`: a Quickshell popup that replaces Omarchy's Power bar widget. Charge, time left with a dot-chart projection, hours since the last full charge, history (6h to 30d), sleep drain, power profiles and an auto power saver (switches to Power saver at 30%). Data from `sl7-batteryd`, a small Rust user daemon. |
+| Battery app | Works (verified on the SL7) | `omarchy-sl7-battery`: a Quickshell popup that replaces Omarchy's Power bar widget. Charge, time left with a dot-chart projection, hours since the last full charge, history (6h to 30d), sleep drain, power profiles and an auto power saver (switches to Power saver at 30%). Data from `sl7-batteryd`, a small Rust user daemon. |
 | Firmware | Works | Fetched from Microsoft's Surface Laptop 7 driver MSI, never shipped here. |
 | Hibernation | Not yet | The image write hangs, and the RTC alarm is owned by the ADSP. |
 
@@ -273,12 +273,12 @@ bash omarchy-sl7-bootstrap.sh
 It checks the machine, fetches the repository public key and requires its fingerprint to be
 `6387C619EF246F6F20C536B72C3331C78353BA04` (embedded in the script), trusts it in pacman's
 keyring, adds `Include = /etc/pacman.d/omarchy-sl7.conf` above `[core]`, installs
-`omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd-sl7` in one
+`omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-sl7-battery` in one
 `pacman -Syu` transaction through Omarchy's own wrapper (so the raw-pacman update guard is
 satisfied), and runs `sl7-doctor`. Every step is idempotent. `--no-install` stops before the
 transaction. From then on `omarchy update` carries our packages. Clean installs from our ISO
-need none of this: the installer includes `omarchy-sl7-keyring` and `omarchy-surface-sl7`
-enables the repository at first boot.
+need none of this: the installer includes `omarchy-sl7-keyring`, `omarchy-surface-sl7` and the battery app (`omarchy-sl7-battery`);
+the add-on enables the repository at first boot. The battery app comes by default (`omarchy-surface-sl7` depends on it, so `omarchy update` installs it on existing systems too).
 
 If a later Omarchy change drops the repository, `sudo omarchy-sl7-repo-ensure` puts it back
 (it also runs after `omarchy`/`omarchy-settings` upgrades, at boot, and from an

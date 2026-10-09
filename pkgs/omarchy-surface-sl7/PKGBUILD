@@ -6,13 +6,13 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=55
+pkgrel=56
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT' 'ISC')
 groups=('omarchy-platform-qualcomm')
-depends=('omarchy' 'omarchy-sl7-keyring' 'linux-sl7>=7.2.8-3' 'iptsd-sl7>=3.1.0.r20260717-11' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
+depends=('omarchy' 'omarchy-sl7-keyring' 'omarchy-sl7-battery' 'linux-sl7>=7.2.8-3' 'iptsd-sl7>=3.1.0.r20260717-11' 'linux-firmware-qcom' 'linux-firmware-atheros' 'qcom-firmware-extract'
          'mkinitcpio' 'systemd' 'python' 'bash' 'jq' 'glib2' 'coreutils' 'gawk' 'grep')
 optdepends=('limine-mkinitcpio-hook: rebuilds the UKI and Limine entries (Omarchy default)'
             'msitools: --from-msi in omarchy-surface-sl7-firmware'

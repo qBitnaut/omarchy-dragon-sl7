@@ -19,7 +19,7 @@
 #   4. writes /etc/pacman.d/omarchy-sl7.conf and Includes it above [core] in /etc/pacman.conf
 #      (backup: /etc/pacman.conf.pre-omarchy-sl7)
 #   5. installs/upgrades omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers
-#      iptsd-sl7 in ONE `pacman -Syu` transaction, through omarchy-update-pacman (Omarchy's own
+#      iptsd-sl7 omarchy-sl7-battery in ONE `pacman -Syu` transaction, through omarchy-update-pacman (Omarchy's own
 #      transaction wrapper, which satisfies its update guard), else through the guard's
 #      documented bypass OMARCHY_ALLOW_DIRECT_PACMAN=1. Never a bare -Sy.
 #   6. gives your user the `omarchy refresh pacman` hook and runs sl7-doctor
@@ -39,7 +39,7 @@ EXPECTED_FPR=${SL7_EXPECTED_FPR:-6387C619EF246F6F20C536B72C3331C78353BA04}  # SL
 REPO_URL=${SL7_REPO_URL:-https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64}
 KEY_URLS=("$REPO_URL/omarchy-sl7.pub.asc"
 	"https://raw.githubusercontent.com/qBitnaut/omarchy-dragon-sl7/main/tools/repo/omarchy-sl7.pub.asc")
-PACKAGES=(omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd-sl7)
+PACKAGES=(omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-sl7-battery)
 
 CONF=${SL7_PACMAN_CONF:-/etc/pacman.conf}
 SNIPPET=${SL7_SNIPPET:-/etc/pacman.d/omarchy-sl7.conf}
