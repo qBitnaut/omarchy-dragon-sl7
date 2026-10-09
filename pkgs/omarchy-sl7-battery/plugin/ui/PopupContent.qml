@@ -66,7 +66,19 @@ Item {
         if (lowBattery) return theme.crit
         if (belowSaver) return theme.warn
         if (discharging) return accent
+        if (charging) return Qt.tint(theme.ok, Qt.rgba(1, 1, 1, 0.5 * shimmer))
         return theme.ok
+    }
+
+    // Charging shimmer for the Charge tile, matching the bar widget; only while the
+    // popup is open and the battery is charging.
+    property real shimmer: 0
+    SequentialAnimation on shimmer {
+        running: root.opened && root.charging && root.live
+        loops: Animation.Infinite
+        onRunningChanged: if (!running) root.shimmer = 0
+        NumberAnimation { from: 0; to: 1; duration: 1400; easing.type: Easing.InOutSine }
+        NumberAnimation { from: 1; to: 0; duration: 1400; easing.type: Easing.InOutSine }
     }
 
     function has(v) { return v !== null && v !== undefined }

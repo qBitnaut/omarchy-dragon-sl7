@@ -81,7 +81,19 @@ Panel {
         if (root.daemonDown) return "dim"
         if (root.criticalBattery) return "crit"
         if (root.saverForced || root.belowSaver) return "warn"
+        if (root.charging) return "ok"
         return "fg"
+    }
+
+    // Charging shimmer: a slow green glow pulse. Runs only while charging (on AC), so it
+    // costs nothing on battery.
+    property real shimmer: 0
+    SequentialAnimation on shimmer {
+        running: root.charging && !root.daemonDown
+        loops: Animation.Infinite
+        onRunningChanged: if (!running) root.shimmer = 0
+        NumberAnimation { from: 0; to: 1; duration: 1400; easing.type: Easing.InOutSine }
+        NumberAnimation { from: 1; to: 0; duration: 1400; easing.type: Easing.InOutSine }
     }
 
     readonly property string barText: {
@@ -128,7 +140,9 @@ Panel {
         text: root.glyphChar + (root.barText ? (" " + root.barText) : "")
         // Widen the icon slot when there is label text next to the glyph.
         slotSize: Style.bar.iconSlot * (root.barText ? 2.6 : 1)
-        foreground: root.tokenColor(root.colorToken)
+        foreground: root.charging && root.colorToken === "ok"
+            ? Qt.tint(root.tokenColor("ok"), Qt.rgba(1, 1, 1, 0.5 * root.shimmer))
+            : root.tokenColor(root.colorToken)
         tooltipText: root.tooltipBody
         onPressed: function(b) {
             if (b === Qt.RightButton) root.togglePercentage()
