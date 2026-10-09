@@ -35,6 +35,17 @@ bridge_busy_state() {
   fi
 }
 
+# foreign | ok. Foreign: sl7-ir-bridge found another process holding the
+# loopback it feeds (EBUSY on open or VIDIOC_S_FMT), so someone else may be
+# writing frames the PAM module reads. The flag file lists the holders.
+bridge_foreign_state() {
+  if [[ -e $BRIDGE_FOREIGN_FILE ]]; then
+    printf 'foreign'
+  else
+    printf 'ok'
+  fi
+}
+
 # missing | unreadable | ok. The lock screen runs PAM in the user's own
 # process, so the user (not just root) must be able to open the node.
 camera_state() {

@@ -69,6 +69,10 @@
  * unit's RuntimeDirectory removes the file when the bridge stops. */
 #define BUSY_REPORT_MS 30000
 #define BUSY_STATE_FILE "/run/sl7-ir-bridge/ebusy"
+/* Another process holds the loopback we must write to (EBUSY on open or on
+ * VIDIOC_S_FMT): it may be feeding the consumers its own frames. Written with
+ * the holders; read by sl7-doctor and omarchy-sl7-faceunlock. */
+#define FOREIGN_STATE_FILE "/run/sl7-ir-bridge/foreign-writer"
 
 struct bridge {
 	int lb_fd;
@@ -122,6 +126,37 @@ static int lb_write(struct bridge *b, const uint8_t *frame)
 	return 0;
 }
 
+/* The loopback open or format set failed with EBUSY: log who holds the node
+ * and leave the flag file. */
+static void foreign_writer_note(struct bridge *b)
+{
+	char holders[2048];
+	char *line, *save = NULL;
+	int n;
+	FILE *f;
+
+	ir_log(IR_LOG_ERR, "foreign writer on the IR camera: %s is busy (EBUSY), another "
+	       "process holds the loopback the bridge must write to", b->lb_path);
+	n = ir_find_node_holders(b->lb_path, holders, sizeof(holders));
+	if (n < 0) {
+		ir_log(IR_LOG_ERR, "cannot look for the holder: %s", strerror(-n));
+		holders[0] = 0;
+	} else if (n == 0) {
+		ir_log(IR_LOG_ERR, "no process holds %s open", b->lb_path);
+	}
+	f = fopen(FOREIGN_STATE_FILE, "we");
+	if (f) {
+		fchmod(fileno(f), 0644);
+		fprintf(f, "since=%lld\nholders=%d\n", (long long)time(NULL), n < 0 ? 0 : n);
+		fputs(holders, f);
+		fclose(f);
+	} else {
+		ir_log(IR_LOG_WARN, "cannot write %s: %s", FOREIGN_STATE_FILE, strerror(errno));
+	}
+	for (line = strtok_r(holders, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+		ir_log(IR_LOG_ERR, "loopback holder: %s", line);
+}
+
 static int open_loopback(struct bridge *b)
 {
 	struct v4l2_capability cap;
@@ -132,6 +167,8 @@ static int open_loopback(struct bridge *b)
 	b->lb_fd = open(b->lb_path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	if (b->lb_fd < 0) {
 		ir_log(IR_LOG_ERR, "open %s: %s", b->lb_path, strerror(errno));
+		if (errno == EBUSY)
+			foreign_writer_note(b);
 		return -1;
 	}
 	memset(&cap, 0, sizeof(cap));
@@ -150,6 +187,8 @@ static int open_loopback(struct bridge *b)
 	f.fmt.pix.colorspace = V4L2_COLORSPACE_RAW;
 	if (ir_ioctl(b->lb_fd, VIDIOC_S_FMT, &f) < 0) {
 		ir_log(IR_LOG_ERR, "%s: set GREY %dx%d: %s", b->lb_path, IR_WIDTH, IR_HEIGHT, strerror(errno));
+		if (errno == EBUSY)
+			foreign_writer_note(b);
 		return -1;
 	}
 	if (f.fmt.pix.pixelformat != V4L2_PIX_FMT_GREY || f.fmt.pix.width != IR_WIDTH ||
@@ -513,6 +552,7 @@ static int run_daemon(void)
 	if (open_loopback(&b) < 0)
 		return 1;
 	unlink(BUSY_STATE_FILE);
+	unlink(FOREIGN_STATE_FILE);
 	ir_camss_release_stale();
 	ir_log(IR_LOG_INFO, "sl7-ir-bridge %s idle on %s (stop grace %lld ms, session cap %lld ms)",
 	       VERSION, b.lb_path, (long long)b.grace_ms, (long long)b.session_max_ms);

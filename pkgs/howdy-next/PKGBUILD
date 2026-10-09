@@ -11,7 +11,7 @@
 
 pkgname=howdy-next
 pkgver=3.4.2
-pkgrel=2
+pkgrel=3
 pkgdesc='Modern C++ reimplementation of Howdy facial authentication on Linux (aarch64, models in howdy-next-models)'
 arch=('aarch64')
 url='https://codeberg.org/nathawat/howdy-next'
@@ -52,7 +52,7 @@ source=(
 	'0001-quiet-opencv-dnn-target-warning.patch'
 )
 sha256sums=('e2e3afabc3d6d3fd696ec0ab6a1f144b6254449216b390be579864a6fd26c50a'
-            '2283fc4684751caa41e87023755bba5c3468475b6ed632b13a4ac6e9c748c512'
+            'd8e7f8bdf7830d24b0b373e778510ef817f7843a850a584ea7bff8d3c0f10437'
             '09f91691afcfc02472ba3a524b8812fde7fc53213749d28028f614d9242157ae')
 
 prepare() {

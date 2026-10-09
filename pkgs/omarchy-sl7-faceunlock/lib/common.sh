@@ -14,7 +14,7 @@ sl7_is_root() {
 }
 
 if sl7_is_root && [[ -z ${SL7_ALLOW_ENV_HOOKS:-} ]]; then
-  unset SL7_PAM_DIR SL7_VENDOR_PAM_DIR SL7_STATE_DIR SL7_PAM_MODULE SL7_LID_GATE \
+  unset SL7_PAM_DIR SL7_VENDOR_PAM_DIR SL7_STATE_DIR SL7_PAM_MODULE SL7_FAILLOCK_MODULE SL7_LID_GATE \
     SL7_HOWDY_BIN SL7_HOWDY_CONFIG SL7_DROPIN_VENDOR SL7_DROPIN_DIR SL7_NO_SYSTEMCTL \
     SL7_ASSUME_ROOT SL7_USER SL7_DRY_RUN SL7_HELPER SL7_BRIDGE_UNIT SL7_CAMERA
 fi
@@ -23,6 +23,7 @@ PAM_DIR=${SL7_PAM_DIR:-/etc/pam.d}
 VENDOR_PAM_DIR=${SL7_VENDOR_PAM_DIR:-/usr/lib/pam.d}
 STATE_DIR=${SL7_STATE_DIR:-/var/lib/sl7-faceunlock}
 PAM_MODULE=${SL7_PAM_MODULE:-/usr/lib/security/pam_howdy.so}
+FAILLOCK_MODULE=${SL7_FAILLOCK_MODULE:-/usr/lib/security/pam_faillock.so}
 LID_GATE=${SL7_LID_GATE:-/usr/lib/sl7-faceunlock/lid-closed}
 HOWDY_BIN=${SL7_HOWDY_BIN:-howdy}
 HOWDY_CONFIG=${SL7_HOWDY_CONFIG:-/etc/howdy/config.ini}
@@ -33,6 +34,11 @@ CAMERA=${SL7_CAMERA:-/dev/v4l/by-id/sl7-ir-camera}
 BRIDGE_UNIT=${SL7_BRIDGE_UNIT:-sl7-ir-bridge.service}
 # written by sl7-ir-bridge when its session starts have failed with EBUSY for 30 s
 BRIDGE_BUSY_FILE=${SL7_BRIDGE_BUSY_FILE:-/run/sl7-ir-bridge/ebusy}
+# written by sl7-ir-bridge when another process holds the loopback (a foreign writer)
+BRIDGE_FOREIGN_FILE=${SL7_BRIDGE_FOREIGN_FILE:-/run/sl7-ir-bridge/foreign-writer}
+
+# Shown wherever face unlock for sudo or polkit is offered or reported.
+SL7_RISK_WARNING='Any program running as you can impersonate your face to sudo/admin prompts (the IR camera is reachable from your user session). Use only if you accept this.'
 DRY_RUN=${SL7_DRY_RUN:-0}
 
 # Defaults the wizard applies to howdy-next (README: tune on the device). The

@@ -48,7 +48,9 @@ omarchy-sl7-faceunlock [--dry-run] [COMMAND]
   faces remove ID               password required
   faces clear                   password required
   auth status [--json]
-  auth enable sudo|polkit|lock  password required
+  auth enable lock              password required
+  auth enable sudo|polkit [--accept-risk]
+                                password required; opt-in, prints a warning
   auth disable sudo|polkit|lock|all
   lock install|apply|update|remove|status
   --off                         emergency off: howdy disable 1 + remove every PAM line
@@ -119,8 +121,8 @@ main() {
       if [[ ${1:-} == --json ]]; then auth_status_json; else pam_status_lines; fi
       ;;
     enable)
-      [[ $# == 1 ]] || die "usage: auth enable sudo|polkit|lock"
-      auth_enable_cli "$1"
+      [[ $# == 1 || $# == 2 ]] || die "usage: auth enable sudo|polkit|lock [--accept-risk]"
+      auth_enable_cli "$@"
       ;;
     disable)
       [[ $# == 1 ]] || die "usage: auth disable sudo|polkit|lock|all"

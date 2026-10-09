@@ -90,8 +90,10 @@ we do not do that.
 
 polkit 127's `polkit-agent-helper@.service` runs with `PrivateDevices=yes` and a
 strict device policy, so it cannot open the camera. The drop-in (from the AUR
-package) sets `PrivateDevices=no`, `DeviceAllow=char-video4linux rw` and
-`DeviceAllow=/dev/uinput rw`. The rest of the sandbox (`NoNewPrivileges`,
+package) sets `PrivateDevices=no` and `DeviceAllow=char-video4linux rw`. The
+AUR drop-in also allows `/dev/uinput`; this package drops that, because the polkit
+stack never uses `workaround=native-input` and a helper that could write input
+events would be a needless capability. The rest of the sandbox (`NoNewPrivileges`,
 `ProtectSystem=strict`, `MemoryDenyWriteExecute`, ...) stays. Whether
 `MemoryDenyWriteExecute` is compatible with OpenCV DNN on aarch64 is untested;
 check `journalctl -u 'polkit-agent-helper@*'` if `pkexec` face auth fails.
@@ -112,7 +114,8 @@ For reference (research notes, `faceunlock-research.md` section 6):
   through `/dev/uinput` into whatever has focus).
 - Do not add it to `system-local-login`, `login`, `sddm`, `su` or `sshd`.
 - A face or fingerprint `sufficient` line sits above faillock's `preauth` in
-  `system-auth`, so a face match bypasses a faillock lockout. Cap attempts in the UI.
+  `system-auth`, so a face match bypasses a faillock lockout. The setup app wraps
+  its pam_howdy.so line in its own pam_faillock preauth/authfail/authsucc lines.
 - Kill switches: `sudo howdy disable 1`, or remove the `pam_howdy.so` lines.
   Debug with `journalctl -b -t pam_howdy`.
 - The lid gates built into howdy and Omarchy read `/proc/acpi/button/lid`, which the

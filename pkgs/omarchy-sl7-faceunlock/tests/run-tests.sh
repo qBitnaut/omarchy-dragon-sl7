@@ -46,14 +46,15 @@ password	include		system-auth
 session		include		system-auth
 PAM
   : >"$T/env/pam_howdy.so"
+  : >"$T/env/pam_faillock.so"
   printf '[core]\ndisabled = false\nabort_if_ssh = true\n[video]\ndevice_path =\ndark_threshold = 75.0\ntimeout = 4\n' >"$T/env/config.ini"
   cp "$T/env/pam/sudo" "$T/env/sudo.orig"
   export SL7_PAM_DIR=$T/env/pam SL7_VENDOR_PAM_DIR=$T/env/vendor SL7_STATE_DIR=$T/env/state
-  export SL7_PAM_MODULE=$T/env/pam_howdy.so SL7_LID_GATE=$LIB/lid-closed
+  export SL7_PAM_MODULE=$T/env/pam_howdy.so SL7_FAILLOCK_MODULE=$T/env/pam_faillock.so SL7_LID_GATE=$LIB/lid-closed
   export SL7_ASSUME_ROOT=1 SL7_NO_SYSTEMCTL=1 SL7_DROPIN_DIR=$T/env/dropin SL7_DROPIN_VENDOR=$T/env/none
   export SL7_HOWDY_BIN=$ROOT/tests/fake-howdy FAKE_HOWDY_DIR=$T/env/howdy SL7_HOWDY_CONFIG=$T/env/config.ini
   export SL7_USER=tester SL7_MENU_FILE=$T/env/menu.jsonc XDG_STATE_HOME=$T/env/xdg SL7_BRIDGE_UNIT=none.service
-  export SL7_CAMERA=$T/env/camera SL7_PLUGIN_DIR=$T/env/plugins SL7_BRIDGE_BUSY_FILE=$T/env/no-ebusy
+  export SL7_CAMERA=$T/env/camera SL7_PLUGIN_DIR=$T/env/plugins SL7_BRIDGE_BUSY_FILE=$T/env/no-ebusy SL7_BRIDGE_FOREIGN_FILE=$T/env/no-foreign
 }
 H=$LIB/root-helper
 
@@ -73,6 +74,11 @@ check "sudo enable" "$H" pam-enable sudo
 check "sudo block above include system-auth" bash -c "awk '/sl7-faceunlock BEGIN/{b=NR} /include.*system-auth/{if(!a)a=NR} END{exit !(b && b<a)}' '$SL7_PAM_DIR/sudo'"
 check "sudo uses workaround=native" grep -q 'pam_howdy.so workaround=native' "$SL7_PAM_DIR/sudo"
 check "sudo lid gate before howdy" bash -c "awk '/lid-closed/{g=NR} /pam_howdy/{h=NR} END{exit !(g && g<h)}' '$SL7_PAM_DIR/sudo'"
+check "sudo has faillock preauth, authfail and authsucc" bash -c "grep -q 'pam_faillock.so preauth' '$SL7_PAM_DIR/sudo' && grep -q 'pam_faillock.so authfail' '$SL7_PAM_DIR/sudo' && grep -q 'pam_faillock.so authsucc' '$SL7_PAM_DIR/sudo'"
+check "sudo faillock order: gate, preauth, howdy, authfail, authsucc" bash -c "awk '/lid-closed/{g=NR} /faillock.so preauth/{p=NR} /pam_howdy/{h=NR} /faillock.so authfail/{f=NR} /faillock.so authsucc/{s=NR} END{exit !(g<p && p<h && h<f && f<s)}' '$SL7_PAM_DIR/sudo'"
+check "sudo gate skips the whole block (success=4)" grep -q 'success=4 default=ignore] pam_exec.so quiet' "$SL7_PAM_DIR/sudo"
+check "sudo password fallback: authfail does not die" bash -c "! grep -q 'default=die\] pam_faillock.so authfail' '$SL7_PAM_DIR/sudo'"
+check "sudo no uinput or sufficient howdy line" bash -c "! grep -q 'sufficient pam_howdy' '$SL7_PAM_DIR/sudo'"
 cp "$SL7_PAM_DIR/sudo" "$T/sudo.once"
 check "sudo enable idempotent" "$H" pam-enable sudo
 check "sudo second enable changes nothing" cmp "$T/sudo.once" "$SL7_PAM_DIR/sudo"
@@ -96,6 +102,7 @@ sed -i '1a auth sufficient pam_howdy.so' "$SL7_PAM_DIR/sudo"
 check_not "foreign pam_howdy line refused" "$H" pam-enable sudo
 fresh_env
 check_not "missing module refused" env SL7_PAM_MODULE=$T/env/nonexistent "$H" pam-enable sudo
+check_not "missing faillock module refused" env SL7_FAILLOCK_MODULE=$T/env/nonexistent "$H" pam-enable sudo
 printf '#%%PAM-1.0\naccount include system-auth\n' >"$SL7_PAM_DIR/sudo"
 check_not "stack without auth line refused" "$H" pam-enable sudo
 check "refusal leaves file alone" bash -c "! grep -q sl7-faceunlock '$SL7_PAM_DIR/sudo'"
@@ -109,7 +116,10 @@ check "polkit enable (copies vendor file)" "$H" pam-enable polkit
 check "polkit has no workaround" bash -c "grep -q 'pam_howdy.so\$' '$SL7_PAM_DIR/polkit-1'"
 check "polkit sandbox drop-in written" test -f "$SL7_DROPIN_DIR/10-sl7-faceunlock.conf"
 check "lock enable" "$H" pam-enable lock
-check "lock service is howdy then deny" bash -c "grep -A1 'pam_howdy' '$SL7_PAM_DIR/omarchy-lock-face' | grep -q 'pam_deny.so'"
+check "lock service ends in faillock authsucc, deny, account" bash -c "grep -A2 'faillock.so authsucc' '$SL7_PAM_DIR/omarchy-lock-face' | grep -q 'pam_deny.so' && grep -q '^account' '$SL7_PAM_DIR/omarchy-lock-face'"
+check "lock has faillock preauth before howdy" bash -c "awk '/faillock.so preauth/{p=NR} /pam_howdy/{h=NR} END{exit !(p && p<h)}' '$SL7_PAM_DIR/omarchy-lock-face'"
+check "polkit has faillock lines" bash -c "grep -q 'faillock.so preauth' '$SL7_PAM_DIR/polkit-1' && grep -q 'faillock.so authsucc' '$SL7_PAM_DIR/polkit-1'"
+check "polkit drop-in has no uinput" bash -c "! grep -q uinput '$SL7_DROPIN_DIR/10-sl7-faceunlock.conf'"
 check "state reports enabled" bash -c "'$H' pam-state | grep -qx 'lock=enabled'"
 check "disable all" "$H" pam-disable all
 check "polkit file we created is gone" test ! -e "$SL7_PAM_DIR/polkit-1"
@@ -196,7 +206,11 @@ check "off runs howdy disable 1" grep -qx 1 "$FAKE_HOWDY_DIR/disabled"
 # --- CLI end to end ---------------------------------------------------------------------------
 fresh_env
 mkdir -p "$SL7_STATE_DIR"
-check "cli: auth enable sudo" "$APP" auth enable sudo
+check_not "cli: auth enable sudo refused without --accept-risk" "$APP" auth enable sudo
+check "cli: refused enable changed nothing" cmp "$SL7_PAM_DIR/sudo" "$T/env/sudo.orig"
+check "cli: warning text printed" bash -c "'$APP' auth enable sudo 2>&1 | grep -q 'impersonate your face'"
+check "cli: auth enable sudo" "$APP" auth enable sudo --accept-risk
+check "cli: status warns about sudo" bash -c "'$APP' status 2>&1 | grep -q 'impersonate your face' && '$APP' status | grep -q 'auth disable sudo'"
 check "cli: howdy enabled after enable" bash -c "[[ ! -e '$FAKE_HOWDY_DIR/disabled' ]] || grep -qx 0 '$FAKE_HOWDY_DIR/disabled'"
 check "cli: auth status json" bash -c "'$APP' auth status --json | jq -e '.sudo == \"enabled\"'"
 check "cli: faces add" "$APP" faces add Glasses
@@ -227,7 +241,11 @@ check "cli: status text gives the fix and the holder when stuck" bash -c "SL7_BR
 check "cli: --off" "$APP" --off
 check "cli: --off removed the lines" bash -c "! grep -rq sl7-faceunlock '$SL7_PAM_DIR'"
 check "cli: sudo restored" cmp "$SL7_PAM_DIR/sudo" "$T/env/sudo.orig"
-check "cli: dry-run enable" "$APP" --dry-run auth enable polkit
+printf 'since=1\nholders=1\npid 7 (evil) uid 1000 writes /dev/video42\n' >"$T/env/foreign"
+check "cli: status json, no foreign writer by default" bash -c "'$APP' status --json | jq -e '.foreign_writer == false'"
+check "cli: status json, foreign writer with the flag file" bash -c "SL7_BRIDGE_FOREIGN_FILE='$T/env/foreign' '$APP' status --json | jq -e '.foreign_writer == true'"
+check "cli: status text shows the foreign writer in full" bash -c "SL7_BRIDGE_FOREIGN_FILE='$T/env/foreign' '$APP' status | grep -q 'foreign writer on the IR camera' && SL7_BRIDGE_FOREIGN_FILE='$T/env/foreign' '$APP' status | grep -q 'holder: pid 7 (evil)'"
+check "cli: dry-run enable" "$APP" --dry-run auth enable polkit --accept-risk
 check "cli: bad stack rejected" bash -c "! '$APP' auth enable login"
 
 # --- menu merge -------------------------------------------------------------------------------

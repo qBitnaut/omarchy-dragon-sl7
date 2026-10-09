@@ -1105,6 +1105,100 @@ int ir_camss_find_holders(char *out, size_t len)
 	return (int)found;
 }
 
+static const char *fd_access(long pid, const char *fdname)
+{
+	char p[96], line[128];
+	FILE *f;
+	const char *r = "?";
+
+	snprintf(p, sizeof(p), "/proc/%ld/fdinfo/%.20s", pid, fdname);
+	f = fopen(p, "re");
+	if (!f)
+		return r;
+	while (fgets(line, sizeof(line), f)) {
+		unsigned long fl;
+
+		if (sscanf(line, "flags: %lo", &fl) == 1) {
+			switch (fl & O_ACCMODE) {
+			case O_RDONLY: r = "read"; break;
+			case O_WRONLY: r = "write"; break;
+			default: r = "read/write"; break;
+			}
+			break;
+		}
+	}
+	fclose(f);
+	return r;
+}
+
+int ir_find_node_holders(const char *node, char *out, size_t len)
+{
+	DIR *proc;
+	struct dirent *pe;
+	size_t used = 0;
+	unsigned found = 0, denied = 0;
+
+	if (!node || !out || !len)
+		return -EINVAL;
+	out[0] = 0;
+	proc = opendir("/proc");
+	if (!proc)
+		return -errno;
+	while ((pe = readdir(proc)) != NULL) {
+		char *end, p[64], lp[96], tgt[160], comm[32] = "?";
+		long pid = strtol(pe->d_name, &end, 10);
+		DIR *fdd;
+		struct dirent *fe;
+
+		if (*end || pid <= 0 || pid == (long)getpid())
+			continue;
+		snprintf(p, sizeof(p), "/proc/%ld/fd", pid);
+		fdd = opendir(p);
+		if (!fdd) {
+			if (errno == EACCES || errno == EPERM)
+				denied++;
+			continue;
+		}
+		while ((fe = readdir(fdd)) != NULL) {
+			ssize_t n;
+			struct stat st;
+			FILE *f;
+			long uid = -1;
+
+			if (fe->d_name[0] == '.')
+				continue;
+			snprintf(lp, sizeof(lp), "/proc/%ld/fd/%.20s", pid, fe->d_name);
+			n = readlink(lp, tgt, sizeof(tgt) - 1);
+			if (n <= 0)
+				continue;
+			tgt[n] = 0;
+			if (strcmp(tgt, node) != 0)
+				continue;
+			snprintf(p, sizeof(p), "/proc/%ld/comm", pid);
+			f = fopen(p, "re");
+			if (f) {
+				if (fgets(comm, sizeof(comm), f))
+					comm[strcspn(comm, "\n")] = 0;
+				fclose(f);
+			}
+			snprintf(p, sizeof(p), "/proc/%ld", pid);
+			if (stat(p, &st) == 0)
+				uid = (long)st.st_uid;
+			if (used < len)
+				used += (size_t)snprintf(out + used, len - used,
+							 "pid %ld (%s) uid %ld holds %s (%s)\n", pid, comm,
+							 uid, node, fd_access(pid, fe->d_name));
+			found++;
+			break; /* one line per process */
+		}
+		closedir(fdd);
+	}
+	closedir(proc);
+	if (denied && used < len)
+		snprintf(out + used, len - used, "%u process(es) could not be inspected\n", denied);
+	return (int)found;
+}
+
 int ir_camss_queue(struct ir_camss *c, unsigned index)
 {
 	struct v4l2_buffer b;

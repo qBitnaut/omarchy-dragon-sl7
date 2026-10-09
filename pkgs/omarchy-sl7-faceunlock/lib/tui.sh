@@ -26,13 +26,15 @@ status_json() {
     --argjson installed "$(howdy_installed && echo true || echo false)" \
     --arg version "$(howdy_version 2>/dev/null)" \
     --arg bridge "$(bridge_state)" --arg bridge_busy "$(bridge_busy_state)" \
+    --arg foreign "$(bridge_foreign_state)" \
     --arg camera_path "$CAMERA" --arg camera "$(camera_state)" \
     --arg emitter "$(emitter_state)" --arg lid "$lid" \
     --argjson faces "${faces:-[]}" --argjson stacks "$stacks" \
     --arg lock_plugin "$lock_state" \
     --argjson lock_patched "$(lock_patched && echo true || echo false)" \
     '{user: $user, howdy: {installed: $installed, version: $version},
-      bridge: $bridge, bridge_busy: ($bridge_busy == "stuck"), camera: {path: $camera_path, state: $camera},
+      bridge: $bridge, bridge_busy: ($bridge_busy == "stuck"),
+      foreign_writer: ($foreign == "foreign"), camera: {path: $camera_path, state: $camera},
       emitter: $emitter, lid: $lid, faces: $faces, stacks: $stacks,
       lock_plugin: {state: $lock_plugin, patched: $lock_patched}}'
 }
@@ -66,6 +68,11 @@ status_text() {
     say "      fix: systemctl --user restart pipewire wireplumber; sudo systemctl restart sl7-ir-bridge"
     sed -n '3,$p' "$BRIDGE_BUSY_FILE" 2>/dev/null | while IFS= read -r s; do say "      holder: $s"; done
   fi
+  if [[ $(bridge_foreign_state) == foreign ]]; then
+    mark bad "foreign writer on the IR camera: another process holds the loopback the bridge feeds"
+    say "      Face unlock may be spoofed or blocked; find and stop the holder, then restart the bridge."
+    sed -n '3,$p' "$BRIDGE_FOREIGN_FILE" 2>/dev/null | while IFS= read -r s; do say "      holder: $s"; done
+  fi
   s=$(camera_state)
   case $s in
   ok) mark good "camera reachable: $CAMERA" ;;
@@ -82,7 +89,17 @@ status_text() {
     state=$(pam_state "$stack")
     case $stack in sudo) s="sudo" ;; polkit) s="polkit (admin prompts in GUI apps)" ;; lock) s="lock screen (PAM service)" ;; esac
     case $state in
-    enabled) mark good "face unlock for $s: on" ;;
+    enabled)
+      if [[ $stack == lock ]]; then
+        mark good "face unlock for $s: on"
+      else
+        mark warn "face unlock for $s: on (opt-in, weaker: see the warning below)"
+        say "      $SL7_RISK_WARNING"
+        say "      turn it off: omarchy-sl7-faceunlock auth disable $stack"
+      fi
+      pam_has_faillock "$PAM_DIR/$(pam_file_for "$stack")" ||
+        say "      no lockout lines yet: re-enable to add them:  omarchy-sl7-faceunlock auth enable $stack"
+      ;;
     foreign) mark warn "face unlock for $s: another pam_howdy line exists, left alone" ;;
     *) mark warn "face unlock for $s: off" ;;
     esac
@@ -152,9 +169,27 @@ faces_clear_cli() {
 
 # --- subcommand: auth ---------------------------------------------------------
 
+# sudo and polkit are opt-in: show the warning and require --accept-risk, or
+# a typed yes on a terminal.
+risk_accepted() {
+  local stack=$1 flag=${2:-} answer
+  warn "$stack: $SL7_RISK_WARNING"
+  [[ $flag == --accept-risk ]] && return 0
+  if [[ -t 0 && -t 1 ]]; then
+    read -rp "Type yes to enable face unlock for $stack: " answer
+    [[ $answer == yes ]] && return 0
+  else
+    err "no terminal: pass --accept-risk to confirm"
+  fi
+  return 1
+}
+
 auth_enable_cli() {
   local stack=$1
   case $stack in sudo | polkit | lock) ;; *) die "unknown stack: $stack (sudo, polkit, lock)" ;; esac
+  if [[ $stack != lock ]]; then
+    risk_accepted "$stack" "${2:-}" || die "$stack: not enabled"
+  fi
   sl7_priv_pw enable "$stack" || return 1
   stack_test_hint "$stack"
 }
@@ -203,6 +238,11 @@ ui_box() {
 
 ui_confirm() {
   gum confirm "$1"
+}
+
+# Same, but the default answer is No (opt-in choices).
+ui_confirm_no() {
+  gum confirm --default=false "$1"
 }
 
 ui_menu() {
@@ -316,7 +356,6 @@ ui_faces() {
 }
 
 ui_wizard() {
-  local choice stacks s
   ui_header "Set up face unlock"
   say "Step 1 of 3: checks"
   if ! ui_preflight; then
@@ -352,15 +391,20 @@ ui_wizard() {
   ui_pause
   ui_header "Turn it on"
   say "Face unlock is configured but no login path uses it yet."
-  stacks=$(printf '%s\n' "sudo" "polkit (admin prompts in GUI apps)" "lock screen (needs the lock plugin: Lock screen menu)" |
-    gum choose --no-limit --header "Enable now? (space to select, enter to confirm; none is fine)") || return 0
-  while IFS= read -r s; do
-    case $s in
-    sudo*) toggle_stack sudo on ;;
-    polkit*) toggle_stack polkit on ;;
-    lock*) toggle_stack lock on ;;
-    esac
-  done <<<"$stacks"
+  say "The lock screen is the default. sudo and polkit are separate, optional choices."
+  if ui_confirm "Enable face unlock for the lock screen? (needs the lock plugin: Lock screen menu)"; then
+    toggle_stack lock on
+  fi
+  ui_pause
+  ui_header "Optional: sudo and polkit"
+  warn "$SL7_RISK_WARNING"
+  note "Off by default. You can also do this later: Use face unlock for..."
+  if ui_confirm_no "Enable face unlock for sudo?"; then
+    toggle_stack sudo on
+  fi
+  if ui_confirm_no "Enable face unlock for polkit (admin prompts in GUI apps)?"; then
+    toggle_stack polkit on
+  fi
 }
 
 # toggle_stack STACK [on|off]: guided, validated, rolls back on request.
@@ -385,6 +429,10 @@ toggle_stack() {
   if (($(faces_count_cached) == 0)); then
     warn "No enrolled face is known. The stack would just fall through to your password."
     ui_confirm "Enable anyway?" || return 0
+  fi
+  if [[ $stack != lock ]]; then
+    warn "$SL7_RISK_WARNING"
+    ui_confirm_no "Enable face unlock for $stack anyway?" || return 0
   fi
   ui_box "Keep a root shell open while you change authentication:
   open a second terminal and run:  sudo -i
@@ -426,6 +474,7 @@ ui_use_for() {
     done
     say ""
     note "Login and SDDM stay off on purpose: face login would leave gnome-keyring locked."
+    note "sudo and polkit are opt-in: $SL7_RISK_WARNING"
     choice=$(ui_menu "Toggle which one?" "sudo" "polkit (admin prompts in GUI apps)" "lock screen" "Back") || return 0
     case $choice in
     sudo) toggle_stack sudo ;;

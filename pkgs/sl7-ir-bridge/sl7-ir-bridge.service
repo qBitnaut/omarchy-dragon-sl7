@@ -50,8 +50,12 @@ SystemCallFilter=~@privileged @resources open_by_handle_at
 UMask=0077
 # /run/sl7-ir-bridge/ebusy: written when the IR path stays busy (read by
 # sl7-doctor and omarchy-sl7-faceunlock), removed when the service stops.
+# /run/sl7-ir-bridge/foreign-writer: another process holds the loopback (EBUSY).
 RuntimeDirectory=sl7-ir-bridge
 RuntimeDirectoryMode=0755
+# keep the flag files across Restart=on-failure: a foreign writer that makes
+# the bridge exit would otherwise erase its own report on the way
+RuntimeDirectoryPreserve=restart
 MemoryMax=64M
 
 [Install]

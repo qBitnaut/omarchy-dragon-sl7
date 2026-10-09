@@ -9,6 +9,9 @@
 #   - the file is validated before and after the rename, and rolled back when
 #     either check fails.
 #
+# Every block also carries pam_faillock lines (see pam_block); sudo and polkit
+# are opt-in because any process running as the user can reach the camera.
+#
 # Stacks: sudo (/etc/pam.d/sudo), polkit (/etc/pam.d/polkit-1, copied from the
 # vendor file when absent) and lock (/etc/pam.d/omarchy-lock-face, ours alone).
 # Login, SDDM, su and sshd are never touched.
@@ -23,20 +26,41 @@ pam_file_for() {
 }
 
 # The block we own, for one stack.
+#
+# Lockout (pam_faillock), so face attempts count toward the same lockout as
+# password attempts:
+#   gate      lid closed: skip the whole block (success=4 jumps over four lines)
+#   preauth   a locked-out account stops here (auth_err=die: no password
+#             fallback while locked); a faillock fault is ignored, never fatal
+#   howdy     match: skip authfail, reach authsucc (success=1); no match
+#             (auth_err) records a failure; anything else (module skipped,
+#             camera unavailable, abort_if_ssh) jumps over both (default=2)
+#   authfail  records the failure and falls through to the password stack
+#             ([default=1] hops over authsucc; the password prompt still works)
+#   authsucc  resets the failure record and ends the stack, as `sufficient`
+#             pam_howdy.so did before
 pam_block() {
-  local stack=$1
-  printf '%s\n' "$SL7_BEGIN"
-  printf '%s\n' "auth      [success=1 default=ignore] pam_exec.so quiet $LID_GATE"
+  local stack=$1 howdy
   case $stack in
-  sudo) printf '%s\n' "auth      sufficient pam_howdy.so workaround=native" ;;
-  polkit) printf '%s\n' "auth      sufficient pam_howdy.so" ;;
-  lock)
-    printf '%s\n' "auth      sufficient pam_howdy.so"
+  sudo) howdy="pam_howdy.so workaround=native" ;;
+  *) howdy="pam_howdy.so" ;;
+  esac
+  printf '%s\n' "$SL7_BEGIN"
+  printf '%s\n' "auth      [success=4 default=ignore] pam_exec.so quiet $LID_GATE"
+  printf '%s\n' "auth      [success=ok auth_err=die default=ignore] pam_faillock.so preauth"
+  printf '%s\n' "auth      [success=1 auth_err=ok default=2] $howdy"
+  printf '%s\n' "auth      [default=1] pam_faillock.so authfail"
+  printf '%s\n' "auth      sufficient pam_faillock.so authsucc"
+  if [[ $stack == lock ]]; then
     printf '%s\n' "auth      required pam_deny.so"
     printf '%s\n' "account   include system-local-login"
-    ;;
-  esac
+  fi
   printf '%s\n' "$SL7_END"
+}
+
+# 0 when the block in $1 carries the lockout lines.
+pam_has_faillock() {
+  grep -q '^[^#]*pam_faillock\.so preauth' "$1" 2>/dev/null
 }
 
 # stdin -> stdout without our block.
@@ -120,6 +144,18 @@ pam_validate() {
     err "lid gate must precede pam_howdy.so"
     return 1
   }
+  local pre_line fail_line succ_line
+  pre_line=$(grep -n '^[^#]*pam_faillock\.so preauth' "$cand" | head -n1 | cut -d: -f1)
+  fail_line=$(grep -n '^[^#]*pam_faillock\.so authfail' "$cand" | head -n1 | cut -d: -f1)
+  succ_line=$(grep -n '^[^#]*pam_faillock\.so authsucc' "$cand" | head -n1 | cut -d: -f1)
+  [[ -n $pre_line && -n $fail_line && -n $succ_line ]] || {
+    err "pam_faillock preauth/authfail/authsucc lines are missing"
+    return 1
+  }
+  [[ $gate_line -lt $pre_line && $pre_line -lt $howdy_line && $howdy_line -lt $fail_line && $fail_line -lt $succ_line ]] || {
+    err "block order must be: lid gate, faillock preauth, pam_howdy.so, authfail, authsucc"
+    return 1
+  }
   if [[ $stack != lock ]]; then
     # Our line must sit above the first line that can authenticate with a
     # password (include system-auth, pam_unix).
@@ -184,7 +220,6 @@ polkit_dropin_ensure() {
 [Service]
 PrivateDevices=no
 DeviceAllow=char-video4linux rw
-DeviceAllow=/dev/uinput rw
 EOF
   : >"$(pam_created_marker polkit-dropin)"
   if [[ -z ${SL7_NO_SYSTEMCTL:-} ]]; then
@@ -220,6 +255,10 @@ pam_enable() {
 
   [[ -e $PAM_MODULE ]] || {
     err "pam_howdy.so not found at $PAM_MODULE: refusing to write a stack line"
+    return 1
+  }
+  [[ -e $FAILLOCK_MODULE ]] || {
+    err "pam_faillock.so not found at $FAILLOCK_MODULE: refusing to write a stack without lockout"
     return 1
   }
   [[ -x $LID_GATE ]] || {

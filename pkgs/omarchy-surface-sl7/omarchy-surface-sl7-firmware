@@ -50,8 +50,9 @@ Usage:
   --from-msi FILE   extract FILE (needs msiextract from msitools) and install
   --no-rebuild      do not rebuild the initramfs/UKI afterwards
   --allow-unverified
-                    install files whose sha256 differs from the embedded
-                    list (newer MSI). Not recommended: DSP firmware is signed
+                    parse an MSI, or install files, whose sha256 differs from
+                    the pinned values (newer MSI). Without it an MSI that is
+                    not the pinned one is refused before msiextract sees it. Not recommended: DSP firmware is signed
                     and a wrong file only fails at boot.
   --status          show which firmware files are installed and verified
   --list            print the embedded sha256 list
@@ -116,6 +117,10 @@ queue_src=()
 queue_rel=()
 check_one() {
   local src=$1 kind=$2 sum=$3 rel=$4 actual
+  if [[ -L $src ]]; then
+    echo "$prog: refusing a symbolic link: $rel" >&2
+    return 1
+  fi
   if [[ ! -f $src ]]; then
     if [[ $kind == req ]]; then
       echo "$prog: required file missing: $rel" >&2
@@ -233,10 +238,38 @@ else
   [[ -f $from_msi ]] || die "$from_msi not found"
   command -v msiextract >/dev/null 2>&1 ||
     die "msiextract not found; install msitools (pacman -S msitools)"
-  echo "MSI sha256: $(hash_of "$from_msi") (expected for $msi_version: $msi_sha256)"
-  tmp=$(mktemp -d "${TMPDIR:-/var/tmp}/$prog.XXXXXX")
-  msiextract -C "$tmp" "$from_msi" >/dev/null
-  surface_update=$(find "$tmp" -type d -name SurfaceUpdate -print -quit)
+  # Hash a private copy against the pinned sha256 BEFORE msiextract parses it
+  # (a hostile MSI is an attack on the parser, and it runs as root), then
+  # extract as an unprivileged user into a directory only that user can write.
+  if ((EUID == 0)); then
+    tmp=$(mktemp -d "/var/tmp/$prog.XXXXXX")
+  else
+    tmp=$(mktemp -d "${TMPDIR:-/var/tmp}/$prog.XXXXXX")
+  fi
+  mkdir -m 0700 "$tmp/out"
+  cp -- "$from_msi" "$tmp/in.msi"
+  actual_msi=$(hash_of "$tmp/in.msi")
+  if [[ $actual_msi == "$msi_sha256" ]]; then
+    echo "MSI sha256 matches the pinned $msi_version package"
+  elif ((allow_unverified)); then
+    echo "$prog: WARNING: MSI sha256 $actual_msi is not the pinned $msi_sha256 ($msi_version); continuing because --allow-unverified was given" >&2
+  else
+    die "MSI sha256 $actual_msi does not match the pinned $msi_sha256 ($msi_version); not parsing it (--allow-unverified overrides, at your own risk)"
+  fi
+  if ((EUID == 0)); then
+    command -v runuser >/dev/null 2>&1 || die "runuser not found; refusing to run msiextract as root"
+    id nobody >/dev/null 2>&1 || die "no user nobody; refusing to run msiextract as root"
+    chmod 0711 "$tmp"
+    chmod 0644 "$tmp/in.msi"
+    chown nobody "$tmp/out"
+    (cd / && runuser -u nobody -- env -i PATH=/usr/bin:/bin LC_ALL=C msiextract -C "$tmp/out" "$tmp/in.msi" >/dev/null) ||
+      die "msiextract failed"
+    # nobody is finished: take ownership of what it wrote before reading any of it
+    chown -R -h root:root "$tmp/out"
+  else
+    msiextract -C "$tmp/out" "$tmp/in.msi" >/dev/null || die "msiextract failed"
+  fi
+  surface_update=$(find "$tmp/out" -type d -name SurfaceUpdate -print -quit)
   [[ -n $surface_update ]] || die "no SurfaceUpdate folder in the MSI; is this the SL7 driver package?"
   for entry in "${manifest[@]}"; do
     read -r kind sum rel dir <<<"$entry"

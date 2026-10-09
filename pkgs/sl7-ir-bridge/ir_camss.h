@@ -63,6 +63,12 @@ int ir_camss_release_stale(void);
  * ones it could not inspect are counted in the last line. Returns the number
  * of holders, or -errno when the IR path could not be resolved. */
 int ir_camss_find_holders(char *out, size_t len);
+/* List the other processes that hold the device node `node` open (found by
+ * scanning /proc/<pid>/fd; this process is skipped). One line per holder is
+ * appended to out (NUL terminated, truncated to len): pid, comm, uid and the
+ * access mode of the descriptor. Needs CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH
+ * to see other users' processes. Returns the number of holders, or -errno. */
+int ir_find_node_holders(const char *node, char *out, size_t len);
 /* Queue all buffers and VIDIOC_STREAMON. This is what powers the sensor. */
 int ir_camss_start(struct ir_camss *c);
 /* Dequeue one frame: -EAGAIN when none is ready. The frame stays owned by the

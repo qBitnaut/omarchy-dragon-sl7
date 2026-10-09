@@ -26,7 +26,6 @@ pattern based and validated, and the tool refuses when anything is off):
     between its entries by colour temperature and holds the end values.
 """
 import argparse
-import glob
 import hashlib
 import math
 import os
@@ -42,6 +41,9 @@ BIN_NAME = "com.surface.tuned.ffc_ov02c10.bin"
 KNOWN_SHA256 = {
     "5a66898fa9fb1273776e509186e24847acda2de48911c8097459503b669d665b": "Surface Laptop 7 driver MSI 26.053.36539.0",
 }
+# The driver MSI itself (omarchy-surface-sl7-firmware pins the same hash).
+MSI_SHA256 = "66b6e1ace7e5f01bc592cd4c9ae78aa30bbb0e04ab57491cd03ec2aaa6e1229b"
+MSI_VERSION = "26.053.36539.0"
 CACHE_DIR = "/var/lib/omarchy-surface-sl7/camera"
 OUTPUT = "/etc/libcamera/ipa/simple/ov02c10.yaml"
 IPA_SO = "/usr/lib/libcamera/ipa/ipa_soft_simple.so"
@@ -212,30 +214,69 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def extract_from_msi(msi, tmp):
+def extract_from_msi(msi, tmp, allow_unverified):
+    """Hash the MSI against the pinned sha256 BEFORE msiextract parses it, then
+    extract it as the unprivileged user "nobody" into a directory only that
+    user can write. The hash is taken on a private copy, so the file cannot
+    change between the check and the extraction."""
     if shutil.which("msiextract") is None:
         die("msiextract not found; install msitools (pacman -S msitools)")
+    if not os.path.isfile(msi):
+        die("%s not found" % msi)
+    root = os.geteuid() == 0
+    work = os.path.join(tmp, "msi")
+    out = os.path.join(work, "out")
+    copy = os.path.join(work, "in.msi")
+    os.makedirs(out, mode=0o700)
+    try:
+        shutil.copyfile(msi, copy)
+    except OSError as e:
+        die("cannot read %s: %s" % (msi, e))
+    digest = sha256_of(copy)
+    if digest == MSI_SHA256:
+        info("MSI sha256 matches the pinned Surface Laptop 7 driver package %s" % MSI_VERSION)
+    elif allow_unverified:
+        warn("%s sha256 %s is not the pinned driver MSI %s (%s); continuing because --force/--allow-unverified "
+             "was given" % (msi, digest, MSI_VERSION, MSI_SHA256))
+    else:
+        die("%s sha256 %s does not match the pinned driver MSI %s (%s); not parsing it. "
+            "Use --force (or --allow-unverified) only if you accept that risk"
+            % (msi, digest, MSI_VERSION, MSI_SHA256))
+    cmd = ["msiextract", "-C", out, copy]
+    if root:
+        try:
+            import pwd
+            nob = pwd.getpwnam("nobody")
+        except (ImportError, KeyError):
+            die("no user \"nobody\" to extract the MSI as; refusing to run msiextract as root")
+        if shutil.which("runuser") is None:
+            die("runuser not found (util-linux); refusing to run msiextract as root")
+        os.chmod(tmp, 0o711)    # nobody may reach the copy and out/, not list these directories
+        os.chmod(work, 0o711)
+        os.chmod(copy, 0o644)
+        os.chown(out, nob.pw_uid, nob.pw_gid)
+        cmd = ["runuser", "-u", "nobody", "--"] + cmd
     info("Extracting %s (this takes a minute)" % msi)
-    subprocess.run(["msiextract", "-C", tmp, msi], check=True, stdout=subprocess.DEVNULL)
+    try:
+        subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       cwd="/" if root else work, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+    except subprocess.CalledProcessError as e:
+        die("msiextract failed (%s)" % e)
+    if root:
+        # nobody is gone: take ownership of what it wrote before anything reads it
+        for dp, dns, fns in os.walk(out):
+            for n in dns + fns:
+                os.lchown(os.path.join(dp, n), 0, 0)
+        os.lchown(out, 0, 0)
     found = []
-    for root, _dirs, files in os.walk(tmp):
+    for dp, _dirs, files in os.walk(out):
         if BIN_NAME in files:
-            found.append(os.path.join(root, BIN_NAME))
+            p = os.path.join(dp, BIN_NAME)
+            if not os.path.islink(p):
+                found.append(p)
     if not found:
         die("%s is not in the MSI; is this the Surface Laptop 7 driver package?" % BIN_NAME)
     return sorted(found)[0]
-
-
-def msi_candidates():
-    homes = [os.getcwd()]
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        homes.append(os.path.expanduser("~" + sudo_user + "/Downloads"))
-    homes.append(os.path.expanduser("~/Downloads"))
-    out = []
-    for d in homes:
-        out += glob.glob(os.path.join(d, "SurfaceLaptop7*.msi"))
-    return out
 
 
 def cache_copy(src):
@@ -315,18 +356,17 @@ def remove(out, force, purge):
 
 def load_sets(args, tmp):
     src = None
+    allow = args.force or args.allow_unverified
     if args.bin:
         src = args.bin
     elif args.from_msi:
-        src = extract_from_msi(args.from_msi, tmp)
+        src = extract_from_msi(args.from_msi, tmp, allow)
     else:
+        # Only an explicit --bin / --from-msi or the kept copy: no searching
+        # the current directory or ~/Downloads for something to parse as root.
         cached = os.path.join(CACHE_DIR, BIN_NAME)
         if os.path.exists(cached):
             src = cached
-        else:
-            msis = msi_candidates()
-            if msis:
-                src = extract_from_msi(msis[0], tmp)
     if src is None:
         die("no Microsoft tuning file found. Download the Surface Laptop 7 driver MSI "
             "(see omarchy-surface-sl7-firmware --help) and run: sudo %s --from-msi FILE.msi" % PROG)
@@ -338,9 +378,13 @@ def load_sets(args, tmp):
     digest = sha256_of(src)
     if digest in KNOWN_SHA256:
         info("Source: %s (%s)" % (src, KNOWN_SHA256[digest]))
-    else:
+    elif allow:
         warn("%s is not the driver package this tool was written against (sha256 %s); "
-             "the content is validated below, check the result" % (src, digest))
+             "continuing because --force/--allow-unverified was given; the content is validated "
+             "below, check the result" % (src, digest))
+    else:
+        die("%s has sha256 %s, which is not the known %s file; not parsing it. "
+            "Use --force (or --allow-unverified) only if you accept that risk" % (src, digest, BIN_NAME))
     with open(src, "rb") as f:
         buf = f.read()
     sets = parse_sets(buf)
@@ -385,7 +429,11 @@ def main():
     ap.add_argument("--status", action="store_true", help="show what is installed")
     ap.add_argument("--remove", action="store_true", help="remove the tuning file (libcamera falls back to its defaults)")
     ap.add_argument("--purge", action="store_true", help="with --remove: also delete the kept copy of Microsoft's file")
-    ap.add_argument("--force", action="store_true", help="overwrite or remove a tuning file not written by this tool")
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite or remove a tuning file not written by this tool; also accept a "
+                         "file or MSI whose sha256 is not the pinned one")
+    ap.add_argument("--allow-unverified", action="store_true",
+                    help="accept a file or MSI whose sha256 is not the pinned one (does not overwrite foreign tuning files)")
     ap.add_argument("--output", default=OUTPUT, metavar="FILE", help="tuning file to write (default %s)" % OUTPUT)
     args = ap.parse_args()
     global QUIET

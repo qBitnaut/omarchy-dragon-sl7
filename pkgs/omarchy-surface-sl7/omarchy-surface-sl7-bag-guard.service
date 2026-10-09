@@ -11,6 +11,18 @@ RestartSec=10
 Nice=10
 ProtectHome=yes
 PrivateTmp=yes
+# Sandbox: it reads /sys and /proc, asks logind (busctl) and PID 1 (systemctl)
+# over AF_UNIX D-Bus sockets to suspend or power off, and logs through
+# /dev/log. Root is authorised by uid there, so no capability is needed.
+ProtectSystem=strict
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

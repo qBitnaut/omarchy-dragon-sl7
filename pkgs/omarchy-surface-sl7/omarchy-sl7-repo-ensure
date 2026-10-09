@@ -9,7 +9,8 @@
 #                         in /usr/share/pacman/keyrings/omarchy-sl7-trusted)
 #     --force             insert the Include even if the key is not trusted yet
 #     --provision-users   also install the `omarchy refresh pacman` hook for every user
-#                         that has ~/.config/omarchy
+#                         that has ~/.config/omarchy; each is written by that user
+#                         (runuser), never by root, and refused through symlinks
 #     --user-hook         install that hook for the invoking user only
 #
 # The Include goes above the first repository section so omarchy-sl7 packages
@@ -130,33 +131,58 @@ ensure_include() {
   say "added '$inc' above the first repository in $conf (backup: $conf.omarchy-sl7.bak)"
 }
 
-install_user_hook() { # home [uid gid]
-  local home=$1 uid=${2:-} gid=${3:-} dest d
+# Runs as the user it writes for (never as root on a user's behalf): root
+# following links inside a home directory would let that user plant a file
+# owned by them anywhere root can write. Every component below $HOME must be a
+# real directory owned by the invoking user; a symlink or a foreign owner stops
+# the install with a warning.
+install_user_hook() {
+  local home=${HOME:-} dest d p tmp
+  [[ -d $home ]] || return 0
   dest=$home/$hook_rel
   [[ -r $hook_src ]] || { warn "hook source $hook_src missing"; return 0; }
-  [[ -e $dest ]] && return 0
-  for d in .config/omarchy/hooks .config/omarchy/hooks/pre-refresh-pacman.d; do
-    [[ -d $home/$d ]] && continue
-    if [[ -n $uid ]]; then install -d -m755 -o "$uid" -g "$gid" "$home/$d"; else install -d -m755 "$home/$d"; fi
+  if [[ -e $dest || -L $dest ]]; then return 0; fi
+  p=$home
+  for d in .config .config/omarchy .config/omarchy/hooks .config/omarchy/hooks/pre-refresh-pacman.d; do
+    p=$home/$d
+    if [[ -L $p ]]; then warn "not installing the hook: $p is a symlink"; return 0; fi
+    if [[ -e $p ]]; then
+      [[ -d $p && -O $p ]] || { warn "not installing the hook: $p is not a directory owned by $(id -un)"; return 0; }
+    else
+      mkdir -m755 "$p" 2>/dev/null || { warn "cannot create $p"; return 0; }
+    fi
   done
-  if [[ -n $uid ]]; then install -m755 -o "$uid" -g "$gid" "$hook_src" "$dest"; else install -m755 "$hook_src" "$dest"; fi
-  say "installed the 'omarchy refresh pacman' hook: $dest"
+  tmp=$(mktemp "$p/.10-omarchy-sl7-repo.XXXXXX") || return 0
+  if install -m755 "$hook_src" "$tmp" && mv -fT "$tmp" "$dest"; then
+    say "installed the 'omarchy refresh pacman' hook: $dest"
+  else
+    rm -f "$tmp"
+    warn "could not install $dest"
+  fi
 }
 
+# Root side: only decides which users get the hook and hands the work to the
+# user (runuser, clean environment). Root never creates, chowns or writes
+# anything inside a home directory.
 provision_users() {
-  local _user _ uid gid _gecos home shell
-  while IFS=: read -r _user _ uid gid _gecos home shell; do
+  local user _ uid _gid _gecos home shell self
+  self=$(readlink -f "$0") || return 0
+  command -v runuser >/dev/null 2>&1 || { warn "runuser not found; user hooks not provisioned"; return 0; }
+  while IFS=: read -r user _ uid _gid _gecos home shell; do
     ((uid >= 1000 && uid < 60000)) || continue
     case $shell in */nologin | */false) continue ;; esac
-    [[ -d $home/.config/omarchy ]] || continue
-    install_user_hook "$home" "$uid" "$gid"
+    [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ && $home == /* ]] || continue
+    [[ -d $home/.config/omarchy && ! -L $home/.config/omarchy ]] || continue
+    runuser -u "$user" -- /usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin \
+      OMARCHY_SL7_HOOK_SRC="$hook_src" "$self" --user-hook --quiet ||
+      warn "could not provision the hook for $user"
   done <"$passwd_file"
 }
 
 rc=0
 if ((userhook)); then
   [[ -n ${HOME:-} ]] || { warn "HOME is not set"; exit 1; }
-  install_user_hook "$HOME"
+  install_user_hook
 fi
 if ((!userhook || provision)); then
   ensure_include

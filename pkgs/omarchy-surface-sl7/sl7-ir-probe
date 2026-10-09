@@ -19,21 +19,32 @@
 # (OV02C10: SGRBG10_1X10 / pgAA), 10 frames, CSID1 -> VFE1 RDI0, INFO only.
 # --debug: dynamic debug for camss/csiphy/vd55g/mc, vb2 debug=2, interrupt
 # counter deltas around each capture; everything is switched off afterwards.
-# Captures go to ~/sl7-ir-test (30 IR frames by default).
+# Captures go to ~/sl7-ir-test (30 IR frames by default). Output must stay inside
+# the invoking user's home directory; as root the files are written to a private
+# temporary directory and copied into place by the user (never by root).
 # Needs: v4l-utils (media-ctl, v4l2-ctl) for the topology and the capture;
 # root (it re-runs itself with sudo) for dmesg, --debug and the MCLK options.
 set -u
 
 frames=30
-out=${SL7_IR_OUT:-${SUDO_USER:+$(getent passwd "$SUDO_USER" | cut -d: -f6)/sl7-ir-test}}
-out=${out:-$HOME/sl7-ir-test}
+# The invoking user's home comes from the account database, not from $HOME or
+# an environment variable that sudo could carry across.
+real_user=${SUDO_USER:-$(id -un)}
+user_home=$(getent passwd "$real_user" | cut -d: -f6)
+[[ $user_home == /* ]] || { echo "sl7-ir-probe: no home directory for $real_user" >&2; exit 1; }
+if ((EUID == 0)); then
+  out=$user_home/sl7-ir-test
+  sysfs=/sys
+else
+  out=${SL7_IR_OUT:-$user_home/sl7-ir-test}
+  sysfs=${SL7_SYSFS:-/sys}
+fi
 capture=1
 sweep=0
 debug=0
 want_y10=0
 mclk_hz=0
 mclk_hz_set=0
-sysfs=${SL7_SYSFS:-/sys}
 ir_addr=0010
 rgb_addr=0036
 
@@ -57,19 +68,33 @@ while (($#)); do
   shift
 done
 [[ $frames =~ ^[0-9]+$ && $mclk_hz =~ ^[0-9]+$ ]] || usage
+out=$(realpath -m -- "$out") && user_home=$(realpath -m -- "$user_home") || exit 1
+case $out in
+  "$user_home"/*) ;;
+  *) echo "sl7-ir-probe: refusing output directory $out: it must be inside $user_home" >&2; exit 1 ;;
+esac
 # the driver treats mclk_hz=0 as "device tree rate", and as 19.2 MHz when the
 # sweep picks the clock itself
 sweep_hz=$((mclk_hz ? mclk_hz : 19200000))
 
 if ((EUID != 0)) && [[ -z ${SL7_IR_NO_SUDO:-} ]]; then
   if command -v sudo >/dev/null 2>&1; then
-    exec sudo --preserve-env=SL7_IR_OUT,SL7_SYSFS "$0" "$@"
+    # no --preserve-env: the output directory travels as an argument and is
+    # checked again as root; the sysfs root is fixed to /sys when root
+    exec sudo "$0" "$@" --out "$out"
   fi
   echo "sl7-ir-probe: not root and no sudo; dmesg and bind/unbind will be limited" >&2
 fi
 
-mkdir -p "$out" || { echo "sl7-ir-probe: cannot create $out" >&2; exit 1; }
-if [[ -n ${SUDO_UID:-} ]]; then chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$out" 2>/dev/null || true; fi
+final_out=$out
+if ((EUID == 0)) && [[ $real_user != root ]]; then
+  # Root never writes inside a user-owned directory (symlink games): work in a
+  # private directory and let the user copy the results home.
+  command -v runuser >/dev/null 2>&1 || { echo "sl7-ir-probe: runuser not found" >&2; exit 1; }
+  out=$(mktemp -d /var/tmp/sl7-ir-probe.XXXXXX) || exit 1
+else
+  mkdir -p "$out" || { echo "sl7-ir-probe: cannot create $out" >&2; exit 1; }
+fi
 report=$out/probe-$(date +%Y%m%d-%H%M%S).txt
 
 summary=()
@@ -743,6 +768,14 @@ section "SUMMARY"
 printf '%s\n' "${summary[@]}" | tee -a "$report"
 say ""
 say "report: $report"
-say "files: $out"
-if [[ -n ${SUDO_UID:-} ]]; then chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$out" 2>/dev/null || true; fi
+say "files: $final_out"
+if [[ $out != "$final_out" ]]; then
+  chown -R -h "$real_user" "$out"
+  # shellcheck disable=SC2016  # $1 and $2 expand in the user's shell
+  if runuser -u "$real_user" -- sh -c 'mkdir -p -- "$1" && cp -r -- "$2"/. "$1"/' sh "$final_out" "$out"; then
+    rm -rf -- "$out"
+  else
+    echo "sl7-ir-probe: could not copy the results to $final_out; they stay in $out" >&2
+  fi
+fi
 exit "$rc"

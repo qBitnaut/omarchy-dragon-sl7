@@ -108,6 +108,18 @@ starts it releases IR path links that a killed predecessor left enabled (links i
 (later) the session is stopped. If the loopback disappears the daemon exits and
 systemd restarts it.
 
+## Foreign writer on the loopback
+
+If opening the loopback, or setting its GREY format, fails with `EBUSY`, another process holds
+the node the bridge must write to and could be feeding the consumers (howdy, the lock screen)
+frames of its own. The bridge logs `foreign writer on the IR camera`, one `loopback holder: pid
+P (name) uid U holds /dev/videoN (read/write)` line per process that has the node open
+(`/proc/<pid>/fd` scan; readers show up too, the access mode is the descriptor's), writes
+`/run/sl7-ir-bridge/foreign-writer` in the same format as the `ebusy` file, and exits (systemd
+restarts it; the unit keeps its runtime directory across restarts, so the flag stays while the
+condition lasts). A successful start removes the file. `sl7-doctor` and `omarchy-sl7-faceunlock
+status` show it in red as "foreign writer on the IR camera".
+
 ## Stuck in EBUSY
 
 If session starts keep failing with `EBUSY` (the bridge cannot enable the IR path links

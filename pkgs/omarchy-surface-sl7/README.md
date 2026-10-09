@@ -159,7 +159,10 @@ firmware `Romulus/qcvss8380.mbn` (optional, see 7b). `updates/` is searched befo
 `/usr/lib/firmware`, so the kernel finds it at `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn`.
 Each file is checked against an embedded sha256 list for MSI 26.053.36539.0 before
 anything is installed (all-or-nothing); `--allow-unverified` overrides for a newer MSI.
-`--from-msi` needs `msiextract` (msitools); pymsi is not supported. Afterwards it runs
+`--from-msi` first hashes a private copy of the MSI against the pinned sha256 and refuses a
+different file before `msiextract` parses it (unless `--allow-unverified`), then extracts as the
+unprivileged user `nobody` into a directory only that user can write and takes ownership of the
+result before reading it. It needs `msiextract` (msitools); pymsi is not supported. Afterwards it runs
 `limine-mkinitcpio`, or `mkinitcpio -P`, unless `--no-rebuild`. Omarchy's own
 `qcom-firmware-extract` puts the zap shader in `Romulus/`, where mainline does not look;
 use this tool for the SL7.
@@ -242,6 +245,13 @@ use this tool for the SL7.
   change of decision is logged, not every poll. Check:
   `omarchy-sl7-bag-guard --check` (lid, power, displays, every thermal zone, the decision; it
   never acts; works as a normal user), `journalctl -t omarchy-sl7-bag-guard`, `sl7-doctor`.
+  The unit runs sandboxed: `ProtectSystem=strict`, `NoNewPrivileges`, an empty
+  `CapabilityBoundingSet`, `RestrictAddressFamilies=AF_UNIX`, `ProtectKernelTunables`,
+  `ProtectControlGroups`, `LockPersonality`, `RestrictRealtime`, native syscalls only. It still
+  reads `/sys` and `/proc` and asks logind and PID 1 over D-Bus (root is authorised by uid).
+  Check that power off still works without capabilities:
+  `sudo systemd-run --wait --pipe -p CapabilityBoundingSet= -p NoNewPrivileges=yes busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanPowerOff`
+  should print `s "yes"`.
   `ENABLED=0` leaves the service running but idle; `systemctl disable --now
   omarchy-surface-sl7-bag-guard` removes it.
 
@@ -501,7 +511,8 @@ Two parts:
 sudo omarchy-surface-sl7-firmware --from-msi SurfaceLaptop7_ARM_Win11_26100_26.053.36539.0.msi
                                   # also keeps the camera tuning in /var/lib/omarchy-surface-sl7/camera/
                                   # and generates the tuning file from it (skipped if one exists)
-sudo sl7-camera-tuning            # regenerate or adjust: uses that copy (or: --from-msi FILE.msi, --bin FILE)
+sudo sl7-camera-tuning            # regenerate or adjust: uses that copy (or: --from-msi FILE.msi, --bin FILE;
+                                  # it never goes looking for an MSI in ~/Downloads or the current directory)
 systemctl --user restart pipewire wireplumber
 sl7-camera-check                  # frames, logs and a CPU/power sample into ~/sl7-camera-<time>/
                                   # (picks the RGB camera by id, not by `cam -c1`)
@@ -521,6 +532,8 @@ sl7-camera-check                  # frames, logs and a CPU/power sample into ~/s
 | `--quiet` | Print only warnings and errors. |
 | `--list` | Print the sets found with their colour temperature ranges and matrices. |
 | `--status` | What is installed, the blend used, whether libcamera has the sensor helper. |
+| `--from-msi FILE`, `--bin FILE` | The only sources besides the kept copy. The MSI must match the pinned sha256 and is extracted as `nobody`; the `.bin` must match the known sha256 before anything parses it. |
+| `--allow-unverified` | Accept an MSI or `.bin` whose sha256 is not the pinned one (`--force` does this too, and also overwrites a tuning file not written by this tool). Without it the tool refuses. |
 | `--remove` | Delete the tuning file (libcamera falls back to no correction); `--purge` also deletes the kept copy of Microsoft's file. |
 
 Black level: dark frames from this sensor measured about 66 on the green and blue channels at
@@ -1094,7 +1107,10 @@ this package win over `[alarm]` and `[omarchy]`. Keeping that line is automated:
   `[omarchy]` Server line in place, so the Include survives. Omarchy has no system-wide hook
   location (`omarchy-hook` reads only `~/.config/omarchy/hooks/<name>.d/`), so as a safety net
   the package ships `10-omarchy-sl7-repo` in `/etc/skel` and the ensure script provisions it
-  for existing users (`--provision-users`, run at install/upgrade and boot).
+  for existing users (`--provision-users`, run at install/upgrade and boot). Root never writes
+  inside a home directory: each user's copy is installed by that user (`runuser`, clean
+  environment), and the install is refused when any directory below `~` on the way is a symlink
+  or not owned by the user, so a user cannot turn the boot service into a root file write.
 - Opt out with `touch /etc/pacman.d/omarchy-sl7.disabled`.
 
 `sl7-doctor` checks that the repository is configured and first in order, and that the key is

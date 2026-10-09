@@ -58,7 +58,7 @@ omarchy-sl7-faceunlock status [--json]
 omarchy-sl7-faceunlock faces list [--json] [--cached]
 omarchy-sl7-faceunlock faces add LABEL | remove ID | clear
 omarchy-sl7-faceunlock auth status [--json]
-omarchy-sl7-faceunlock auth enable sudo|polkit|lock
+omarchy-sl7-faceunlock auth enable lock | sudo|polkit --accept-risk
 omarchy-sl7-faceunlock auth disable sudo|polkit|lock|all
 omarchy-sl7-faceunlock lock install|apply|update|remove|status
 omarchy-sl7-faceunlock --off
@@ -84,6 +84,28 @@ future panel can call with `pkexec`.
 These are starting values. Tune `dark_threshold` and `sface_threshold` on the
 device.
 
+## sudo and polkit are opt-in
+
+The lock screen is the default and the only stack the wizard offers by
+default. Face unlock for sudo and polkit is a separate, explicit choice with
+this warning:
+
+> Any program running as you can impersonate your face to sudo/admin prompts
+> (the IR camera is reachable from your user session). Use only if you accept
+> this.
+
+The wizard asks for each separately (default No), "Use face unlock for..."
+repeats the warning, and the CLI needs `auth enable sudo --accept-risk` (or a
+typed `yes` on a terminal). Existing sudo and polkit configuration is never
+removed on upgrade. When either is on, `status` shows the warning in yellow and
+the way out: `omarchy-sl7-faceunlock auth disable sudo` (or `polkit`).
+
+The bridge also watches for the likely attack: when another process holds the
+loopback it feeds (EBUSY on open or on setting the output format) it logs the
+holder and writes `/run/sl7-ir-bridge/foreign-writer`. `status` (and
+`sl7-doctor`) then show a red "foreign writer on the IR camera" line with the
+holder; `status --json` has `foreign_writer`.
+
 ## Passwords for adding and removing faces
 
 Adding, removing or clearing faces, changing settings and turning a stack on
@@ -97,24 +119,45 @@ tightens.
 
 ## What each toggle edits (research section 6)
 
-All lines are `sufficient`, inside a marked block placed above the first
-`auth` line, so above `include system-auth` (pam_unix and faillock):
+Each block sits above the first `auth` line, so above `include system-auth`
+(pam_unix and faillock), and carries its own pam_faillock lines so face
+attempts count toward the same lockout as password attempts:
 
 ```
 # sl7-faceunlock BEGIN (managed by omarchy-sl7-faceunlock; do not edit)
-auth      [success=1 default=ignore] pam_exec.so quiet /usr/lib/sl7-faceunlock/lid-closed
-auth      sufficient pam_howdy.so workaround=native
+auth      [success=4 default=ignore] pam_exec.so quiet /usr/lib/sl7-faceunlock/lid-closed
+auth      [success=ok auth_err=die default=ignore] pam_faillock.so preauth
+auth      [success=1 auth_err=ok default=2] pam_howdy.so workaround=native
+auth      [default=1] pam_faillock.so authfail
+auth      sufficient pam_faillock.so authsucc
 # sl7-faceunlock END
 ```
 
-- **sudo**: `/etc/pam.d/sudo`, `workaround=native`.
-- **polkit**: `/etc/pam.d/polkit-1`, copied from `/usr/lib/pam.d/polkit-1` when
+Lid closed skips the block. A locked-out account stops at `preauth` (no
+password fallback while locked; a faillock fault is ignored, never fatal). A
+face match skips `authfail`, resets the failure record in `authsucc` and ends
+the stack as `sufficient` did. A non-match records a failure and falls through
+to the password stack, which still works (until the lockout trips). Anything
+else (module skipped, camera unavailable, the `abort_if_ssh` password-only
+path the app uses) jumps over the faillock lines and counts nothing. The
+lockout limits come from `/etc/security/faillock.conf` (by default 3 failures,
+10 minutes), shared with the password. The lock screen process runs as you:
+faillock can only count there once a tally file exists, so check
+`faillock --user $USER` after a few failed face attempts on the SL7. Clear a
+lockout with `sudo faillock --user $USER --reset`.
+
+Blocks written by an older version have no faillock lines. They keep working and
+are not changed on upgrade; `status` lists them. Re-run
+`omarchy-sl7-faceunlock auth enable <stack>` to bring one up to date.
+
+- **sudo** (opt-in, see below): `/etc/pam.d/sudo`, `workaround=native`.
+- **polkit** (opt-in, see below): `/etc/pam.d/polkit-1`, copied from `/usr/lib/pam.d/polkit-1` when
   absent, no workaround (`native-input` would inject Enter into the focused
   window). Also makes sure the polkit-agent-helper sandbox lets the camera
   through: it uses howdy-next's own drop-in when present, otherwise writes
   `/etc/systemd/system/polkit-agent-helper@.service.d/10-sl7-faceunlock.conf`.
-- **lock**: a new `/etc/pam.d/omarchy-lock-face` (lid gate, pam_howdy
-  sufficient, pam_deny, `account include system-local-login`). The stock
+- **lock** (the default): a new `/etc/pam.d/omarchy-lock-face` (lid gate,
+  faillock, pam_howdy, pam_deny, `account include system-local-login`). The stock
   password context is never touched.
 - **Never touched**: login, SDDM, su, sshd.
 
@@ -157,10 +200,10 @@ screen returns.
 ## Safety notes
 
 - Face unlock is weaker than your password. It never replaces it: the
-  password prompt is always the fallback, and face lines are `sufficient`.
-- A face or fingerprint success bypasses faillock (it sits above
-  `pam_faillock`). The lock screen caps attempts; sudo has no cap beyond the
-  4 s timeout.
+  password prompt is always the fallback.
+- Face attempts go through pam_faillock (preauth, authfail, authsucc), so
+  repeated non-matches lock the account out like repeated wrong passwords. A
+  covered camera counts as a non-match.
 - Each extra look slightly raises the false accept surface: keep the set small.
 - Models are SFace embeddings in `/etc/howdy/models/<user>.dat` (0600,
   root-only, not encrypted). Enrolment never writes images. `Test
@@ -204,6 +247,6 @@ parsing of `howdy list --plain`, argument validation of the root helper, the
 CLI end to end with a fake `howdy`, and the lock overlay against a clone of
 the plugin at `e5e5402` (set `SL7_TEST_NATE_REPO` to use a local clone).
 Hooks: `SL7_PAM_DIR`, `SL7_VENDOR_PAM_DIR`, `SL7_STATE_DIR`, `SL7_PAM_MODULE`,
-`SL7_LID_GATE`, `SL7_LID_STATE`, `SL7_HOWDY_BIN`, `SL7_HOWDY_CONFIG`,
+`SL7_FAILLOCK_MODULE`, `SL7_BRIDGE_FOREIGN_FILE`, `SL7_LID_GATE`, `SL7_LID_STATE`, `SL7_HOWDY_BIN`, `SL7_HOWDY_CONFIG`,
 `SL7_MENU_FILE`, `SL7_PLUGIN_DIR`, `SL7_ASSUME_ROOT=1`, `SL7_NO_SYSTEMCTL=1`.
 The hooks are ignored when running as root.

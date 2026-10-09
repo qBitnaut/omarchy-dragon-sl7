@@ -435,5 +435,19 @@ elif [[ -d ${ir_busy%/*} ]]; then
   pass "sl7-ir-bridge is not stuck in EBUSY"
 fi
 
+# Foreign writer on the IR loopback. sl7-ir-bridge writes this file when opening
+# the loopback (or setting its format) fails with EBUSY: another process holds
+# the node it must write to and could feed the consumers its own frames.
+ir_foreign=${SL7_IR_BRIDGE_FOREIGN:-/run/sl7-ir-bridge/foreign-writer}
+if [[ -r $ir_foreign ]]; then
+  foreign_since=$(sed -n 's/^since=//p' "$ir_foreign")
+  fail "foreign writer on the IR camera since $(date -d "@${foreign_since:-0}" '+%F %T' 2>/dev/null || echo '?'): another process holds the loopback sl7-ir-bridge writes to, so the frames face unlock sees may not be the camera's. Find and stop the holder, then: sudo systemctl restart sl7-ir-bridge"
+  while IFS= read -r foreign_line; do
+    printf 'INFO  IR loopback holder: %s\n' "$foreign_line"
+  done < <(sed -n '3,$p' "$ir_foreign")
+elif [[ -d ${ir_foreign%/*} ]]; then
+  pass "no foreign writer on the IR camera"
+fi
+
 ((fails == 0)) && echo "sl7-doctor: all checks passed" || echo "sl7-doctor: $fails check(s) failed"
 ((fails == 0))
