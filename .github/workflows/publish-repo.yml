@@ -34,14 +34,20 @@ concurrency:
 
 env:
   TAG: repo-aarch64
+  # archlinux:base, pinned by digest (update by looking up the new digest).
+  ARCH_IMAGE: archlinux:base@sha256:4e77cf2ea5f410e6f8be5abf93ccf17ce2436e87a138c167208356711a405dbd
 
 jobs:
   publish:
+    # Manual runs only from main (the signing environment is also limited to main).
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
+    # Holds the signing secrets (REPO_SIGNING_KEY, REPO_SIGNING_KEY_ID); the
+    # environment only deploys from main. See SECURITY.md.
+    environment: release
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -139,11 +145,17 @@ jobs:
           REPO_SIGNING_KEY_ID: ${{ secrets.REPO_SIGNING_KEY_ID }}
         run: |
           set -euo pipefail
+          # archlinux:base is pinned by digest (multi-arch index; the runner is
+          # x86_64). The container needs no network (repo-build.sh only reads and
+          # writes /pool), so it gets none, no capabilities, a read-only root and
+          # runs as the runner user so /pool needs no chown.
           docker run --rm \
+            --network none --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp:rw,mode=1777 -e HOME=/tmp \
+            --user "$(id -u):$(id -g)" \
             -v "$PWD:/w:ro" -v "$PWD/pool:/pool" \
             -e REPO_SIGNING_KEY -e REPO_SIGNING_KEY_ID -e GITHUB_ACTIONS \
-            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-            archlinux:base bash -euc '
+            "$ARCH_IMAGE" bash -euc '
               for c in repo-add vercmp bsdtar gpg; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }; done
               exec bash /w/tools/repo/repo-build.sh /pool
             '

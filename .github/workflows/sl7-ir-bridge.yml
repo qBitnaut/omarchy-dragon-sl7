@@ -10,38 +10,31 @@ on:
 permissions:
   contents: read
 
+env:
+  # Arch Linux ARM build environment (omacom/omarchy-pkg-builder, aarch64),
+  # pinned by digest, the same image as linux-sl7.
+  BUILDER_IMAGE: ghcr.io/omacom/omarchy-pkg-builder@sha256:a0cedbe8fb2f15aa34217ddd8a74a5e12003dc442f16f1825ab2b9e023488a63
+
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-
-      # The runner is native aarch64; Arch Linux ARM has no official Docker
-      # image, so import the ALARM root filesystem tarball as one.
-      - name: Bootstrap ALARM container image
-        run: |
-          set -euo pipefail
-          base=http://os.archlinuxarm.org/os
-          curl -fsSL -O "$base/ArchLinuxARM-aarch64-latest.tar.gz"
-          curl -fsSL -O "$base/ArchLinuxARM-aarch64-latest.tar.gz.md5"
-          md5sum -c ArchLinuxARM-aarch64-latest.tar.gz.md5
-          docker import ArchLinuxARM-aarch64-latest.tar.gz alarm:latest
-          rm -f ArchLinuxARM-aarch64-latest.tar.gz
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Build package in ALARM container
         run: |
           set -euo pipefail
           mkdir -p out
-          docker run --rm \
+          docker run --rm --platform linux/arm64 --user 0 \
             -v "$PWD/pkgs/sl7-ir-bridge:/src:ro" \
             -v "$PWD/out:/out" \
-            alarm:latest bash -euxc '
-              sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
-              pacman-key --init
-              pacman-key --populate archlinuxarm
+            "$BUILDER_IMAGE" bash -euxc '
+              grep -q "^DisableSandbox" /etc/pacman.conf || sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
               pacman -Syu --noconfirm --needed base-devel linux-api-headers
-              useradd -m builder
+              id builder >/dev/null 2>&1 || useradd -m builder
               echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
               cp -r /src /home/builder/build
               chown -R builder:builder /home/builder/build
@@ -60,7 +53,7 @@ jobs:
           mkdir x && tar -C x -xf "$pkg"
           file x/usr/bin/sl7-ir-bridge | grep -q 'ARM aarch64'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sl7-ir-bridge-aarch64
           path: out/*.pkg.tar.*
