@@ -52,16 +52,30 @@ impl SleepLog {
 
     pub fn load(path: &Path) -> SleepLog {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        let mut items: Vec<Sleep> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let mut items: Vec<Sleep> = Vec::new();
+        let mut bad = 0usize;
+        for l in text.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str(l) {
+                Ok(s) => items.push(s),
+                Err(_) => bad += 1,
+            }
+        }
         let total = items.len();
-        if total > KEEP + 100 {
-            items.drain(0..total - KEEP);
+        if bad > 0 || total > KEEP + 100 {
+            // Rewriting drops the lines we cannot parse: keep the original first.
+            if bad > 0 {
+                let _ = std::fs::copy(path, path.with_file_name(format!("sleeps.jsonl.bad-{}", util::now_secs() as u64)));
+                eprintln!("sl7-batteryd: {} unreadable line(s) in {}; original kept as .bad-<ts>", bad, path.display());
+            }
+            if total > KEEP + 100 {
+                items.drain(0..total - KEEP);
+            }
             let body: String = items
                 .iter()
                 .filter_map(|s| serde_json::to_string(s).ok())
                 .map(|l| l + "\n")
                 .collect();
-            let _ = std::fs::write(path, body);
+            let _ = util::write_atomic(path, body.as_bytes());
         }
         SleepLog { path: Some(path.to_path_buf()), items }
     }

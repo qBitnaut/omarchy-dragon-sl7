@@ -13,7 +13,8 @@ use sl7_batteryd::app::{App, Event, Paths};
 use sl7_batteryd::{monitor, sig};
 
 const SAMPLE_EVERY: Duration = Duration::from_secs(20);
-const FLUSH_EVERY: Duration = Duration::from_secs(300);
+/// Writes are a few dirty 24-byte slots, so flush every minute: a crash costs at most that.
+const FLUSH_EVERY: Duration = Duration::from_secs(60);
 const MAX_LINE: u64 = 64 * 1024;
 
 fn socket_path() -> PathBuf {

@@ -15,17 +15,28 @@ function _num(v) {
     return isNaN(n) ? null : n
 }
 
-// Discharge rate in watts: the daemon's EWMA of the draw blended 70/30 with the average
-// draw over AWAKE time since unplug (suspend is excluded, so a night asleep does not make
-// the estimate optimistic). With less than 15 minutes of awake data the EWMA alone.
-function blendRate(ewma, avgAwakeW, awakeS) {
+// Discharge rate in watts, built to ride out short bursts (a package update, a shell
+// restart) and still follow a genuinely heavier workload.
+//   ewma     the daemon's EWMA of the live draw (12 min time constant)
+//   avg      the average draw over AWAKE time since the unplug (suspend excluded; the daemon
+//            keeps it across restarts)
+//   awakeS   the awake seconds behind `avg`
+//   recentW  the median of the last 30 awake minutes' draw (null while there is little)
+// recent = 0.75 * recentW + 0.25 * ewma, or the EWMA alone without recentW. With 30+ minutes
+// of awake coverage the EWMA is first capped at twice the average. The average's weight grows
+// with its coverage: w = clamp(awakeS / 3600, 0.3, 0.5); rate = w * avg + (1 - w) * recent.
+// Under five awake minutes (or no average) it is just `recent`.
+function blendRate(ewma, avgAwakeW, awakeS, recentW) {
     var e = _num(ewma)
     var a = _num(avgAwakeW)
     var awake = _num(awakeS)
-    if (e === null && a === null) return null
-    if (e === null) return a
-    if (a === null || awake === null || awake < 900) return e
-    return 0.7 * e + 0.3 * a
+    var m = _num(recentW)
+    if (e !== null && a !== null && awake !== null && awake >= 1800) e = Math.min(e, 2 * a)
+    var recent = m === null ? e : (e === null ? m : 0.75 * m + 0.25 * e)
+    if (recent === null) return a
+    if (a === null || awake === null || awake < 300) return recent
+    var w = Math.min(0.5, Math.max(0.3, awake / 3600))
+    return w * a + (1 - w) * recent
 }
 
 // "≈ 5 days" / "≈ 18h" for the time left if the machine slept from now on, or "" when
@@ -107,7 +118,7 @@ function tableAt(table, t) {
 //   status: the daemon's status object; nowMs: Date.now()
 // Returns { mode: "discharging"|"charging"|"none", ok, rateW, seconds, endMs, label,
 //           target, table }. `ok` is false when there is no trustworthy figure (rate
-// below 0.3 W or less than five minutes of data); label is then "—".
+// below 0.3 W or less than five minutes of (awake) data); label is then "—".
 function estimate(status, nowMs) {
     var none = { mode: "none", ok: false, rateW: null, seconds: null, endMs: null, label: "—", target: null, table: null }
     if (!status || status.present === false) return none
@@ -115,9 +126,11 @@ function estimate(status, nowMs) {
     var full = _num(status.energy_full_wh)
     if (charge === null || full === null) return none
     if (status.flow === "discharging") {
-        var rate = blendRate(status.ewma_w, status.avg_awake_w_since_unplug, status.awake_s_since_unplug)
+        var rate = blendRate(status.ewma_w, status.avg_awake_w_since_unplug, status.awake_s_since_unplug, status.recent_w)
         var since = _num(status.since_unplug_s)
-        var enough = since === null ? false : since >= MIN_DATA_S
+        var awakeS = _num(status.awake_s_since_unplug)
+        // Learning: under five minutes on battery, or under five awake minutes behind the figure.
+        var enough = since === null ? false : since >= MIN_DATA_S && (awakeS === null || awakeS >= MIN_DATA_S)
         var secs = enough ? secondsToEmpty(charge, full, rate) : null
         var r = { mode: "discharging", ok: secs !== null, rateW: rate, seconds: secs, endMs: null, label: "—", target: 0, table: null }
         if (secs !== null) {

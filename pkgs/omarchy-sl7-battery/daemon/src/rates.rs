@@ -7,11 +7,27 @@
 //! as awake when the gap is at most `GAP_S` (three sampling intervals) and no sleep record
 //! overlaps it; anything else is a suspend (or a stalled daemon) and is left out.
 
+use serde::{Deserialize, Serialize};
+
 pub const TAU_S: f64 = 720.0;
 /// Nominal sampling interval of the daemon.
 pub const SAMPLE_S: f64 = 20.0;
 /// A gap between samples longer than this is not awake time.
 pub const GAP_S: f64 = 3.0 * SAMPLE_S;
+
+/// The part of the rate model that must survive a daemon restart (package update, crash,
+/// reboot): the unplug point, the awake accumulators and the EWMA with its timestamp.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct RatesSnap {
+    pub unplug_ts: f64,
+    pub unplug_wh: f64,
+    pub awake_wh: f64,
+    pub awake_s: f64,
+    pub ewma_w: Option<f64>,
+    /// Timestamp of the last sample folded into the numbers above.
+    pub ts: f64,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct Rates {
@@ -95,6 +111,36 @@ impl Rates {
         self.last_ts = Some(ts);
         self.last_dis = discharging;
         self.last_chg = charging;
+    }
+
+    /// What to persist, while discharging with a known unplug point.
+    pub fn snapshot(&self) -> Option<RatesSnap> {
+        if !self.last_dis {
+            return None;
+        }
+        let (unplug_ts, unplug_wh) = self.unplug?;
+        Some(RatesSnap {
+            unplug_ts,
+            unplug_wh,
+            awake_wh: self.awake_wh,
+            awake_s: self.awake_s,
+            ewma_w: self.dis_ewma,
+            ts: self.last_ts?,
+        })
+    }
+
+    /// Resumes an unplug episode after a restart (from a snapshot, or from the history
+    /// ring). It must run before the first `update`; that update then sees a discharging
+    /// battery that was already discharging, so nothing is reset, and the gap since `ts`
+    /// is judged like any other (a long one is not awake time).
+    pub fn restore(&mut self, unplug: (f64, f64), awake_wh: f64, awake_s: f64, ewma_w: Option<f64>, ts: Option<f64>) {
+        self.unplug = Some(unplug);
+        self.awake_wh = awake_wh.max(0.0);
+        self.awake_s = awake_s.max(0.0);
+        self.dis_ewma = ewma_w;
+        self.last_ts = ts;
+        self.last_draw = None;
+        self.last_dis = true;
     }
 
     /// Seeds the unplug point (inferred from history after a daemon restart).
@@ -258,6 +304,54 @@ mod tests {
         r.seed_unplug(100.0, 40.0);
         r.update(200.0, 0.0, true, false, Some(5.0), None, Some(39.0));
         assert_eq!(r.unplug, Some((100.0, 40.0)));
+    }
+
+    #[test]
+    fn restart_keeps_the_awake_accumulators() {
+        let mut r = Rates::default();
+        // Three awake hours at 5 W.
+        let end = run(&mut r, 0.0, 3.0 * 3600.0, 5.0, 50.0);
+        let snap = r.snapshot().unwrap();
+        // The snapshot goes through the state file as JSON.
+        let snap: RatesSnap = serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        // The daemon restarts 8 s later and a burst of 14 W follows.
+        let mut r2 = Rates::default();
+        r2.restore((snap.unplug_ts, snap.unplug_wh), snap.awake_wh, snap.awake_s, snap.ewma_w, Some(snap.ts));
+        let t = run(&mut r2, end + 8.0, end + 8.0 + 600.0, 14.0, 40.0);
+        assert!(t > end);
+        assert_eq!(r2.unplug, Some((0.0, 50.0)));
+        let awake = r2.awake_s_since_unplug().unwrap();
+        assert!((awake - (10800.0 + 600.0)).abs() < 60.0, "{}", awake);
+        let avg = r2.avg_awake_w().unwrap();
+        assert!(avg > 5.3 && avg < 5.6, "{}", avg);
+        // The EWMA continued from its saved value (5 W) instead of restarting at 14 W.
+        let e = r2.dis_ewma.unwrap();
+        assert!(e > 9.0 && e < 11.0, "{}", e);
+        // Without the restore the same restart would have started from nothing.
+        let mut fresh = Rates::default();
+        run(&mut fresh, end + 8.0, end + 8.0 + 600.0, 14.0, 40.0);
+        assert!(fresh.awake_s_since_unplug().unwrap() < 700.0);
+    }
+
+    #[test]
+    fn restore_gap_is_not_awake_time() {
+        let mut r = Rates::default();
+        r.restore((0.0, 50.0), 100.0, 7200.0, Some(5.0), Some(1000.0));
+        // First sample 30 minutes later: not awake, EWMA moves by one nominal step only.
+        r.update(2800.0, 0.0, true, false, Some(14.0), None, Some(45.0));
+        assert_eq!(r.awake_s_since_unplug(), Some(7200.0));
+        let e = r.dis_ewma.unwrap();
+        assert!(e > 5.0 && e < 5.6, "{}", e);
+    }
+
+    #[test]
+    fn snapshot_only_while_discharging() {
+        let mut r = Rates::default();
+        assert!(r.snapshot().is_none());
+        run(&mut r, 0.0, 100.0, 5.0, 50.0);
+        assert!(r.snapshot().is_some());
+        r.update(200.0, 0.0, false, true, None, Some(30.0), Some(50.0));
+        assert!(r.snapshot().is_none());
     }
 
     #[test]

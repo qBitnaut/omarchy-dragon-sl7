@@ -115,15 +115,37 @@ pushes are `{"type":"push","topic":"status"|"config","data":...}`.
 | `config.get` / `config.set` | `{base_rev, patch:{auto_saver:{enabled, threshold}}}` | config and `rev`; `conflict` if the rev is stale |
 | `profile.set` | `{profile}` | sets the profile through Omarchy so it is remembered per power source |
 
-**How the time left works.** The rate is 70% the daemon's EWMA of the live draw (time constant
-12 min) plus 30% the average draw over *awake* time since the unplug, so a night asleep at
-0.3 W does not make the estimate optimistic. Awake time is integrated from consecutive samples
-only: an interval counts when the gap is at most 60 s (three sampling intervals) and no sleep
-record overlaps it. After a suspend the EWMA keeps its pre-sleep value and moves by one
-nominal sample step, not by the sleep length. With under 15 minutes of awake data the EWMA is
-used alone; under five minutes since the unplug, or below 0.3 W, there is no estimate. The
-Details tab also shows "Time left if asleep", from the measured suspend draw of the last 7
-days of on-battery sleeps.
+**How the time left works.** Two figures are blended. The *average* is the draw over AWAKE
+time since the unplug: awake time is integrated from consecutive samples only (an interval counts
+when the gap is at most 60 s and no sleep record overlaps it), so a night asleep at 0.3 W does
+not make the estimate optimistic. The *recent* figure is `0.75 x` the median of the last 30
+awake minutes' draw (from the one-minute history; suspended minutes have no samples) `+ 0.25 x`
+the EWMA of the live draw (time constant 12 min). A burst of 10-15 minutes, such as a package
+update or a shell restart, moves the median not at all and the EWMA only a quarter of the way.
+With 30 minutes or more of awake coverage the EWMA is first capped at twice the average. The
+average's weight grows with its coverage, `w = clamp(awake_s / 3600, 0.3, 0.5)`:
+
+    rate = w x average + (1 - w) x recent        time left = energy now / rate
+
+A sustained heavier load moves the median within about 15 minutes: 30 minutes at 12 W after
+hours at 5 W takes the rate past 9 W. Under five awake minutes, or under five minutes on battery,
+or below 0.3 W there is no estimate ("learning the rate"). The awake accumulators (energy,
+seconds, unplug point, EWMA and when it was last updated) are saved in `state.json` every minute
+and resumed after a restart or an update when the battery is still discharging, no AC time shows
+in the history since the saved unplug, and the gap since the last saved sample is under 10
+minutes or covered by a recorded sleep. Otherwise (first run of this version, a long outage) they
+are rebuilt from the one-minute history: buckets with discharge samples and no sleep. After a
+suspend the EWMA keeps its pre-sleep value and moves by one nominal sample step. The Details tab
+also shows "Time left if asleep", from the measured suspend draw of the last 7 days of on-battery
+sleeps.
+
+**Your history is kept.** Everything lives in `~/.local/state/sl7-battery/` (`m1.ring`,
+`m15.ring`, `sleeps.jsonl`, `state.json`) and survives package updates, restarts, crashes and
+reboots. Dirty history is flushed every minute and on SIGTERM/SIGINT/SIGHUP (the unit allows 20 s
+to stop), `state.json` and whole-file rewrites go through a temporary file and a rename, and
+the ring header carries a version: older versions and changed capacities are migrated in place,
+and a file that cannot be understood is renamed to `<name>.bad-<unix time>` instead of being
+truncated (the daemon logs it to the journal). `status.get` also carries `recent_w`.
 
 `since_full` is `{full_ts, secs, used_pct, asleep_s, awake_s, on_ac}`, or null while the battery is
 full. "Full" is status Full, 99% or more, or the charge limit when one is set.

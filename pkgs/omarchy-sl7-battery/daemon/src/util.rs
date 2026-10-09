@@ -12,6 +12,42 @@ pub fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Moves an unreadable data file aside as `<name>.bad-<unix time>` so it is never truncated
+/// or overwritten, and says so on stderr (the journal). Returns the new path.
+pub fn move_aside(path: &Path, why: &str) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let mut stamp = now_secs() as u64;
+    loop {
+        let dest = path.with_file_name(format!("{}.bad-{}", name, stamp));
+        if !dest.exists() {
+            return match std::fs::rename(path, &dest) {
+                Ok(()) => {
+                    eprintln!("sl7-batteryd: {} ({}); kept as {}", path.display(), why, dest.display());
+                    Some(dest)
+                }
+                Err(e) => {
+                    eprintln!("sl7-batteryd: cannot move {} aside: {}", path.display(), e);
+                    None
+                }
+            };
+        }
+        stamp += 1;
+    }
+}
+
+/// Writes `bytes` to `<path>.tmp`, syncs it and renames it over `path`, so a crash leaves
+/// either the old file or the new one, never half of one.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{}.tmp", name));
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
+}
+
 pub fn read_trim(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }

@@ -2,16 +2,24 @@
 //! buckets for 1 year. A slot is `bucket_index % capacity`; a record is valid only when
 //! its stored bucket index matches, so stale slots read as gaps. The whole ring lives in
 //! memory; only dirty slots are written back by `flush`.
+//!
+//! The file is never thrown away silently. A readable file of an older version, another
+//! capacity or a ragged length is loaded and rewritten whole (atomically); a file that
+//! cannot be understood is renamed to `<name>.bad-<unix time>` before a fresh one is
+//! started; a file that cannot be read at all is left untouched and not written to.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::fs::OpenOptions;
+use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 pub const REC_SIZE: usize = 24;
 pub const HEADER: usize = 16;
 const MAGIC: &[u8; 4] = b"SL7B";
-const VERSION: u16 = 1;
+/// Version 2 = the record layout of version 1 plus in-place migration on open. Versions
+/// MIN_VERSION..=VERSION share the record layout and load as they are.
+const VERSION: u16 = 2;
+const MIN_VERSION: u16 = 1;
 pub const NONE_U16: u16 = 0xFFFF;
 pub const NONE_I16: i16 = i16::MIN;
 
@@ -234,27 +242,59 @@ impl Ring {
         Ring { path: None, res, cap, recs: vec![Rec::default(); cap], dirty: Vec::new(), needs_header: false }
     }
 
-    /// Opens (or prepares) a ring file. A missing, short or mismatched file starts empty
-    /// and is created by the first flush.
+    /// Opens (or prepares) a ring file. Missing or empty: starts empty and is created by the
+    /// first flush. See the module docs for everything else.
     pub fn open(path: &Path, res: u32, cap: usize) -> Ring {
         let mut ring = Ring::new_mem(res, cap);
         ring.path = Some(path.to_path_buf());
         ring.needs_header = true;
-        let mut data = Vec::new();
-        let read_ok = File::open(path).and_then(|mut f| f.read_to_end(&mut data)).is_ok();
-        if read_ok && data.len() == HEADER + cap * REC_SIZE && &data[0..4] == MAGIC {
-            let ver = u16::from_le_bytes([data[4], data[5]]);
-            let rsize = u16::from_le_bytes([data[6], data[7]]) as usize;
-            let r = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-            let c = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
-            if ver == VERSION && rsize == REC_SIZE && r == res && c == cap {
-                for i in 0..cap {
-                    let off = HEADER + i * REC_SIZE;
-                    ring.recs[i] = Rec::decode(&data[off..off + REC_SIZE]);
-                }
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return ring,
+            Err(e) => {
+                // Cannot tell what is in it: leave it alone and keep this run in memory.
+                eprintln!("sl7-batteryd: cannot read {}: {}; history not saved this run", path.display(), e);
+                ring.path = None;
                 ring.needs_header = false;
+                return ring;
+            }
+        };
+        if data.is_empty() {
+            return ring;
+        }
+        let header_ok = data.len() >= HEADER && &data[0..4] == MAGIC;
+        let ver = if header_ok { u16::from_le_bytes([data[4], data[5]]) } else { 0 };
+        let rsize = if header_ok { u16::from_le_bytes([data[6], data[7]]) as usize } else { 0 };
+        let r = if header_ok { u32::from_le_bytes([data[8], data[9], data[10], data[11]]) } else { 0 };
+        let c = if header_ok { u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize } else { 0 };
+        if !(header_ok && (MIN_VERSION..=VERSION).contains(&ver) && rsize == REC_SIZE && r == res && c > 0) {
+            let why = if header_ok {
+                format!("version {}, record size {}, step {} s, {} slots: not understood", ver, rsize, r, c)
+            } else {
+                "not a ring file".to_string()
+            };
+            crate::util::move_aside(path, &why);
+            return ring;
+        }
+        // Load every complete record that is there, re-slotting for a changed capacity.
+        let have = ((data.len() - HEADER) / REC_SIZE).min(c);
+        for i in 0..have {
+            let off = HEADER + i * REC_SIZE;
+            let rec = Rec::decode(&data[off..off + REC_SIZE]);
+            if rec.t != 0 && rec.n > 0 {
+                let s = ring.slot(rec.t);
+                if ring.recs[s].t < rec.t {
+                    ring.recs[s] = rec;
+                }
             }
         }
+        let exact = data.len() == HEADER + c * REC_SIZE;
+        if !exact {
+            // Truncated or padded: keep the original next to the rewritten file.
+            crate::util::move_aside(path, "unexpected length; its records were loaded and re-saved");
+        }
+        // A matching current file is used in place; anything else is rewritten whole.
+        ring.needs_header = !(exact && ver == VERSION && c == cap);
         ring
     }
 
@@ -287,28 +327,79 @@ impl Ring {
         if self.dirty.is_empty() && !self.needs_header {
             return Ok(());
         }
-        let file = OpenOptions::new().write(true).create(true).truncate(false).open(&path)?;
         if self.needs_header {
-            // Truncate first so nothing of a mismatched old file survives as records.
-            file.set_len(0)?;
-            file.set_len((HEADER + self.cap * REC_SIZE) as u64)?;
-            let mut h = [0u8; HEADER];
-            h[0..4].copy_from_slice(MAGIC);
-            h[4..6].copy_from_slice(&VERSION.to_le_bytes());
-            h[6..8].copy_from_slice(&(REC_SIZE as u16).to_le_bytes());
-            h[8..12].copy_from_slice(&self.res.to_le_bytes());
-            h[12..16].copy_from_slice(&(self.cap as u32).to_le_bytes());
-            file.write_all_at(&h, 0)?;
-            // A fresh file holds only what is in memory (usually nothing or the current bucket).
-            self.dirty = (0..self.cap).filter(|i| self.recs[*i].t != 0).collect();
+            // Whole file, written aside and renamed in: a crash leaves the old file or the
+            // new one, never a truncated one.
+            let mut buf = vec![0u8; HEADER + self.cap * REC_SIZE];
+            buf[0..4].copy_from_slice(MAGIC);
+            buf[4..6].copy_from_slice(&VERSION.to_le_bytes());
+            buf[6..8].copy_from_slice(&(REC_SIZE as u16).to_le_bytes());
+            buf[8..12].copy_from_slice(&self.res.to_le_bytes());
+            buf[12..16].copy_from_slice(&(self.cap as u32).to_le_bytes());
+            for (i, rec) in self.recs.iter().enumerate() {
+                if rec.t != 0 {
+                    let off = HEADER + i * REC_SIZE;
+                    buf[off..off + REC_SIZE].copy_from_slice(&rec.encode());
+                }
+            }
+            crate::util::write_atomic(&path, &buf)?;
+            self.dirty.clear();
             self.needs_header = false;
+            return Ok(());
         }
+        let file = OpenOptions::new().write(true).open(&path)?;
         self.dirty.sort_unstable();
         self.dirty.dedup();
         for s in self.dirty.drain(..) {
             file.write_all_at(&self.recs[s].encode(), (HEADER + s * REC_SIZE) as u64)?;
         }
-        Ok(())
+        file.sync_data()
+    }
+
+    /// Median draw (W) of the last `want` buckets that hold discharge samples and were not
+    /// on AC, looking back at most `max_back` buckets from the one holding `now`. Buckets
+    /// without samples (suspend) are skipped, so this is awake-only. None with under 5.
+    pub fn recent_dis_median(&self, now: f64, want: usize, max_back: usize) -> Option<f64> {
+        let top = (now / self.res as f64) as i64;
+        let mut v: Vec<f64> = Vec::new();
+        let mut i = top;
+        while i > 0 && top - i < max_back as i64 && v.len() < want {
+            if let Some(r) = self.get(i as u32) {
+                if r.dis_w != NONE_U16 && r.dis_n > 0 && r.ac < 50 {
+                    v.push(r.dis_w as f64 / 100.0);
+                }
+            }
+            i -= 1;
+        }
+        if v.len() < 5 {
+            return None;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
+    }
+
+    /// Awake discharge seconds and energy (Wh) in the complete buckets that start in
+    /// [t0, t1): each bucket counts its discharge samples at the nominal 20 s, at most 60 s.
+    /// `asleep(start, end)` says how long a bucket's span was spent suspended; such buckets
+    /// are skipped.
+    pub fn awake_energy(&self, t0: f64, t1: f64, asleep: &dyn Fn(f64, f64) -> f64) -> (f64, f64) {
+        let res = self.res as f64;
+        let lo = (t0 / res).ceil().max(1.0) as i64;
+        let hi = (t1 / res).floor() as i64;
+        let (mut wh, mut secs) = (0.0, 0.0);
+        let mut i = lo;
+        while i < hi && i - lo < self.cap as i64 {
+            if let Some(r) = self.get(i as u32) {
+                if r.dis_w != NONE_U16 && r.dis_n > 0 && r.ac < 50 && asleep(i as f64 * res, (i + 1) as f64 * res) <= 0.0 {
+                    let s = (r.dis_n as f64 * 20.0).min(res);
+                    wh += r.dis_w as f64 / 100.0 * s / 3600.0;
+                    secs += s;
+                }
+            }
+            i += 1;
+        }
+        (wh, secs)
     }
 
     /// Weighted averages of the buckets whose start lies in [t0, t1).
@@ -376,6 +467,11 @@ impl Ring {
             i -= 1;
         }
         None
+    }
+
+    /// Number of buckets holding data.
+    pub fn count(&self) -> usize {
+        self.recs.iter().filter(|r| r.t != 0 && r.n > 0).count()
     }
 
     /// The latest record present, if any.
@@ -482,9 +578,160 @@ mod tests {
         let r = again.get(7).unwrap();
         assert_eq!(r.charge, 6400);
         assert_eq!(r.dis_w, 350);
-        // A different capacity discards the file.
-        let other = Ring::open(&path, 60, 60);
-        assert!(other.get(7).is_none());
+        // A different capacity migrates: the record survives and the file is rewritten.
+        let mut other = Ring::open(&path, 60, 60);
+        assert_eq!(other.get(7).unwrap().charge, 6400);
+        other.flush().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, HEADER + 60 * REC_SIZE);
+        assert_eq!(Ring::open(&path, 60, 60).get(7).unwrap().dis_w, 350);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sl7b-ring-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn bad_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains(".bad-"))
+            .collect()
+    }
+
+    #[test]
+    fn restart_reads_back_identical() {
+        let dir = tmpdir("restart");
+        let path = dir.join("m1.ring");
+        let mut ring = Ring::open(&path, 60, 200);
+        for i in 1..150u32 {
+            let mut a = Acc::new(i);
+            a.add(&vals(100.0 - i as f64 / 2.0, Some(3.0 + (i % 7) as f64), i % 2 == 0, false));
+            ring.put(a.to_rec());
+        }
+        ring.flush().unwrap();
+        // More writes after the first flush take the in-place path.
+        let mut a = Acc::new(150);
+        a.add(&vals(20.0, Some(9.0), true, false));
+        ring.put(a.to_rec());
+        ring.flush().unwrap();
+        let again = Ring::open(&path, 60, 200);
+        assert_eq!(again.recs, ring.recs);
+        assert!(bad_files(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_version_is_migrated_not_wiped() {
+        let dir = tmpdir("old");
+        let path = dir.join("m1.ring");
+        let mut ring = Ring::open(&path, 60, 100);
+        let mut a = Acc::new(42);
+        a.add(&vals(61.0, Some(4.5), true, false));
+        ring.put(a.to_rec());
+        ring.flush().unwrap();
+        // Rewrite the header as version 1, as the first release wrote it.
+        let mut data = std::fs::read(&path).unwrap();
+        data[4..6].copy_from_slice(&1u16.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        let mut old = Ring::open(&path, 60, 100);
+        assert_eq!(old.get(42).unwrap().charge, 6100);
+        old.flush().unwrap();
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(u16::from_le_bytes([data[4], data[5]]), VERSION);
+        assert_eq!(Ring::open(&path, 60, 100).get(42).unwrap().dis_w, 450);
+        assert!(bad_files(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncated_file_is_salvaged_and_kept() {
+        let dir = tmpdir("trunc");
+        let path = dir.join("m1.ring");
+        let mut ring = Ring::open(&path, 60, 100);
+        for i in 1..10u32 {
+            let mut a = Acc::new(i);
+            a.add(&vals(50.0, Some(4.0), true, false));
+            ring.put(a.to_rec());
+        }
+        ring.flush().unwrap();
+        let data = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &data[..HEADER + 20 * REC_SIZE + 5]).unwrap();
+        let mut again = Ring::open(&path, 60, 100);
+        assert!(again.get(9).is_some() && again.get(1).is_some());
+        assert_eq!(bad_files(&dir).len(), 1);
+        again.flush().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, HEADER + 100 * REC_SIZE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_file_is_moved_aside_then_fresh() {
+        let dir = tmpdir("corrupt");
+        let path = dir.join("m1.ring");
+        std::fs::write(&path, b"this is not a ring file at all, but it is somebody's data").unwrap();
+        let mut ring = Ring::open(&path, 60, 100);
+        assert!(ring.latest().is_none());
+        let bad = bad_files(&dir);
+        assert_eq!(bad.len(), 1);
+        assert_eq!(std::fs::read(&bad[0]).unwrap(), b"this is not a ring file at all, but it is somebody's data");
+        ring.flush().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, HEADER + 100 * REC_SIZE);
+        // A header of an unknown future version is also kept, not truncated.
+        let mut data = std::fs::read(&path).unwrap();
+        data[4..6].copy_from_slice(&99u16.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        let _ = Ring::open(&path, 60, 100);
+        assert_eq!(bad_files(&dir).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_median_ignores_bursts_and_sleep_gaps() {
+        let mut ring = Ring::new_mem(60, 1000);
+        // 20 minutes at 5 W, a gap (suspend), then 10 minutes at 14 W.
+        for i in 100..120u32 {
+            let mut a = Acc::new(i);
+            a.add(&vals(70.0, Some(5.0), true, false));
+            ring.put(a.to_rec());
+        }
+        for i in 300..310u32 {
+            let mut a = Acc::new(i);
+            a.add(&vals(60.0, Some(14.0), true, false));
+            ring.put(a.to_rec());
+        }
+        let m = ring.recent_dis_median(309.5 * 60.0, 30, 600).unwrap();
+        assert!((m - 5.0).abs() < 1e-9, "{}", m);
+        // Sustained heavy load: 20 of the last 30 minutes at 14 W flips it.
+        for i in 310..320u32 {
+            let mut a = Acc::new(i);
+            a.add(&vals(60.0, Some(14.0), true, false));
+            ring.put(a.to_rec());
+        }
+        let m = ring.recent_dis_median(319.5 * 60.0, 30, 600).unwrap();
+        assert!((m - 14.0).abs() < 1e-9, "{}", m);
+        assert!(ring.recent_dis_median(50.0 * 60.0, 30, 10).is_none());
+    }
+
+    #[test]
+    fn awake_energy_skips_sleep_and_ac() {
+        let mut ring = Ring::new_mem(60, 1000);
+        for i in 10..20u32 {
+            let mut a = Acc::new(i);
+            for _ in 0..3 {
+                a.add(&vals(70.0, Some(6.0), true, false));
+            }
+            ring.put(a.to_rec());
+        }
+        let none = |_: f64, _: f64| 0.0;
+        let (wh, s) = ring.awake_energy(10.0 * 60.0, 20.0 * 60.0, &none);
+        assert!((s - 600.0).abs() < 1e-9 && (wh - 1.0).abs() < 1e-9, "{} {}", wh, s);
+        let sleepy = |t0: f64, _t1: f64| if t0 < 15.0 * 60.0 { 30.0 } else { 0.0 };
+        let (_, s) = ring.awake_energy(10.0 * 60.0, 20.0 * 60.0, &sleepy);
+        assert!((s - 300.0).abs() < 1e-9, "{}", s);
     }
 }

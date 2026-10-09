@@ -9,6 +9,9 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/usr/share/omarchy/bin
 ExecStart=/usr/lib/omarchy-sl7-battery/sl7-batteryd
 Restart=on-failure
 RestartSec=5
+# SIGTERM makes the daemon flush its history and state; give it time, then SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=20
 UMask=0077
 NoNewPrivileges=true
 

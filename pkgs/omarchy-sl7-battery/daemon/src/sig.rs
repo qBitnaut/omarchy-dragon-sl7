@@ -1,4 +1,4 @@
-//! SIGTERM/SIGINT through a self-pipe, so the daemon can flush before it exits. This is the
+//! SIGTERM/SIGINT/SIGHUP through a self-pipe, so the daemon can flush before it exits. This is the
 //! only module that uses unsafe code.
 #![allow(unsafe_code)]
 
@@ -28,6 +28,7 @@ pub fn install() -> Option<File> {
         let h = handler as extern "C" fn(libc::c_int) as usize as libc::sighandler_t;
         libc::signal(libc::SIGTERM, h);
         libc::signal(libc::SIGINT, h);
+        libc::signal(libc::SIGHUP, h);
         Some(File::from_raw_fd(fds[0]))
     }
 }

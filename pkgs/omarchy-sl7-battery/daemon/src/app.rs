@@ -11,12 +11,16 @@ use serde_json::{json, Value};
 
 use crate::auto::{Auto, AutoAct, AutoIn, SAVER};
 use crate::config::Config;
-use crate::rates::{is_full, FullTracker, Rates};
+use crate::rates::{is_full, FullTracker, Rates, RatesSnap};
 use crate::ring::{Acc, Ring, SampleVals, M15_CAP, M15_RES, M1_CAP, M1_RES};
 use crate::sleeps::{count_wake_irqs, Sleep, SleepLog};
 use crate::sys::{self, Battery};
 use crate::upower;
-use crate::util::{now_secs, round1, round2};
+use crate::util::{move_aside, now_secs, round1, round2, write_atomic};
+
+/// A restart is "short" when the gap since the last saved sample, less any recorded sleep in
+/// it, is at most this long; the persisted rate accumulators are then resumed.
+const RESTORE_GAP_S: f64 = 600.0;
 
 pub enum Event {
     Connected(u64, UnixStream),
@@ -67,6 +71,8 @@ pub struct StateFile {
     pub last_full_ts: Option<f64>,
     pub charge_at_full: Option<f64>,
     pub upower_imported: bool,
+    /// The awake accumulators of the current unplug episode (see `Rates::snapshot`).
+    pub rates: Option<RatesSnap>,
 }
 
 struct Client {
@@ -163,10 +169,13 @@ impl App {
         let mut m15 = Ring::open(&paths.state_dir.join("m15.ring"), M15_RES, M15_CAP);
         let sleeps = SleepLog::load(&paths.state_dir.join("sleeps.jsonl"));
         let state_path = paths.state_dir.join("state.json");
-        let mut state: StateFile = std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut state: StateFile = match std::fs::read_to_string(&state_path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| {
+                move_aside(&state_path, "state file not understood");
+                StateFile::default()
+            }),
+            Err(_) => StateFile::default(),
+        };
         if !state.upower_imported {
             // First run: seed the long-range chart from UPower's history, when readable.
             upower::import(&paths.upower_dir, &mut m15, now);
@@ -185,6 +194,13 @@ impl App {
                 full.charge_at_full = Some(c);
             }
         }
+        eprintln!(
+            "sl7-batteryd: history loaded from {}: {} one-minute and {} 15-minute buckets, {} sleeps",
+            paths.state_dir.display(),
+            m1.count(),
+            m15.count(),
+            sleeps.items.len()
+        );
         let bat_dir = sys::find_battery(&paths.ps);
         let saved_state = StateFile::default();
         // Persist the seeded buckets right away.
@@ -224,11 +240,15 @@ impl App {
         let _ = self.m15.flush();
         self.state.last_full_ts = self.full.last_full_ts;
         self.state.charge_at_full = self.full.charge_at_full;
+        // Until the first sample the model is empty: keep what the last run saved so the
+        // first sample can resume it.
+        if self.unplug_checked {
+            self.state.rates = self.rates.snapshot();
+        }
         if self.state != self.saved_state {
             if let Ok(text) = serde_json::to_string(&self.state) {
                 let path = self.paths.state_dir.join("state.json");
-                let tmp = self.paths.state_dir.join("state.json.tmp");
-                if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+                if write_atomic(&path, text.as_bytes()).is_ok() {
                     self.saved_state = self.state.clone();
                 }
             }
@@ -323,11 +343,14 @@ impl App {
         self.add_to_rings(ts, &vals);
         if !self.unplug_checked {
             self.unplug_checked = true;
-            if discharging {
-                if let Some(ef) = bat.energy_full_wh {
-                    if let Some((t, e)) = self.infer_unplug(ts, ef) {
-                        self.rates.seed_unplug(t, e);
-                    }
+            if discharging && !self.restore_rates(ts, bat.energy_full_wh) {
+                // No usable saved state (first run of this version, long outage): rebuild
+                // the episode from the one-minute ring. Awake = buckets with discharge
+                // samples and no recorded sleep.
+                if let Some((t, e)) = bat.energy_full_wh.and_then(|ef| self.infer_unplug(ts, ef)) {
+                    let sl = &self.sleeps;
+                    let (wh, secs) = self.m1.awake_energy(t, ts, &|a, b| sl.overlap(a, b));
+                    self.rates.restore((t, e), wh, secs, None, None);
                 }
             }
         }
@@ -337,6 +360,30 @@ impl App {
         self.snap = Snap { ts, present: true, bat, ac, screen_on, discharging, charging, full };
         self.evaluate_auto();
         self.push_status();
+    }
+
+    /// Resumes the saved rate accumulators if they belong to the unplug episode that is still
+    /// running: the gap since the last saved sample is short or explained by a recorded
+    /// sleep, and the history shows no time on AC since the saved unplug.
+    fn restore_rates(&mut self, ts: f64, energy_full_wh: Option<f64>) -> bool {
+        let snap = match self.state.rates.clone() {
+            Some(s) => s,
+            None => return false,
+        };
+        if snap.ts > ts + 5.0 || snap.unplug_ts > snap.ts {
+            return false;
+        }
+        let gap = ts - snap.ts;
+        if gap - self.sleeps.overlap(snap.ts, ts) > RESTORE_GAP_S {
+            return false;
+        }
+        if let Some((t, _)) = energy_full_wh.and_then(|ef| self.infer_unplug(ts, ef)) {
+            if t > snap.unplug_ts + 120.0 {
+                return false;
+            }
+        }
+        self.rates.restore((snap.unplug_ts, snap.unplug_wh), snap.awake_wh, snap.awake_s, snap.ewma_w, Some(snap.ts));
+        true
     }
 
     /// Timestamp of the previous sample, if there was one.
@@ -490,6 +537,7 @@ impl App {
             "health_pct": opt(health, round1),
             "power_w": opt(b.power_w, round2),
             "ewma_w": opt(self.rates.dis_ewma, round2),
+            "recent_w": opt(if s.discharging { self.m1.recent_dis_median(s.ts, 30, 180) } else { None }, round2),
             "avg_since_unplug_w": opt(self.rates.avg_since_unplug(s.ts, b.energy_now_wh), round2),
             "since_unplug_s": self.rates.since_unplug_s(s.ts).map(|v| v.round()),
             "avg_awake_w_since_unplug": opt(self.rates.avg_awake_w(), round2),
@@ -915,6 +963,85 @@ mod tests {
         let again = App::new(Paths { ..app.paths.clone() });
         let h2 = again.history_json(3600.0, 60, &[]);
         assert_eq!(h2["series"][0]["avg"][59], json!(42.0));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn bucket(app: &mut App, idx: u32, w: f64, ac: bool) {
+        let mut a = Acc::new(idx);
+        for _ in 0..3 {
+            a.add(&SampleVals { charge: Some(60.0), temp_c: None, volt_v: None, dis_w: if ac { None } else { Some(w) }, chg_w: None, screen_on: true, ac });
+        }
+        app.m1.put(a.to_rec());
+    }
+
+    #[test]
+    fn rate_accumulators_survive_a_restart() {
+        let paths = test_paths("d");
+        let root = paths.state_dir.parent().unwrap().to_path_buf();
+        let mut app = App::new(paths);
+        app.sample(false);
+        let now = now_secs();
+        app.rates.restore((now - 4.0 * 3600.0, 40.0), 15.0, 10800.0, Some(5.0), Some(now));
+        app.sample(false);
+        app.flush();
+        // A new process: same files, fresh memory.
+        let mut again = App::new(app.paths.clone());
+        again.sample(false);
+        let s = again.status_json();
+        let awake = s["awake_s_since_unplug"].as_f64().unwrap();
+        assert!((awake - 10800.0).abs() < 30.0, "{}", awake);
+        assert!((s["since_unplug_s"].as_f64().unwrap() - 4.0 * 3600.0).abs() < 30.0);
+        assert!((s["avg_awake_w_since_unplug"].as_f64().unwrap() - 5.0).abs() < 0.1);
+        // The history written before the restart is still there.
+        assert_eq!(again.history_json(3600.0, 60, &["charge".to_string()])["series"][0]["avg"][59], json!(42.0));
+        // A restart after a long outage starts the episode over from the ring instead.
+        let mut stale = app.state.clone();
+        stale.rates.as_mut().unwrap().ts -= 3600.0;
+        let mut late = App::new(app.paths.clone());
+        late.state = stale;
+        late.sample(false);
+        let awake = late.status_json()["awake_s_since_unplug"].clone();
+        assert!(awake.is_null() || awake.as_f64().unwrap() < 600.0, "{}", awake);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn first_run_seeds_awake_time_from_the_ring() {
+        let paths = test_paths("e");
+        let root = paths.state_dir.parent().unwrap().to_path_buf();
+        let mut app = App::new(paths);
+        let top = (now_secs() / 60.0) as u32;
+        bucket(&mut app, top - 61, 0.0, true);
+        for i in (top - 60)..top {
+            bucket(&mut app, i, 5.0, false);
+        }
+        // 10 minutes of burst in the middle of the hour.
+        for i in (top - 20)..(top - 10) {
+            bucket(&mut app, i, 14.0, false);
+        }
+        app.sample(false);
+        let s = app.status_json();
+        let awake = s["awake_s_since_unplug"].as_f64().unwrap();
+        assert!((awake - 3600.0).abs() <= 60.0, "{}", awake);
+        let avg = s["avg_awake_w_since_unplug"].as_f64().unwrap();
+        assert!((avg - (5.0 * 50.0 + 14.0 * 10.0) / 60.0).abs() < 0.2, "{}", avg);
+        assert!((s["recent_w"].as_f64().unwrap() - 5.0).abs() < 0.01);
+        assert!((s["since_unplug_s"].as_f64().unwrap() - 3660.0).abs() < 120.0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unreadable_state_file_is_kept_aside() {
+        let paths = test_paths("f");
+        let root = paths.state_dir.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::write(paths.state_dir.join("state.json"), "{not json").unwrap();
+        let _ = App::new(paths.clone());
+        let kept = std::fs::read_dir(&paths.state_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("state.json.bad-"));
+        assert!(kept);
         let _ = std::fs::remove_dir_all(root);
     }
 

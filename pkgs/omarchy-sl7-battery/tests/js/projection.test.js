@@ -7,13 +7,18 @@ const P = loadLib('Projection.js');
 
 const at = (d, h, m) => new Date(2026, 9, d, h, m).getTime(); // 2026-10-08 is a Thursday
 
-test('blendRate: ewma alone early, blended with the awake average once there is history', () => {
+test('blendRate: recent alone early, weighted with the awake average once there is coverage', () => {
   assert.equal(P.blendRate(null, null, 0), null);
   assert.equal(P.blendRate(5, null, 3600), 5);
-  assert.equal(P.blendRate(5, 3, 600), 5);
+  assert.equal(P.blendRate(5, 3, 200), 5);
   assert.equal(P.blendRate(5, 3, null), 5);
   assert.equal(P.blendRate(null, 3, 3600), 3);
-  assert.ok(Math.abs(P.blendRate(10, 4, 7200) - 8.2) < 1e-9);
+  // 18 min of coverage: w = 0.3, no cap yet.
+  assert.ok(Math.abs(P.blendRate(10, 4, 1080) - (0.3 * 4 + 0.7 * 10)) < 1e-9);
+  // 2 h: w = 0.5 and the EWMA is capped at 2 x 4 = 8.
+  assert.ok(Math.abs(P.blendRate(10, 4, 7200) - 6) < 1e-9);
+  // With the median: recent = 0.75 * 5 + 0.25 * 8 (capped) = 5.75.
+  assert.ok(Math.abs(P.blendRate(10, 4, 7200, 5) - (0.5 * 4 + 0.5 * 5.75)) < 1e-9);
 });
 
 test('estimate: a night asleep does not make the time left optimistic', () => {
@@ -25,9 +30,50 @@ test('estimate: a night asleep does not make the time left optimistic', () => {
   assert.equal(e.ok, true);
   assert.ok(Math.abs(e.rateW - 5) < 1e-9);
   assert.ok(Math.abs(e.seconds - 8 * 3600) < 1e-6);
-  // Too little awake time: EWMA alone.
+  // Little awake time (10 min): the average carries 30%.
   const early = P.estimate({ ...s, avg_awake_w_since_unplug: 1, awake_s_since_unplug: 600 }, at(8, 8, 0));
-  assert.equal(early.rateW, 5);
+  assert.ok(Math.abs(early.rateW - (0.3 * 1 + 0.7 * 5)) < 1e-9);
+});
+
+// Chris's case: 27.57 Wh left, daemon restarted after a package update. Persisted accumulators:
+// 3 h awake at 5 W, then a 10-minute 14 W burst; the daemon's EWMA is 10-14 W, the median of
+// the last 30 awake minutes is 5 W.
+test('estimate: a restart burst does not halve the time left', () => {
+  const base = { present: true, flow: 'discharging', charge: 55, energy_full_wh: 50.12, power_w: 3.65,
+    avg_since_unplug_w: 2, since_unplug_s: 54892, awake_s_since_unplug: 11400, avg_awake_w_since_unplug: 5.47, recent_w: 5 };
+  const left = (s) => 27.57 / P.estimate(s, at(9, 14, 0)).rateW;
+  for (const ewma of [10.1, 13.72]) {
+    const h = left({ ...base, ewma_w: ewma });
+    assert.ok(h > 4.5 && h < 5.5, 'ewma ' + ewma + ' -> ' + h + ' h');
+  }
+  const e = P.estimate({ ...base, ewma_w: 13.72 }, at(9, 14, 0));
+  assert.equal(e.ok, true);
+  // Daemon without recent_w (old build) but with the persisted average: the EWMA is capped at
+  // twice the average, so about 3.4 h rather than ~2 h.
+  const h = left({ ...base, recent_w: null, ewma_w: 13.72 });
+  assert.ok(h > 3 && h < 4, String(h));
+});
+
+test('estimate: sustained heavier load moves the estimate toward it', () => {
+  // 2 h at 5 W, then 30 min at 12 W: average 6.4 W over 2.5 h, median 12, EWMA ~11.4.
+  const s = { present: true, flow: 'discharging', charge: 60, energy_full_wh: 50, ewma_w: 11.4,
+    avg_awake_w_since_unplug: 6.4, awake_s_since_unplug: 9000, recent_w: 12, since_unplug_s: 9000 };
+  const rate = P.estimate(s, at(9, 14, 0)).rateW;
+  assert.ok(rate > 8.5 && rate < 10, String(rate));
+  assert.ok((rate - 5) / (12 - 5) > 0.5);
+  // Half-way through the burst (15 min at 12 W) the median has not flipped yet: it already moves.
+  const mid = P.estimate({ ...s, ewma_w: 8.5, recent_w: 5, avg_awake_w_since_unplug: 5.7, awake_s_since_unplug: 8100 }, at(9, 14, 0)).rateW;
+  assert.ok(mid > 5.5, String(mid));
+});
+
+test('estimate: learning while there is under five awake minutes', () => {
+  const s = { present: true, flow: 'discharging', charge: 55, energy_full_wh: 50, ewma_w: 14, since_unplug_s: 5000,
+    avg_awake_w_since_unplug: null, awake_s_since_unplug: 160 };
+  const e = P.estimate(s, at(9, 14, 0));
+  assert.equal(e.ok, false);
+  assert.equal(P.wording(s, e, at(9, 14, 0)).detail, 'learning the rate');
+  // The same after a restart with persisted accumulators shows a figure.
+  assert.equal(P.estimate({ ...s, awake_s_since_unplug: 9000, avg_awake_w_since_unplug: 5 }, at(9, 14, 0)).ok, true);
 });
 
 test('sleepLeftLabel: days, hours, minutes, unknown', () => {
@@ -70,11 +116,11 @@ test('estimate: discharging needs five minutes of data and a real rate', () => {
   const early = P.estimate(base, now);
   assert.equal(early.ok, false);
   assert.equal(early.label, '—');
-  const ok = P.estimate({ ...base, since_unplug_s: 600 }, now);
+  const ok = P.estimate({ ...base, since_unplug_s: 600, awake_s_since_unplug: 600 }, now);
   assert.equal(ok.mode, 'discharging');
   assert.equal(ok.seconds, 5 * 3600);
   assert.equal(ok.label, 'Tomorrow 1am');
-  const idle = P.estimate({ ...base, since_unplug_s: 600, ewma_w: 0.1 }, now);
+  const idle = P.estimate({ ...base, since_unplug_s: 600, awake_s_since_unplug: 600, ewma_w: 0.1 }, now);
   assert.equal(idle.ok, false);
 });
 
