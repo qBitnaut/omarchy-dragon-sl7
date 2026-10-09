@@ -1,0 +1,110 @@
+--- a/Service.qml
++++ b/Service.qml
+@@ -46,7 +46,12 @@
+   property bool strandedLock: false
+   property bool strandedLockResolved: false
+
+-  readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
++  // sl7-faceunlock: lock-state sync. Quickshell 0.3.2 emits no lockStateChanged
++  // on a local unlock (omacom/omarchy#14588), so a binding on sessionLock.locked
++  // keeps `locked` true forever. Mirror the state and re-read it where Quickshell
++  // stays silent.
++  property bool sessionLockHeld: false
++  readonly property bool locked: lockRequested || sessionLockHeld || sessionLock.secure
+   readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating || howdyAuthenticating
+
+   function realScreenCount() {
+@@ -177,6 +182,31 @@
+     return true
+   }
+
++  // Uncached view of the lock state, straight from the session lock object.
++  function freshLocked() {
++    return lockRequested || sessionLock.locked || sessionLock.secure
++  }
++
++  // The session lock went away (unlock, or the compositor ended it).
++  function releaseLockRequest() {
++    if (!lockRequested) return
++    lockRequested = false
++    pendingSessionLock = false
++    sessionLockStabilizeTimer.stop()
++    pendingSessionLockTimer.stop()
++    resetAuthenticationState()
++    runWake()
++  }
++
++  // Re-read sessionLock.locked for a change Quickshell did not signal.
++  function syncSessionLockState() {
++    var held = sessionLock.locked
++    if (held === sessionLockHeld) return
++    sessionLockHeld = held
++    logEvent("session-locked=" + held + " (unsignalled)")
++    if (!held) releaseLockRequest()
++  }
++
+   function finishUnlock() {
+     if (!root.locked && !lockRequested) return
+
+@@ -187,6 +217,7 @@
+     resetAuthenticationState()
+     idleBlankTimer.stop()
+     sessionLock.locked = false
++    syncSessionLockState()
+     logEvent("unlocked")
+     runWake()
+   }
+@@ -344,9 +375,12 @@
+         root.startFingerprint()
+         if (root.pendingHowdy) root.startHowdy()
+       }
++      // On unlock this fires before the lock object is gone.
++      Qt.callLater(root.syncSessionLockState)
+     }
+
+     onLockStateChanged: {
++      root.sessionLockHeld = locked
+       root.logEvent("session-locked=" + locked)
+
+       if (locked) {
+@@ -355,14 +389,7 @@
+         pendingSessionLockTimer.stop()
+       }
+
+-      if (!locked && root.lockRequested) {
+-        root.lockRequested = false
+-        root.pendingSessionLock = false
+-        sessionLockStabilizeTimer.stop()
+-        pendingSessionLockTimer.stop()
+-        root.resetAuthenticationState()
+-        root.runWake()
+-      }
++      if (!locked) root.releaseLockRequest()
+     }
+
+     WlSessionLockSurface {
+@@ -680,17 +707,21 @@
+
+     function lock(): string {
+       if (!root.passwordPamConfigured) return "missing-pam"
+-      if (!root.locked && !root.beginLock()) return "failed"
++      root.syncSessionLockState()
++      var fresh = root.freshLocked()
++      if (root.locked !== fresh) root.logEvent("lock-state-drift: cached=" + root.locked + " fresh=" + fresh)
++      if (!fresh && !root.beginLock()) return "failed"
+       return "ok"
+     }
+
+     function isLocked(): string {
+-      return root.locked ? "true" : "false"
++      return root.freshLocked() ? "true" : "false"
+     }
+
+     function status(): string {
+       return JSON.stringify({
+-        locked: root.locked,
++        locked: root.freshLocked(),
++        lockedCached: root.locked,
+         requested: root.lockRequested,
+         pending: root.pendingSessionLock,
+         sessionLocked: sessionLock.locked,

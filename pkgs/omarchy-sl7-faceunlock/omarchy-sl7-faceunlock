@@ -53,6 +53,8 @@ omarchy-sl7-faceunlock [--dry-run] [COMMAND]
                                 password required; opt-in, prints a warning
   auth disable sudo|polkit|lock|all
   lock install|apply|update|remove|status
+                                apply = restore upstream, re-apply every overlay patch
+  lock auto                     re-apply only if the shipped patches changed (login hook)
   --off                         emergency off: howdy disable 1 + remove every PAM line
   --remove                      interactive removal
   --menu-install [--auto]       add the Omarchy menu rows (per user)
@@ -137,7 +139,8 @@ main() {
     apply) lock_reapply ;;
     update) lock_update ;;
     remove) lock_remove ;;
-    status) say "installed=$(lock_installed && echo yes || echo no) patched=$(lock_patched && echo yes || echo no) state=$(lock_enabled_state)" ;;
+    auto) lock_auto_reapply ;;
+    status) lock_status ;;
     *) usage >&2; exit 2 ;;
     esac
     ;;

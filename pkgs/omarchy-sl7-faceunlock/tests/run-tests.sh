@@ -304,6 +304,42 @@ STUB
   check "lock keeps nate8199 license" grep -q 'nate8199' "$SL7_PLUGIN_DIR/nate.howdy-lock/LICENSE"
   check "lock enabled after patch" grep -q 'enable nate.howdy-lock' "$T/omarchy.log"
   check "lock apply idempotent" "$APP" lock apply
+  svc=$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml
+  check "lock state-sync marker" grep -q 'sl7-faceunlock: lock-state sync' "$svc"
+  check "lock locked uses the mirror" grep -q 'readonly property bool locked: lockRequested || sessionLockHeld || sessionLock.secure' "$svc"
+  check "lock has freshLocked and syncSessionLockState" bash -c "grep -q 'function freshLocked()' '$svc' && grep -q 'function syncSessionLockState()' '$svc' && grep -q 'function releaseLockRequest()' '$svc'"
+  check "lock IPC lock() decides on the fresh state" bash -c "grep -A8 'function lock(): string' '$svc' | grep -q 'freshLocked()'"
+  check "lock status reports each patch" bash -c "'$APP' lock status | grep -q 'howdy-lock-pam.patch: applied' && '$APP' lock status | grep -q 'howdy-lock-state-sync.patch: applied'"
+  check "lock status patched=yes" bash -c "'$APP' lock status | grep -q 'patched=yes'"
+  check "lock records the patch set" bash -c "[[ -s '$XDG_STATE_HOME/omarchy-sl7-faceunlock/lock-patchset' ]]"
+  # upgrade from a PAM-only overlay (previous package): apply adds the missing patch
+  cp -p "$svc" "$T/svc.full"
+  cp -p "$svc.sl7-orig" "$svc"
+  patch -p1 -s -d "$SL7_PLUGIN_DIR/nate.howdy-lock" -i "$LIB/lock-patch/howdy-lock-pam.patch" >/dev/null 2>&1
+  check "PAM-only overlay reported" bash -c "'$APP' lock status | grep -q 'howdy-lock-state-sync.patch: missing'"
+  check "lock apply upgrades a PAM-only overlay" "$APP" lock apply
+  check "upgraded overlay equals a fresh one" cmp -s "$svc" "$T/svc.full"
+  # login hook: skips while locked, applies when not, then goes quiet
+  cat >"$T/bin/omarchy-shell" <<STUB
+#!/bin/bash
+[[ \$1 == -q ]] && shift
+[[ \$1 == lock && \$2 == status ]] && { cat "$T/shell-state"; exit 0; }
+echo "\$*" >>"$T/shell.log"
+STUB
+  chmod +x "$T/bin/omarchy-shell"
+  cp -p "$svc.sl7-orig" "$svc"
+  patch -p1 -s -d "$SL7_PLUGIN_DIR/nate.howdy-lock" -i "$LIB/lock-patch/howdy-lock-pam.patch" >/dev/null 2>&1
+  rm -f "$XDG_STATE_HOME/omarchy-sl7-faceunlock/lock-patchset"
+  : >"$T/shell.log"
+  printf '{"locked":true,"requested":false,"sessionLocked":false,"secure":true}\n' >"$T/shell-state"
+  check "lock auto while locked succeeds" "$APP" lock auto
+  check "lock auto while locked edits nothing" bash -c "! grep -q 'lock-state sync' '$svc'"
+  printf '{"locked":true,"requested":false,"sessionLocked":false,"secure":false}\n' >"$T/shell-state"
+  check "lock auto ignores the stale cached locked" "$APP" lock auto
+  check "lock auto applied the missing patch" grep -q 'sl7-faceunlock: lock-state sync' "$svc"
+  check "lock auto rescans plugins" grep -q 'shell rescanPlugins' "$T/shell.log"
+  : >"$T/shell.log"
+  check "lock auto is quiet once current" bash -c "'$APP' lock auto && [[ ! -s '$T/shell.log' ]]"
   # upstream drift: patch must fail safe
   rm -rf "$SL7_PLUGIN_DIR/nate.howdy-lock/.git" "$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml.sl7-orig"
   printf 'import QtQuick\nItem {}\n' >"$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml"

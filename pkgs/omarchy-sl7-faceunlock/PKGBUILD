@@ -8,7 +8,7 @@
 
 pkgname=omarchy-sl7-faceunlock
 pkgver=0.1.0
-pkgrel=5
+pkgrel=6
 pkgdesc='Omarchy-styled Face Unlock setup and face manager for the Surface Laptop 7 (howdy-next, IR bridge, PAM, lock screen)'
 arch=('any')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -23,10 +23,11 @@ install=omarchy-sl7-faceunlock.install
 # array only handles top-level files.
 source=('omarchy-sl7-faceunlock'
         'omarchy-sl7-faceunlock-menu.service'
+        'omarchy-sl7-faceunlock-lock.service'
         'omarchy-sl7-faceunlock.desktop'
         'README.md'
         'LICENSE')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {
   local lib="$pkgdir/usr/lib/sl7-faceunlock"
@@ -39,10 +40,13 @@ package() {
   install -Dm755 "$startdir/lib/root-helper" "$lib/root-helper"
   install -Dm755 "$startdir/lib/lid-closed" "$lib/lid-closed"
   install -Dm644 "$startdir/lib/lock-patch/howdy-lock-pam.patch" "$lib/lock-patch/howdy-lock-pam.patch"
+  install -Dm644 "$startdir/lib/lock-patch/howdy-lock-state-sync.patch" "$lib/lock-patch/howdy-lock-state-sync.patch"
   install -Dm644 "$startdir/lib/lock-patch/LICENSE.nate8199" "$lib/lock-patch/LICENSE.nate8199"
 
   install -Dm644 omarchy-sl7-faceunlock-menu.service \
     "$pkgdir/usr/lib/systemd/user/omarchy-sl7-faceunlock-menu.service"
+  install -Dm644 omarchy-sl7-faceunlock-lock.service \
+    "$pkgdir/usr/lib/systemd/user/omarchy-sl7-faceunlock-lock.service"
   install -Dm644 omarchy-sl7-faceunlock.desktop \
     "$pkgdir/usr/share/applications/omarchy-sl7-faceunlock.desktop"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

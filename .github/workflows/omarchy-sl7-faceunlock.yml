@@ -62,7 +62,7 @@ jobs:
           set -euo pipefail
           pkg=$(ls out/*.pkg.tar.* | head -n1)
           tar -tf "$pkg" | sort > out/contents.txt
-          for f in usr/bin/omarchy-sl7-faceunlock usr/lib/sl7-faceunlock/root-helper usr/lib/sl7-faceunlock/lid-closed usr/lib/sl7-faceunlock/lock-patch/howdy-lock-pam.patch usr/lib/systemd/user/omarchy-sl7-faceunlock-menu.service; do
+          for f in usr/bin/omarchy-sl7-faceunlock usr/lib/sl7-faceunlock/root-helper usr/lib/sl7-faceunlock/lid-closed usr/lib/sl7-faceunlock/lock-patch/howdy-lock-pam.patch usr/lib/sl7-faceunlock/lock-patch/howdy-lock-state-sync.patch usr/lib/systemd/user/omarchy-sl7-faceunlock-menu.service usr/lib/systemd/user/omarchy-sl7-faceunlock-lock.service; do
             grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
           done
 

@@ -60,7 +60,7 @@ omarchy-sl7-faceunlock faces add LABEL | remove ID | clear
 omarchy-sl7-faceunlock auth status [--json]
 omarchy-sl7-faceunlock auth enable lock | sudo|polkit --accept-risk
 omarchy-sl7-faceunlock auth disable sudo|polkit|lock|all
-omarchy-sl7-faceunlock lock install|apply|update|remove|status
+omarchy-sl7-faceunlock lock install|apply|update|remove|status|auto
 omarchy-sl7-faceunlock --off
 omarchy-sl7-faceunlock --menu-install [--auto] | --menu-remove
 omarchy-sl7-faceunlock --dry-run ...
@@ -183,8 +183,8 @@ setup never wakes the camera. It fails open when logind cannot be queried.
 Lock screen menu > Install and enable runs
 `omarchy plugin add https://github.com/nate8199/omarchy-plugin-howdy-face.git`
 (pinned at commit `e5e5402`, nate.howdy-lock 1.1.1, MIT), applies
-`lock-patch/howdy-lock-pam.patch`, and only then enables the plugin. The patch
-replaces the one call that ran `python3 /usr/lib/howdy/compare.py` as the user
+the overlay patches (below), and only then enables the plugin. The first patch,
+`lock-patch/howdy-lock-pam.patch`, replaces the one call that ran `python3 /usr/lib/howdy/compare.py` as the user
 with a `PamContext` on `omarchy-lock-face`, and changes the "is it set up"
 check to the PAM file plus a root-owned marker
 (`/var/lib/sl7-faceunlock/enrolled-<user>`), because the models are root-only.
@@ -192,10 +192,54 @@ The "Unlock with face" button (camera only when pressed), the attempt cap of
 five and everything else are nate8199's. Do not run the plugin's `setup.sh`: it
 installs howdy-git and python-dlib.
 
-After an Omarchy or plugin upgrade: Lock screen > Re-apply patch, or
-`omarchy-sl7-faceunlock lock apply`. If the patch no longer applies the app
-says so, leaves the file untouched and disables the plugin so the stock lock
-screen returns.
+The overlay is an ordered list of patches, each with its own marker in
+`Service.qml`. `lock apply` restores nate8199's file, tries every patch on a
+scratch copy (pristine checksum, dry run, marker check), swaps the result in
+atomically and keeps `Service.qml.sl7-orig` as the backup. If any patch no
+longer applies the app says so, leaves the file untouched and disables the
+plugin so the stock lock screen returns. `lock status` reports each patch.
+
+### The stale lock state (quickshell 0.3.2)
+
+Since quickshell 0.3.2 (commit afb2c27, "wayland/lock: guard against reentrancy
+during surface creation") a local unlock no longer emits
+`WlSessionLock.lockStateChanged`. The lock service computes
+`locked: lockRequested || sessionLock.locked || sessionLock.secure` and only
+re-evaluates it on that signal, so `locked` stays true after every unlock: the
+next `omarchy-shell lock lock` answers `ok` without locking, the suspend lock
+is skipped and `isLocked()` makes the idle screensaver gate misbehave. It is
+tracked upstream as
+[omacom/omarchy#14588](https://github.com/omacom/omarchy/issues/14588) (fix
+proposed in PR #14591, which is incomplete) and in quickshell as
+quickshell-mirror/quickshell#1230. The stock lock cannot be patched from here,
+and the running lock on this machine is the patched clone of `nate.howdy-lock`,
+so the second patch, `lock-patch/howdy-lock-state-sync.patch`, fixes it in the
+clone, in the spirit of justcarlson's patch on #14588: `locked` reads a plain
+`sessionLockHeld` mirror, refreshed from `onLockStateChanged`, right after
+`finishUnlock()` and after `secure` changes; the IPC `lock()`, `isLocked()` and
+`status()` use `freshLocked()` (the live object) and log `lock-state-drift`
+when the cache was wrong. `status` keeps the live `sessionLocked` and adds
+`lockedCached`. The mirror is only set once the lock is really held, so a
+failed acquisition cannot latch it. Drop the patch when the fixed quickshell
+and Omarchy are in.
+
+### Upgrades
+
+The overlay sits in your home directory, so the package cannot refresh it. The
+user unit `omarchy-sl7-faceunlock-lock.service` (enabled globally, runs at login
+after `graphical-session.target`) runs `omarchy-sl7-faceunlock lock auto`: when
+the shipped patches differ from the set last applied (a hash kept in
+`~/.local/state/omarchy-sl7-faceunlock/lock-patchset`) it runs `lock apply`,
+then `omarchy-shell -q shell rescanPlugins` and a notification asking for
+`omarchy-restart-shell`. It does nothing while the screen is locked (or the
+shell does not answer), and it never touches Omarchy's own files. By hand, while
+unlocked:
+
+```
+omarchy-sl7-faceunlock lock apply
+omarchy-restart-shell
+omarchy-shell lock status   # after a lock and unlock: "locked":false
+```
 
 ## Safety notes
 

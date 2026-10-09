@@ -10,7 +10,7 @@ _helper=/usr/lib/sl7-faceunlock/root-helper
 post_install() {
   # Per-user, once: the menu rows are merged at the user's next login (or on the
   # first run of the app). Enable the user unit for everyone.
-  systemctl --global enable omarchy-sl7-faceunlock-menu.service >/dev/null 2>&1 || true
+  systemctl --global enable omarchy-sl7-faceunlock-menu.service omarchy-sl7-faceunlock-lock.service >/dev/null 2>&1 || true
   echo '[face unlock] Run once per user to show the menu rows now:'
   echo '[face unlock]   omarchy-sl7-faceunlock --menu-install'
   echo '[face unlock] Then: Omarchy menu > Setup > Security > Face Unlock'
@@ -19,7 +19,11 @@ post_install() {
 }
 
 post_upgrade() {
-  systemctl --global enable omarchy-sl7-faceunlock-menu.service >/dev/null 2>&1 || true
+  systemctl --global enable omarchy-sl7-faceunlock-menu.service omarchy-sl7-faceunlock-lock.service >/dev/null 2>&1 || true
+  # The lock screen overlay lives in each user's home, so it cannot be refreshed
+  # from here; the lock service does it at the next login (never while locked).
+  echo '[face unlock] Lock screen overlay: refreshed at your next login, or now, while unlocked:'
+  echo '[face unlock]   omarchy-sl7-faceunlock lock apply && omarchy-restart-shell'
 }
 
 pre_remove() {
@@ -31,7 +35,7 @@ pre_remove() {
       echo '[face unlock]   sudo rm -f /etc/pam.d/omarchy-lock-face' >&2
     }
   fi
-  systemctl --global disable omarchy-sl7-faceunlock-menu.service >/dev/null 2>&1 || true
+  systemctl --global disable omarchy-sl7-faceunlock-menu.service omarchy-sl7-faceunlock-lock.service >/dev/null 2>&1 || true
 }
 
 post_remove() {

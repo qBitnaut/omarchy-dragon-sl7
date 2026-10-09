@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-apply the Face Unlock lock screen overlay after a package update (skipped while locked)
+ConditionPathExists=/usr/bin/omarchy-sl7-faceunlock
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omarchy-sl7-faceunlock lock auto
+
+[Install]
+WantedBy=graphical-session.target
