@@ -6,7 +6,7 @@
 # (0001-...), without which the software ISP cannot run AGC for that sensor, and
 # three software ISP fixes for it (0002-0004), and a pipeline handler patch that
 # hides the VD55G0 infrared camera (0005). Differences from the ALARM package:
-#   - pkgrel 4.3 sorts above ALARM's 4, so the omarchy-sl7 repository wins
+#   - pkgrel 4.4 sorts above ALARM's 4, so the omarchy-sl7 repository wins
 #   - 0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch
 #   - 0002-ipa-simple-agc-converge-quickly-after-stream-start.patch
 #   - 0003-libcamera-software_isp-debayer_egl-compute-stats-on-the-displayed-area.patch
@@ -31,7 +31,7 @@ pkgname=(
   python-libcamera
 )
 pkgver=0.7.2
-pkgrel=4.3
+pkgrel=4.4
 pkgdesc="A complex camera support library for Linux, Android, and ChromeOS"
 arch=(aarch64)
 url="https://libcamera.org/"
@@ -63,7 +63,8 @@ makedepends=(
   systemd
 )
 source=(
-  "git+$_url#tag=v$pkgver"
+  # tag v$pkgver, pinned to its commit (a moved tag then fails the build)
+  "git+$_url#commit=191e202178f02430b5942397c70d215cdd2056fa"
   "$pkgbase-fix-python3.14-macro-redefinition.patch"
   "0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch"
   "0002-ipa-simple-agc-converge-quickly-after-stream-start.patch"

@@ -1,7 +1,7 @@
 pkgbase = libcamera
 	pkgdesc = A complex camera support library for Linux, Android, and ChromeOS
 	pkgver = 0.7.2
-	pkgrel = 4.3
+	pkgrel = 4.4
 	url = https://libcamera.org/
 	arch = aarch64
 	makedepends = cmake
@@ -28,7 +28,7 @@ pkgbase = libcamera
 	makedepends = qt6-tools
 	makedepends = sdl2
 	makedepends = systemd
-	source = git+https://git.libcamera.org/libcamera/libcamera.git#tag=v0.7.2
+	source = git+https://git.libcamera.org/libcamera/libcamera.git#commit=191e202178f02430b5942397c70d215cdd2056fa
 	source = libcamera-fix-python3.14-macro-redefinition.patch
 	source = 0001-ipa-libipa-camera_sensor_helper-add-ov02c10.patch
 	source = 0002-ipa-simple-agc-converge-quickly-after-stream-start.patch
