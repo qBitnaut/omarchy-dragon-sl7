@@ -30,6 +30,8 @@ Panel {
     readonly property bool charging: !!(status && status.flow === "charging")
     readonly property bool saverForced: !!(status && status.auto && status.auto.forced)
     readonly property bool criticalBattery: discharging && charge >= 0 && charge <= 10
+    readonly property int saverThreshold: (status && status.auto && status.auto.enabled && status.auto.threshold !== null && status.auto.threshold !== undefined) ? status.auto.threshold : 30
+    readonly property bool belowSaver: discharging && charge >= 0 && charge <= saverThreshold
 
     // ---- theme colours ------------------------------------------------------
     property var themeColors: ({})
@@ -78,7 +80,7 @@ Panel {
     readonly property string colorToken: {
         if (root.daemonDown) return "dim"
         if (root.criticalBattery) return "crit"
-        if (root.saverForced) return "warn"
+        if (root.saverForced || root.belowSaver) return "warn"
         return "fg"
     }
 

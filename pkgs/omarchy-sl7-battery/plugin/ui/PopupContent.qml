@@ -44,7 +44,11 @@ Item {
     readonly property bool discharging: s.flow === "discharging"
     readonly property bool charging: s.flow === "charging"
     readonly property int charge: s.charge !== null && s.charge !== undefined ? s.charge : -1
-    readonly property bool lowBattery: discharging && charge >= 0 && charge <= 15
+    readonly property bool lowBattery: discharging && charge >= 0 && charge <= 10
+    // Warn colours only from the auto power-saver threshold down (default 30%), so a
+    // healthy battery on discharge does not look like a problem.
+    readonly property int saverThreshold: autoInfo.enabled && has(autoInfo.threshold) ? autoInfo.threshold : 30
+    readonly property bool belowSaver: discharging && charge >= 0 && charge <= saverThreshold
     readonly property var estimate: Projection.estimate(status, nowMs)
     property real nowMs: Date.now()
 
@@ -60,7 +64,8 @@ Item {
     readonly property color stateColor: {
         if (daemonDown || !present) return muted
         if (lowBattery) return theme.crit
-        if (discharging) return theme.warn
+        if (belowSaver) return theme.warn
+        if (discharging) return accent
         return theme.ok
     }
 
