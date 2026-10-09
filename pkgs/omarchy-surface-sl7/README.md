@@ -220,10 +220,23 @@ use this tool for the SL7.
   panel blanks for a few seconds on every plug/unplug, so the default leaves it alone. Animations and
   blur can optionally be switched off on battery (`DISABLE_*_ON_BATTERY=yes`). When the kernel
   runs with `msm.vrr_enabled=1` (the default, section 11b) it also sets Hyprland's `misc.vrr`
-  (`HYPRLAND_VRR`: 1 always, 2 fullscreen only, empty or 0 leaves it alone). Omarchy has no
-  hook for its own `omarchy-powerprofiles-set`, which only calls power-profiles-daemon (no
-  backend on ARM), so this runs beside it on the same signal and does not change the PPD
-  profile. Restart the user part after editing the config:
+  (`HYPRLAND_VRR`: 1 always, 2 fullscreen only, empty or 0 leaves it alone).
+  **Power profiles.** power-profiles-daemon has no real backend on ARM (placeholder
+  drivers), so changing its `ActiveProfile` alone changes nothing. `omarchy-sl7-powermode` now
+  reads the profile (never sets it) and picks the knobs from the power source and the profile:
+  `power-saver` (either source) is stricter (`CPU_MAX_FREQ_POWERSAVER`, default 1708800 kHz;
+  GPU at its lowest frequency; Wi-Fi power save on; optional parking with `PARK_POWERSAVER=yes`;
+  60 Hz, animations and blur off through the user part, `REFRESH_POWERSAVER`,
+  `DISABLE_*_POWERSAVER`), `performance` (either source) is uncapped like AC, and `balanced`
+  keeps the battery caps on battery and uncapped on AC. The root side is a long-running
+  `omarchy-sl7-powermode --system watch` (`omarchy-surface-sl7-powermode.service`) that applies
+  at start and on each `ActiveProfile` change from PPD's D-Bus `PropertiesChanged`; plug/unplug
+  and resume still arrive through udev and the sleep hook. The user watcher also follows the
+  profile. `PROFILE_AWARE=no` goes back to source-only switching. `omarchy-sl7-powermode status`
+  prints the profile, the level (`saver`, `perf`, `battery`, `ac`) and checks the caps against
+  it; the applied values are in `/run/omarchy-surface-sl7/{mode,profile,level}`. The
+  `omarchy-sl7-battery` package (the battery app) is the usual way to change the profile. Restart
+  the user part after editing the config:
   `systemctl --user restart omarchy-sl7-powermode`. Check with `omarchy-sl7-powermode status`
   or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting when a connection is
   re-activated; the shipped drop-in and dispatcher script (above) make that setting

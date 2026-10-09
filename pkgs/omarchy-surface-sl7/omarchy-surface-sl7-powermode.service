@@ -1,10 +1,12 @@
 [Unit]
-Description=Apply the Surface Laptop 7 AC/battery power mode at boot
-After=local-fs.target
+Description=Apply the Surface Laptop 7 power mode at boot and follow the power profile
+After=local-fs.target dbus.socket
 
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/omarchy-sl7-powermode --system auto
+Type=simple
+ExecStart=/usr/bin/omarchy-sl7-powermode --system watch
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

@@ -41,6 +41,8 @@ load_conf() {
   return 0
 }
 load_conf
+# omarchy-sl7-powermode sets this for the power-saver profile when PARK_POWERSAVER=yes.
+[[ ${OMARCHY_SL7_PARK_FORCE:-} == yes ]] && PARK_ON_BATTERY=yes
 
 usage() {
   echo "usage: ${0##*/} status | on | off | apply battery|ac" >&2
