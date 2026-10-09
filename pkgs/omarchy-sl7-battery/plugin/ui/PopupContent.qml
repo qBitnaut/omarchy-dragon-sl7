@@ -65,7 +65,7 @@ Item {
         if (daemonDown || !present) return muted
         if (lowBattery) return theme.crit
         if (belowSaver) return theme.warn
-        if (discharging) return accent
+        if (discharging) return fg
         if (charging) return Qt.tint(theme.ok, Qt.rgba(1, 1, 1, 0.5 * shimmer))
         return theme.ok
     }

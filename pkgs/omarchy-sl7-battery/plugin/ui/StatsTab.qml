@@ -283,7 +283,7 @@ Item {
                 futureFrom: root.projecting && root.lay.futureCols > 0 ? root.lay.pastCols : -1
                 futureColor: root.popup.muted
                 dividerColor: root.popup.accent
-                dividerWidth: 2
+                dividerWidth: Style.space(3)
                 color: root.metric.color
                 markColor: root.popup.theme.ok
                 foreground: root.popup.fg

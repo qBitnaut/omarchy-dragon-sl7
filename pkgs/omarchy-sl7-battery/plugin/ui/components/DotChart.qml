@@ -115,13 +115,13 @@ Canvas {
                     // Projection: a faint light-grey fill and a hollow ring, so the
                     // forecast never reads as measured data.
                     ctx.fillStyle = root.futureColor
-                    ctx.globalAlpha = 0.35
+                    ctx.globalAlpha = 0.12
                     ctx.fill()
                     ctx.beginPath()
                     ctx.arc(cx, cy, Math.max(0.5, r - 0.5), 0, 2 * Math.PI)
                     ctx.strokeStyle = root.futureColor
                     ctx.lineWidth = 1
-                    ctx.globalAlpha = 0.8
+                    ctx.globalAlpha = 0.35
                     ctx.stroke()
                 } else {
                     ctx.fillStyle = on ? (hot ? root.markColor : root.color) : (gap ? root.gapColor : root.trackColor)
@@ -132,14 +132,12 @@ Canvas {
         }
 
         if (fut > 0 && fut < cols) {
-            var x = Math.round(r + (fut - 0.5) * stepX) + (root.dividerWidth % 2 ? 0.5 : 0)
+            // A filled bar rather than a stroke, so its width is exact at any scale.
+            var w = Math.max(1, root.dividerWidth)
+            var x = Math.round(r + (fut - 0.5) * stepX - w / 2)
             ctx.globalAlpha = 1
-            ctx.strokeStyle = root.dividerColor
-            ctx.lineWidth = root.dividerWidth
-            ctx.beginPath()
-            ctx.moveTo(x, 0)
-            ctx.lineTo(x, root.height)
-            ctx.stroke()
+            ctx.fillStyle = root.dividerColor
+            ctx.fillRect(x, 0, w, root.height)
         }
     }
 }
