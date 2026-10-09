@@ -331,11 +331,21 @@ impl App {
                 }
             }
         }
-        self.rates.update(ts, discharging, charging, draw, chg, bat.energy_now_wh);
+        let asleep = self.snap_ts_prev().map(|t0| self.sleeps.overlap(t0, ts)).unwrap_or(0.0);
+        self.rates.update(ts, asleep, discharging, charging, draw, chg, bat.energy_now_wh);
         self.full.update(ts, full, bat.capacity);
         self.snap = Snap { ts, present: true, bat, ac, screen_on, discharging, charging, full };
         self.evaluate_auto();
         self.push_status();
+    }
+
+    /// Timestamp of the previous sample, if there was one.
+    fn snap_ts_prev(&self) -> Option<f64> {
+        if self.snap.present {
+            Some(self.snap.ts)
+        } else {
+            None
+        }
     }
 
     // ---- auto power saver -----------------------------------------------------------
@@ -482,6 +492,8 @@ impl App {
             "ewma_w": opt(self.rates.dis_ewma, round2),
             "avg_since_unplug_w": opt(self.rates.avg_since_unplug(s.ts, b.energy_now_wh), round2),
             "since_unplug_s": self.rates.since_unplug_s(s.ts).map(|v| v.round()),
+            "avg_awake_w_since_unplug": opt(self.rates.avg_awake_w(), round2),
+            "awake_s_since_unplug": self.rates.awake_s_since_unplug().map(|v| v.round()),
             "charge_w": opt(self.rates.chg_ewma, round2),
             "charge_pct_h": opt(chg_pct_h, round1),
             "temp_c": opt(b.temp_c, round1),
@@ -596,6 +608,11 @@ impl App {
                 }
             }
         }
+        let sleep_w = self.recent_sleep_w(now);
+        let asleep_left_s = match (sleep_w, s.bat.energy_now_wh) {
+            (Some(w), Some(e)) if w >= 0.05 => Some(e / w * 3600.0),
+            _ => None,
+        };
         let today = self.m1.aggregate(since.max(now - 7.0 * 86400.0), now + 60.0).dis_w;
         let mode = crate::util::read_trim(&self.paths.run_dir.join("mode"));
         let mode_profile = crate::util::read_trim(&self.paths.run_dir.join("profile"));
@@ -613,6 +630,8 @@ impl App {
             "drain_screen_on_pct_h": per_h(on_pct, on_s),
             "drain_screen_off_pct_h": per_h(off_pct, off_s),
             "drain_suspended_pct_h": per_h(sl_pct, sl_s),
+            "sleep_w": opt(sleep_w, round2),
+            "asleep_left_s": opt(asleep_left_s, |v| v.round()),
             "today_avg_w": opt(today, round2),
             "charge_w": opt(self.rates.chg_ewma, round2),
             "charge_pct_h": opt(chg_pct_h, round1),
@@ -620,6 +639,25 @@ impl App {
             "rails": rails,
             "since_full": self.since_full_json(),
         })
+    }
+
+    /// Measured suspend drain in W over the last 7 days of on-battery sleeps of 10 minutes or
+    /// more (energy used / sleep time). None when there is no usable record.
+    fn recent_sleep_w(&self, now: f64) -> Option<f64> {
+        let (mut wh, mut secs) = (0.0, 0.0);
+        for sl in self.sleeps.items.iter().filter(|x| x.end >= now - 7.0 * 86400.0 && !x.ac) {
+            if let (Some(b), Some(a)) = (sl.energy_before_wh, sl.energy_after_wh) {
+                if sl.duration() >= 600.0 && b >= a {
+                    wh += b - a;
+                    secs += sl.duration();
+                }
+            }
+        }
+        if secs > 0.0 {
+            Some(wh / (secs / 3600.0))
+        } else {
+            None
+        }
     }
 
     fn sleeps_json(&self, limit: usize) -> Value {

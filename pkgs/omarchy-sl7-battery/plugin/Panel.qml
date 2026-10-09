@@ -100,11 +100,8 @@ Panel {
         lines.push("Battery · " + state)
         var mid = []
         if (root.charge >= 0) mid.push(root.charge + "%")
-        if (root.estimate.ok) {
-            mid.push(root.estimate.mode === "charging"
-                ? ("full in " + Projection.durationLabel(root.estimate.seconds))
-                : (Projection.durationLabel(root.estimate.seconds) + " left"))
-        }
+        var wd = Projection.wording(s, root.estimate, Date.now())
+        if (wd.tooltip !== "") mid.push(wd.tooltip)
         if (s.power_w !== null && s.power_w !== undefined) mid.push(Format.fixed(s.power_w, 1, " W"))
         lines.push(mid.join(" · "))
         if (s.profile) lines.push("Profile: " + s.profile + (root.saverForced ? " (auto)" : ""))

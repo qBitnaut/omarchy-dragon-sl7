@@ -17,7 +17,7 @@ by the same author (MIT). Nothing of its daemon is reused: this is a laptop batt
   when the auto power saver is armed (quiet) or active. Under the title: **hours since the
   battery was last full** and how much of it has gone ("14h 20m since full · 62% used").
 - **Tiles:** Charge % (a notch marks the auto-saver threshold), Time left / To full ("until
-  Tonight 10:40pm"), Draw in W (with the average).
+  Tonight 10:40pm"), Draw in W (with the awake-only average).
 - **Readings:** health (full vs design energy), temperature, voltage, cycles (hidden when the
   firmware reports 0).
 - **Power profile** picker (Power saver, Balanced, and Performance only if PPD lists it) and
@@ -108,12 +108,22 @@ pushes are `{"type":"push","topic":"status"|"config","data":...}`.
 | cmd | args | data |
 |---|---|---|
 | `subscribe` | `{topics:["status","config"]}` | acknowledges; a status push follows at once, then one per sample and on events |
-| `status.get` | | the status object (charge, flow, energies, `power_w`, `ewma_w`, `avg_since_unplug_w`, `since_unplug_s`, `charge_w`, `temp_c`, `voltage_v`, `profile`, `profiles`, `auto`, `since_full`, ...) |
+| `status.get` | | the status object (charge, flow, energies, `power_w`, `ewma_w`, `avg_since_unplug_w` (wall-clock, includes sleep; kept for compatibility), `since_unplug_s`, `avg_awake_w_since_unplug`, `awake_s_since_unplug`, `charge_w`, `temp_c`, `voltage_v`, `profile`, `profiles`, `auto`, `since_full`, ...) |
 | `history.get` | `{window:"6h"\|"24h"\|"7d"\|"30d", metrics:[...], points:N}` | `{step_s, from, to, series:[{metric, avg:[...]}]}`; metrics `charge`, `draw_w`, `charge_w`, `temp_c`, `screen_on`, `on_ac`, `asleep` |
-| `details.get` | `{since: unix}` | drain by state, today's average, charging rate, power mode, rails, `since_full` |
+| `details.get` | `{since: unix}` | drain by state, today's average, measured suspend draw `sleep_w` and `asleep_left_s`, charging rate, power mode, rails, `since_full` |
 | `sleeps.get` | `{limit}` | recent sleeps with drain, average W and wake count |
 | `config.get` / `config.set` | `{base_rev, patch:{auto_saver:{enabled, threshold}}}` | config and `rev`; `conflict` if the rev is stale |
 | `profile.set` | `{profile}` | sets the profile through Omarchy so it is remembered per power source |
+
+**How the time left works.** The rate is 70% the daemon's EWMA of the live draw (time constant
+12 min) plus 30% the average draw over *awake* time since the unplug, so a night asleep at
+0.3 W does not make the estimate optimistic. Awake time is integrated from consecutive samples
+only: an interval counts when the gap is at most 60 s (three sampling intervals) and no sleep
+record overlaps it. After a suspend the EWMA keeps its pre-sleep value and moves by one
+nominal sample step, not by the sleep length. With under 15 minutes of awake data the EWMA is
+used alone; under five minutes since the unplug, or below 0.3 W, there is no estimate. The
+Details tab also shows "Time left if asleep", from the measured suspend draw of the last 7
+days of on-battery sleeps.
 
 `since_full` is `{full_ts, secs, used_pct, asleep_s, awake_s, on_ac}`, or null while the battery is
 full. "Full" is status Full, 99% or more, or the charge limit when one is set.

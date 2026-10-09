@@ -163,13 +163,12 @@ Item {
         return n
     }
 
-    readonly property string endLabel: root.projecting ? root.popup.estimate.label : "now"
+    readonly property string endLabel: root.projecting ? root.popup.wording.endLabel : "now"
     readonly property string projectionCaption: {
         if (!root.projecting) return ""
         var est = root.popup.estimate
-        var rate = est.rateW !== null && est.rateW !== undefined ? (" at " + Format.fixed(est.rateW, 1) + " W") : ""
-        if (est.mode === "charging") return "Projected " + est.target + "% by " + est.label + rate
-        return "Projected empty by " + est.label + rate
+        var rate = est.rateW !== null && est.rateW !== undefined ? (" · " + Format.fixed(est.rateW, 1) + " W") : ""
+        return root.popup.wording.caption + rate
     }
 
     implicitHeight: content.implicitHeight

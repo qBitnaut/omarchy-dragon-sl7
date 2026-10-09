@@ -99,6 +99,15 @@ Item {
         }
         DetailRow {
             width: parent.width
+            label: "Time left if asleep"
+            value: root.has(root.d.asleep_left_s) ? (Projection.sleepLeftLabel(root.d.asleep_left_s) + " at " + Format.fixed(root.d.sleep_w, 2, " W")) : ""
+            foreground: root.popup.fg
+            muted: root.popup.muted
+            fontFamily: root.popup.fontFamily
+        }
+
+        DetailRow {
+            width: parent.width
             label: "Average draw today"
             value: root.has(root.d.today_avg_w) ? Format.fixed(root.d.today_avg_w, 1, " W") : ""
             foreground: root.popup.fg

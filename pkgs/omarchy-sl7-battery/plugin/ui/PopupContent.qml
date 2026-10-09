@@ -50,6 +50,7 @@ Item {
     readonly property int saverThreshold: autoInfo.enabled && has(autoInfo.threshold) ? autoInfo.threshold : 30
     readonly property bool belowSaver: discharging && charge >= 0 && charge <= saverThreshold
     readonly property var estimate: Projection.estimate(status, nowMs)
+    readonly property var wording: Projection.wording(status, estimate, nowMs)
     property real nowMs: Date.now()
 
     // Refresh "now" so labels and the projection stay current while the popup is open.
@@ -282,10 +283,10 @@ Item {
                 readonly property real secs: root.estimate.ok ? root.estimate.seconds : -1
                 width: tiles.tileWidth
                 height: tiles.tileHeight
-                label: root.charging ? "To full" : "Time left"
+                label: root.wording.title
                 value: secs < 0 ? "—" : (secs >= 3600 ? Projection.durationLabel(secs) : String(Math.max(1, Math.round(secs / 60))))
                 unit: secs >= 0 && secs < 3600 ? "min" : ""
-                detail: root.estimate.ok ? ("until " + root.estimate.label) : (root.discharging || root.charging ? "learning the rate" : "")
+                detail: root.wording.detail
                 foreground: root.fg
                 muted: root.muted
                 fill: root.fillColor
@@ -303,8 +304,8 @@ Item {
                 unit: root.has(root.s.power_w) ? "W" : ""
                 detail: {
                     if (root.charging) return root.has(root.s.charge_pct_h) ? ("+" + root.s.charge_pct_h + " %/h") : ""
-                    var avg = root.has(root.s.avg_since_unplug_w) ? root.s.avg_since_unplug_w : root.s.ewma_w
-                    return root.has(avg) && root.discharging ? ("avg " + Format.fixed(avg, 1) + " W") : ""
+                    var avg = root.has(root.s.avg_awake_w_since_unplug) ? root.s.avg_awake_w_since_unplug : root.s.ewma_w
+                    return root.has(avg) && root.discharging ? ("avg " + Format.fixed(avg, 1) + " W awake") : ""
                 }
                 foreground: root.fg
                 muted: root.muted

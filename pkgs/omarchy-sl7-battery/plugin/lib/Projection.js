@@ -15,16 +15,28 @@ function _num(v) {
     return isNaN(n) ? null : n
 }
 
-// Discharge rate in watts: the daemon's EWMA of the draw blended with the average since
-// unplug (which includes sleep). With less than 15 minutes since unplug the EWMA alone.
-function blendRate(ewma, avgSinceUnplug, sinceUnplugS) {
+// Discharge rate in watts: the daemon's EWMA of the draw blended 70/30 with the average
+// draw over AWAKE time since unplug (suspend is excluded, so a night asleep does not make
+// the estimate optimistic). With less than 15 minutes of awake data the EWMA alone.
+function blendRate(ewma, avgAwakeW, awakeS) {
     var e = _num(ewma)
-    var a = _num(avgSinceUnplug)
-    var since = _num(sinceUnplugS)
+    var a = _num(avgAwakeW)
+    var awake = _num(awakeS)
     if (e === null && a === null) return null
     if (e === null) return a
-    if (a === null || since === null || since < 900) return e
+    if (a === null || awake === null || awake < 900) return e
     return 0.7 * e + 0.3 * a
+}
+
+// "≈ 5 days" / "≈ 18h" for the time left if the machine slept from now on, or "" when
+// unknown.
+function sleepLeftLabel(seconds) {
+    var s = _num(seconds)
+    if (s === null || s <= 0) return ""
+    var h = s / 3600
+    if (h >= 48) return "≈ " + Math.round(h / 24) + " days"
+    if (h >= 1) return "≈ " + Math.round(h) + "h"
+    return "≈ " + Math.max(1, Math.round(s / 60)) + "m"
 }
 
 // Energy left in Wh.
@@ -103,7 +115,7 @@ function estimate(status, nowMs) {
     var full = _num(status.energy_full_wh)
     if (charge === null || full === null) return none
     if (status.flow === "discharging") {
-        var rate = blendRate(status.ewma_w, status.avg_since_unplug_w, status.since_unplug_s)
+        var rate = blendRate(status.ewma_w, status.avg_awake_w_since_unplug, status.awake_s_since_unplug)
         var since = _num(status.since_unplug_s)
         var enough = since === null ? false : since >= MIN_DATA_S
         var secs = enough ? secondsToEmpty(charge, full, rate) : null
@@ -127,6 +139,55 @@ function estimate(status, nowMs) {
         return c
     }
     return none
+}
+
+// Mode-aware wording for the estimate, so every surface says the same thing.
+//   status: the daemon's status object; est: estimate(status, nowMs)
+// Returns { title, detail, tooltip, caption, endLabel }:
+//   discharging  "Time left"            "until Tonight 10:40pm"      "3h 10m left"
+//   charging     "Time to full" / "Time to 80%" (charge limit)
+//                                       "full at 3:40pm" (today) / "full by Tomorrow 12pm"
+//   not charging "Battery"              "Fully charged" / "holding at 80%", no time
+// `detail`/`tooltip` fall back to "learning the rate" / "" while there is no estimate.
+function wording(status, est, nowMs) {
+    var w = { title: "Time left", detail: "", tooltip: "", caption: "", endLabel: "now" }
+    if (!status || status.present === false) return w
+    var limit = _num(status.charge_limit)
+    var hasLimit = limit !== null && limit > 0 && limit < 100
+    var charge = _num(status.charge)
+    if (status.flow === "discharging") {
+        if (est && est.ok) {
+            w.detail = "until " + est.label
+            w.tooltip = durationLabel(est.seconds) + " left"
+            w.caption = "Projected empty by " + est.label
+            w.endLabel = est.label
+        } else {
+            w.detail = "learning the rate"
+        }
+        return w
+    }
+    if (status.flow === "charging") {
+        var goal = hasLimit ? limit + "%" : "full"
+        w.title = hasLimit ? "Time to " + limit + "%" : "Time to full"
+        if (est && est.ok) {
+            var n = _num(nowMs)
+            var target = new Date(roundTarget(est.endMs, n === null ? est.endMs : n))
+            var sameDay = n !== null && Math.round((_dayStart(target) - _dayStart(new Date(n))) / 86400000) <= 0
+            var when = sameDay ? "at " + _clock(target) : "by " + est.label
+            w.detail = goal + " " + when
+            w.tooltip = goal + " in " + durationLabel(est.seconds)
+            w.caption = "Projected " + (est.target || 100) + "% " + when
+            w.endLabel = est.label
+        } else {
+            w.detail = "learning the rate"
+        }
+        return w
+    }
+    w.title = "Battery"
+    if (status.full === true || (charge !== null && charge >= 99)) w.detail = "Fully charged"
+    else if (hasLimit && charge !== null) w.detail = "holding at " + Math.round(charge) + "%"
+    w.tooltip = w.detail.toLowerCase()
+    return w
 }
 
 // Percent at `t` seconds from now along the estimate, or null.
