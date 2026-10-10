@@ -10,7 +10,7 @@ index e516cdb..7ed0aa0 100644
 +++ b/test/unit/aarch64-initramfs-test.sh
 @@ -3,15 +3,24 @@
  set -euo pipefail
- 
+
  ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 -preset=$(awk '
 -  /^cat > \/etc\/mkinitcpio.d\/linux-aarch64.preset <</ { inside = 1; next }
@@ -35,7 +35,7 @@ index e516cdb..7ed0aa0 100644
 +(eval "$sl7_preset"; [[ $ALL_kver == /boot/vmlinuz-linux-sl7 && $archiso_image == /boot/initramfs-linux-sl7.img ]])
  # A preset-specific config makes mkinitcpio skip all drop-ins.
  [[ ! -v ALL_config && ! -v archiso_config ]]
- 
+
 @@ -27,4 +36,8 @@ for hook in microcode memdisk encrypt; do
    [[ " ${HOOKS[*]} " != *" $hook "* ]]
  done
@@ -46,7 +46,7 @@ index e516cdb..7ed0aa0 100644
 +[[ " ${MODULES[*]} " == *" surface_aggregator? "* && " ${MODULES[*]} " == *" i2c_hid_of "* ]]
  echo "ok - aarch64 live preset preserves drop-ins and excludes x86 and installed-root hooks"
 diff --git a/test/unit/test_local_repo_config.py b/test/unit/test_local_repo_config.py
-index e31cc8b..a1c59ab 100644
+index 642ceaf..0fb5d63 100644
 --- a/test/unit/test_local_repo_config.py
 +++ b/test/unit/test_local_repo_config.py
 @@ -22,15 +22,17 @@ class LocalRepoConfigTest(unittest.TestCase):
@@ -65,9 +65,9 @@ index e31cc8b..a1c59ab 100644
                  )
                  self.assertIn("Server = file:///omarchy-repo", result)
 -                self.assertNotIn("https://pkgs.omarchy.org/", result)
--                self.assertEqual(result.split("[omarchy]")[0], original.split("[core]")[0])
+-                self.assertEqual(result.split("[omarchy]")[0], original.split("[omarchy]")[0])
 +                self.assertIn("https://pkgs.omarchy.org/", result)
-+                self.assertEqual(result.split("[omarchy-sl7]")[0], original.split("[core]")[0])
++                self.assertEqual(result.split("[omarchy-sl7]")[0], original.split("[omarchy]")[0])
                  self.assertIn("SigLevel    = Required DatabaseOptional", result)
                  with tempfile.TemporaryDirectory() as directory:
                      configured = Path(directory) / "pacman.conf"

@@ -46,7 +46,7 @@ What you trust when you install from this project:
     [valeronm/sl7-mac](https://github.com/valeronm/sl7-mac) (Surface Laptop 7 patch series
     and device trees)
   - Omarchy (`basecamp/omarchy`, `omarchy-iso`, `omarchy-pkgs`), pinned in `upstream.lock`,
-    plus omarchy-pkgs pull requests #221 and #222
+    (its qcom-firmware-extract and linux-aarch64-pkgbase-shim PKGBUILDs are built from source)
   - [nate8199/omarchy-plugin-howdy-face](https://github.com/nate8199/omarchy-plugin-howdy-face)
     and Howdy (face unlock) and the YuNet / SFace models
   - libcamera (`git.libcamera.org`, pinned to a commit), iptsd

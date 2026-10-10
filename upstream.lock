@@ -3,7 +3,7 @@
 # named here; change it deliberately and re-verify installer/iso-patches
 # (installer/scripts/apply-iso-patches.sh --check) against the new SHAs.
 #
-# Resolved 2026-10-04.
+# Resolved 2026-10-10.
 
 # omarchy (the runtime/settings source for --local-source), branch dragon.
 OMARCHY_REPO=https://github.com/omacom/omarchy.git
@@ -11,17 +11,14 @@ OMARCHY_SHA=4a7fc7518c2f683b4d6dc3933624916171f34dc0
 
 # omarchy-iso, branch dragon, and the archiso submodule commit that SHA records.
 OMARCHY_ISO_REPO=https://github.com/omacom/omarchy-iso.git
-OMARCHY_ISO_SHA=8e4f82f6699c27973b7d2a10a9396d921c9893b3
+OMARCHY_ISO_SHA=a4201388fa44ff5e397539bc24b3637b35163d7f
 OMARCHY_ISO_ARCHISO_SHA=424e78130db2af6c1ceb55b442d7914b1109ff2b
 
 # omarchy-pkgs, branch master (PKGBUILDs for omarchy-dev, omarchy-settings-dev, omarchy-nvim).
+# Its qcom-firmware-extract (PR #221) and linux-aarch64-pkgbase-shim (PR #222)
+# PKGBUILDs are built from source into the local repository.
 OMARCHY_PKGS_REPO=https://github.com/omacom/omarchy-pkgs.git
-OMARCHY_PKGS_SHA=075f20f401518a3a9f1d9f25ec2b9e155a226eb5
-
-# Open, unpublished omarchy-pkgs PRs built from source into the local repository.
-# #221 qcom-firmware-extract, #222 linux-aarch64-pkgbase-shim.
-OMARCHY_PKGS_PR221_SHA=176f3d474f9ea10a26e4125e5347d7580dc8cd32
-OMARCHY_PKGS_PR222_SHA=7762e4f46bafcbdd739fc09d844434ee752c6e10
+OMARCHY_PKGS_SHA=39ed2398ab217dbdad40aeea1824c9f8dc261410
 
 # archinstall pinned to the release omarchy-iso's orchestrator is written and
 # tested against (archinstall_adapter.py: "Tested against archinstall 4.4").
@@ -34,6 +31,6 @@ ARCHINSTALL_SHA256=6cb5da75c108ef2f5d25a7a20baf6c52cc927d5e06890dd10182e6eb4be81
 # sl7-ir-bridge, omarchy-sl7-faceunlock) are not pinned: the installer-iso workflow
 # takes the newest signed version of each from the repo-aarch64 release, which does
 # not expire. These floors only stop it from building an older stack by mistake.
-# linux-sl7 7.2.8-23: 30 fps front camera; iptsd-sl7 17: Windows-style palm handling.
-SL7_MIN_LINUX_SL7=7.2.8-23
+# linux-sl7 7.2.9-25: 7.2.9 stable, 30 fps front camera; iptsd-sl7 17: Windows-style palm handling.
+SL7_MIN_LINUX_SL7=7.2.9-25
 SL7_MIN_IPTSD_SL7=3.1.0.r20260717-17

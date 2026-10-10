@@ -9,7 +9,7 @@
 #   SL7_PREBUILT  directory holding the downloaded *.pkg.tar.* (default /prebuilt)
 #   SL7_SOURCES   directories to build, one PKGBUILD directory each, in
 #                 sub-directories (default /src: /src/omarchy-surface-sl7,
-#                 /src/omarchy-sl7-keyring, /src/pr/qcom-firmware-extract, /src/pr/linux-aarch64-pkgbase-shim)
+#                 /src/omarchy-sl7-keyring, /src/upstream/qcom-firmware-extract, /src/upstream/linux-aarch64-pkgbase-shim)
 #   ARCHINSTALL_VERSION, ARCHINSTALL_SHA256  pinned archinstall (upstream.lock)
 #   SL7_REPO      output repository directory (default /repo)
 set -euo pipefail
@@ -46,8 +46,8 @@ build_pkg() { # directory
 
 build_pkg "$src/omarchy-sl7-keyring"
 build_pkg "$src/omarchy-surface-sl7"
-build_pkg "$src/pr/qcom-firmware-extract"
-build_pkg "$src/pr/linux-aarch64-pkgbase-shim"
+build_pkg "$src/upstream/qcom-firmware-extract"
+build_pkg "$src/upstream/linux-aarch64-pkgbase-shim"
 
 # archinstall: the orchestrator needs 4.4; ALARM extra has 4.5 (API break).
 # arch=any, so the Arch archive package is used as is, checksum-pinned.

@@ -77,8 +77,8 @@ omarchy-dragon-sl7/
 │   ├── iptsd-sl7/             # alex-lentz/iptsd fork, built with -mbranch-protection=standard
 │   ├── ath12k-board-sl7/      # board-2.bin remap hook (pacman hook on linux-firmware-qcom)
 │   ├── sl7-mac-fixup/         # valeronm/sl7-mac (or sp11-mac-fixup port) as a systemd unit
-│   ├── qcom-firmware-extract/ # vendored from omarchy-pkgs #221 until merged (the dragon ISO build check requires it)
-│   ├── linux-aarch64-pkgbase-shim/  # #222; maybe obsolete (limine-mkinitcpio-hook ≥1.38 finds ALARM's kernel); only for the stock rescue kernel
+│   ├── qcom-firmware-extract/ # built from omarchy-pkgs master (was PR #221; the dragon ISO build check requires it)
+│   ├── linux-aarch64-pkgbase-shim/  # was PR #222, now in omarchy-pkgs master; maybe obsolete (limine-mkinitcpio-hook ≥1.38 finds ALARM's kernel); only for the stock rescue kernel
 │   ├── x1e-sleepdoctor/       # Phase 4: names what blocks SoC power collapse (qcom_stats, icc, clk, genpd)
 │   ├── sl7-powerd/            # Phase 4: AC/battery switcher + cgroup cluster-parking daemon
 │   └── sl7-ir/                # Phase 5: vd55g firmware, IR bridge (Y10P→GREY v4l2loopback), udev, PAM glue

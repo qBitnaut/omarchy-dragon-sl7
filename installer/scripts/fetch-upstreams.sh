@@ -4,7 +4,6 @@
 #
 # usage: fetch-upstreams.sh DEST NAME...
 #   NAME is omarchy, omarchy-iso or omarchy-pkgs. DEST/NAME is created fresh.
-#   omarchy-pkgs also fetches the PR #221/#222 commits (see pr-pkgbuilds.sh).
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -14,18 +13,11 @@ shift
 [ $# -gt 0 ] || die "name at least one of: omarchy omarchy-iso omarchy-pkgs"
 load_lock
 
-# fetch_sha DIR SHA [PR-NUMBER]: fetch one commit by SHA; for a PR commit that
-# the server will not serve by SHA, fall back to refs/pull/N/head and require
-# it to still point at the pinned SHA.
+# fetch_sha DIR SHA: fetch one commit by SHA.
 fetch_sha() {
-	local dir="$1" sha="$2" pr="${3:-}" got
-	if git -C "$dir" fetch -q --depth 1 origin "$sha" 2>/dev/null; then
-		return 0
-	fi
-	[ -n "$pr" ] || die "cannot fetch $sha from $(git -C "$dir" remote get-url origin)"
-	git -C "$dir" fetch -q --depth 1 origin "refs/pull/$pr/head" || die "cannot fetch PR #$pr"
-	got="$(git -C "$dir" rev-parse FETCH_HEAD)"
-	[ "$got" = "$sha" ] || die "PR #$pr head is $got, upstream.lock pins $sha (PR was updated: review it, then update upstream.lock)"
+	local dir="$1" sha="$2"
+	git -C "$dir" fetch -q --depth 1 origin "$sha" 2>/dev/null ||
+		die "cannot fetch $sha from $(git -C "$dir" remote get-url origin)"
 }
 
 checkout_pinned() { # name url sha
@@ -53,10 +45,6 @@ for name in "$@"; do
 		;;
 	omarchy-pkgs)
 		checkout_pinned omarchy-pkgs "$OMARCHY_PKGS_REPO" "$OMARCHY_PKGS_SHA"
-		fetch_sha "$dest/omarchy-pkgs" "$OMARCHY_PKGS_PR221_SHA" 221
-		fetch_sha "$dest/omarchy-pkgs" "$OMARCHY_PKGS_PR222_SHA" 222
-		git -C "$dest/omarchy-pkgs" cat-file -e "$OMARCHY_PKGS_PR221_SHA^{commit}"
-		git -C "$dest/omarchy-pkgs" cat-file -e "$OMARCHY_PKGS_PR222_SHA^{commit}"
 		;;
 	*) die "unknown upstream: $name" ;;
 	esac

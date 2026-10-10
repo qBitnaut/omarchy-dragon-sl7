@@ -95,11 +95,11 @@ jobs:
           at_least iptsd-sl7 "$SL7_MIN_IPTSD_SL7"
           for n in "${!best[@]}"; do echo "$n ${bestv[$n]}"; done | sort | tee dl-versions.txt
 
-      - name: Fetch pinned omarchy-pkgs and the #221 / #222 PKGBUILDs
+      - name: Fetch pinned omarchy-pkgs and export its qcom-firmware-extract and linux-aarch64-pkgbase-shim PKGBUILDs
         run: |
           set -euo pipefail
           installer/scripts/fetch-upstreams.sh "$RUNNER_TEMP/up" omarchy-pkgs
-          installer/scripts/pr-pkgbuilds.sh "$RUNNER_TEMP/up/omarchy-pkgs" "$RUNNER_TEMP/pr"
+          installer/scripts/export-pkgbuilds.sh "$RUNNER_TEMP/up/omarchy-pkgs" "$RUNNER_TEMP/upstream"
 
       - name: Build packages and create the repository
         run: |
@@ -109,7 +109,7 @@ jobs:
             -v "$PWD/installer/scripts:/scripts:ro" \
             -v "$PWD/pkgs/omarchy-surface-sl7:/src/omarchy-surface-sl7:ro" \
             -v "$PWD/pkgs/omarchy-sl7-keyring:/src/omarchy-sl7-keyring:ro" \
-            -v "$RUNNER_TEMP/pr:/src/pr:ro" \
+            -v "$RUNNER_TEMP/upstream:/src/upstream:ro" \
             -v "$PWD/dl:/prebuilt:ro" \
             -v "$PWD/repo:/repo" \
             -e ARCHINSTALL_VERSION -e ARCHINSTALL_SHA256 \
@@ -234,7 +234,7 @@ jobs:
             echo '|---|---|'
             echo "| omarchy | \`$OMARCHY_SHA\` |"
             echo "| omarchy-iso | \`$OMARCHY_ISO_SHA\` |"
-            echo "| omarchy-pkgs | \`$OMARCHY_PKGS_SHA\` (+ #221 \`$OMARCHY_PKGS_PR221_SHA\`, #222 \`$OMARCHY_PKGS_PR222_SHA\`) |"
+            echo "| omarchy-pkgs | \`$OMARCHY_PKGS_SHA\` |"
             echo '| SL7 package (repo-aarch64) | version |'
             echo '|---|---|'
             while read -r n v; do echo "| $n | $v |"; done < "$GITHUB_WORKSPACE/dl-versions.txt"
