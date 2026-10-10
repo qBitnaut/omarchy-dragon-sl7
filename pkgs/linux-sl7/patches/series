@@ -1,4 +1,4 @@
-# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.8).
+# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.9).
 # One file name per line; lines starting with # are comments.
 # Every patch carries Origin: and Upstream-Status: headers.
 

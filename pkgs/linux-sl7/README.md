@@ -1,6 +1,6 @@
 # linux-sl7
 
-A Linux 7.2.8 kernel package for the Microsoft Surface Laptop 7 (Snapdragon X
+A Linux 7.2.9 kernel package for the Microsoft Surface Laptop 7 (Snapdragon X
 Plus and X Elite) on Arch Linux ARM and Omarchy. This is v0: the base config,
 a patch queue and the CI that builds them. Nothing here has been booted on
 hardware yet.
@@ -8,7 +8,7 @@ hardware yet.
 ## What v0 is
 
 - **Base:** Arch Linux ARM `core/linux-aarch64` (PKGBUILD and config, 7.2.x),
-  upstream linux 7.2 plus the 7.2.8 stable patch. ALARM's own five patches
+  upstream linux 7.2 plus the 7.2.9 stable patch. ALARM's own five patches
   (Rockchip and Raspberry Pi 5 only) are not carried.
 - **Packages:** `linux-sl7` and `linux-sl7-headers`.
 - **Side by side:** no `provides` or `conflicts` for `linux` or
@@ -40,7 +40,7 @@ hardware yet.
 
 `patches/series` lists the patches in apply order. Each patch has `Origin:`
 and `Upstream-Status:` headers in its commit message. Patches apply with plain
-`patch -p1` on linux 7.2.8.
+`patch -p1` on linux 7.2.9.
 
 | # | Patch | Origin | Upstream status |
 |---|---|---|---|
@@ -570,6 +570,13 @@ on manual dispatch, on `ubuntu-24.04-arm`:
 Bump `pkgver` (and the `_srcname` base for a new minor), refresh the two
 kernel.org sums in the PKGBUILD, update `config.alarm` from ALARM, then run
 `fast-check.sh`. Drop patches as they land upstream.
+
+Stable bump 7.2.8 to 7.2.9 (7.2.9-25, 2026-10-10): only `patch-7.2.9.xz` changed
+(sha256 `2e2d0cb6...`, checked against kernel.org `sha256sums.asc`). All 95 patches
+apply in order with no fuzz and no offset failures. The 7.2.8 to 7.2.9 delta touches none of
+the files our queue patches, no patch landed upstream (none dropped), and the config
+fragment is unchanged. Omarchy's own `linux-omarchy` (x86, omarchy-pkgs) is at
+7.2.8-5, so linux-sl7 is one stable release ahead of it.
 
 ## Camera (Phase A of IR face unlock)
 

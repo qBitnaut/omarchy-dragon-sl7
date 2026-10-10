@@ -14,8 +14,8 @@ pkgbase=linux-sl7
 pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
-pkgver=7.2.8
-pkgrel=24
+pkgver=7.2.9
+pkgrel=25
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -140,7 +140,7 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
-            'b509067e26487f23795b30640bbfdff0afba0c48290f1100fe880c9bdf369776'
+            '2e2d0cb6764865726c37315e04ddfc405553bf9ac59929a72e037591d75fd21a'
             'SKIP'
             'SKIP'
          'SKIP'
