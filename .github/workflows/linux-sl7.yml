@@ -39,7 +39,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libelf-dev libssl-dev device-tree-compiler \
-            python3-venv python3-pip xz-utils cpio curl ccache shellcheck
+            python3-venv python3-pip xz-utils cpio curl ccache shellcheck \
+            dwarves
 
       - name: Lint scripts
         run: shellcheck -x pkgs/linux-sl7/scripts/*.sh
