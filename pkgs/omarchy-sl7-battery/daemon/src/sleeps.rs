@@ -38,6 +38,21 @@ impl Sleep {
         }
         Some((self.energy_before_wh? - self.energy_after_wh?) / hours)
     }
+
+    /// Charge at `t` on the straight line from the pre-suspend to the resume reading. Without
+    /// a resume reading, falls back to the pre-suspend level drained at `rate_pct_h`.
+    fn charge_at(&self, t: f64, rate_pct_h: Option<f64>) -> Option<f64> {
+        let d = self.end - self.start;
+        if d <= 0.0 || t < self.start || t >= self.end {
+            return None;
+        }
+        let cb = self.charge_before?;
+        let v = match self.charge_after {
+            Some(ca) => cb + (ca - cb) * ((t - self.start) / d),
+            None => cb - rate_pct_h? * (t - self.start) / 3600.0,
+        };
+        Some(v.clamp(0.0, 100.0))
+    }
 }
 
 pub struct SleepLog {
@@ -98,6 +113,18 @@ impl SleepLog {
             .map(|s| (s.end.min(t1) - s.start.max(t0)).max(0.0))
             .sum()
     }
+
+    /// Projected charge for [t0, t1): the first sleep overlapping it that yields a value,
+    /// evaluated at the middle of the overlap.
+    pub fn charge_between(&self, t0: f64, t1: f64, rate_pct_h: Option<f64>) -> Option<f64> {
+        self.items.iter().find_map(|s| {
+            let (a, b) = (s.start.max(t0), s.end.min(t1));
+            if b <= a {
+                return None;
+            }
+            s.charge_at((a + b) / 2.0, rate_pct_h)
+        })
+    }
 }
 
 /// Wake interrupts the omarchy-surface-sl7 system-sleep hook logged in the window.
@@ -134,6 +161,32 @@ mod tests {
         let s = sleep(0.0, 3.0 * 3600.0);
         assert_eq!(s.drain_pct(), Some(6.0));
         assert!((s.avg_w().unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn charge_between_interpolates_inside_a_sleep() {
+        let mut log = SleepLog::in_memory();
+        log.append(sleep(100.0, 700.0));
+        assert!((log.charge_between(100.0, 100.0 + 1e-9, None).unwrap() - 80.0).abs() < 1e-6);
+        assert!((log.charge_between(300.0, 500.0, None).unwrap() - 77.0).abs() < 1e-9);
+        // A column straddling the wake uses the asleep part only.
+        assert!((log.charge_between(600.0, 800.0, None).unwrap() - 74.0 - 0.5).abs() < 1e-9);
+        assert_eq!(log.charge_between(700.0, 800.0, None), None);
+        assert_eq!(log.charge_between(0.0, 100.0, None), None);
+        log.append(sleep(2000.0, 2000.0));
+        assert_eq!(log.charge_between(1990.0, 2010.0, None), None);
+    }
+
+    #[test]
+    fn charge_between_falls_back_to_the_recent_rate() {
+        let mut log = SleepLog::in_memory();
+        log.append(Sleep { charge_after: None, ..sleep(0.0, 7200.0) });
+        assert_eq!(log.charge_between(0.0, 7200.0, None), None);
+        // 2 %/h for one hour in.
+        let v = log.charge_between(3000.0, 4200.0, Some(2.0)).unwrap();
+        assert!((v - 78.0).abs() < 1e-9, "{}", v);
+        log.append(Sleep { charge_before: None, charge_after: None, ..sleep(8000.0, 9000.0) });
+        assert_eq!(log.charge_between(8000.0, 9000.0, Some(2.0)), None);
     }
 
     #[test]

@@ -579,11 +579,27 @@ impl App {
         let mut screen: Vec<Value> = Vec::with_capacity(points);
         let mut onac: Vec<Value> = Vec::with_capacity(points);
         let mut asleep: Vec<Value> = Vec::with_capacity(points);
+        let mut bridged: Vec<Value> = Vec::with_capacity(points);
+        let cols: Vec<_> = (0..points).map(|c| ring.aggregate(from + c as f64 * step, from + (c + 1) as f64 * step)).collect();
+        // First measured charge at or after each column: a projection never dips below it.
+        let mut floor: Vec<Option<f64>> = vec![None; points + 1];
+        for c in (0..points).rev() {
+            floor[c] = cols[c].charge.or(floor[c + 1]);
+        }
+        let rate = self.recent_sleep_pct_h(now);
         for c in 0..points {
             let t0 = from + c as f64 * step;
             let t1 = t0 + step;
-            let col = ring.aggregate(t0, t1);
+            let col = &cols[c];
             charge.push(opt(col.charge, round1));
+            // Sleep has no buckets (the awake-only rates rely on that), so the projected
+            // line across it is computed here, for the reply only, never stored.
+            let proj = if col.charge.is_none() && self.sleeps.overlap(t0, t1) > 0.0 {
+                self.sleeps.charge_between(t0, t1, rate).map(|v| floor[c + 1].map_or(v, |f| v.max(f)))
+            } else {
+                None
+            };
+            bridged.push(opt(proj, round1));
             draw.push(opt(col.dis_w, round2));
             chg.push(opt(col.chg_w, round2));
             temp.push(opt(col.temp, round1));
@@ -593,6 +609,7 @@ impl App {
         }
         let all: Vec<(&str, Vec<Value>)> = vec![
             ("charge", charge),
+            ("charge_asleep", bridged),
             ("draw_w", draw),
             ("charge_w", chg),
             ("temp_c", temp),
@@ -703,6 +720,25 @@ impl App {
         }
         if secs > 0.0 {
             Some(wh / (secs / 3600.0))
+        } else {
+            None
+        }
+    }
+
+    /// Measured suspend drain in percentage points per hour, over the same sleeps as
+    /// `recent_sleep_w`. Derived on request; never stored.
+    fn recent_sleep_pct_h(&self, now: f64) -> Option<f64> {
+        let (mut pct, mut secs) = (0.0, 0.0);
+        for sl in self.sleeps.items.iter().filter(|x| x.end >= now - 7.0 * 86400.0 && !x.ac) {
+            if let Some(d) = sl.drain_pct() {
+                if sl.duration() >= 600.0 && d >= 0.0 {
+                    pct += d;
+                    secs += sl.duration();
+                }
+            }
+        }
+        if secs > 0.0 {
+            Some(pct / (secs / 3600.0))
         } else {
             None
         }
@@ -963,6 +999,71 @@ mod tests {
         let again = App::new(Paths { ..app.paths.clone() });
         let h2 = again.history_json(3600.0, 60, &[]);
         assert_eq!(h2["series"][0]["avg"][59], json!(42.0));
+        // Sleep columns without buckets get a projected line; measured columns do not.
+        let now = now_secs();
+        let mut sl = App::new(Paths { ..app.paths.clone() });
+        sl.sleeps.append(crate::sleeps::Sleep {
+            start: now - 2400.0,
+            end: now - 1200.0,
+            charge_before: Some(80.0),
+            charge_after: Some(74.0),
+            energy_before_wh: None,
+            energy_after_wh: None,
+            ac: false,
+            wake_irqs: None,
+        });
+        let h3 = sl.history_json(3600.0, 60, &[]);
+        let find = |m: &str| h3["series"].as_array().unwrap().iter().find(|x| x["metric"] == json!(m)).unwrap()["avg"].clone();
+        let br = find("charge_asleep");
+        assert_eq!(br.as_array().unwrap().len(), 60);
+        let mid = br[30].as_f64().unwrap();
+        assert!(mid > 74.0 && mid < 80.0, "{}", mid);
+        assert!(br[10].is_null() && br[50].is_null());
+        assert!(find("charge")[30].is_null());
+        assert!(br[59].is_null());
+        // A sleep that starts mid-column fills that partly-asleep column too.
+        let mut part = App::new(Paths { ..app.paths.clone() });
+        part.sleeps.items.clear();
+        let col0 = now - 3600.0;
+        part.sleeps.append(crate::sleeps::Sleep {
+            start: col0 + 20.0 * 60.0 + 30.0,
+            end: col0 + 30.0 * 60.0,
+            charge_before: Some(80.0),
+            charge_after: Some(70.0),
+            energy_before_wh: None,
+            energy_after_wh: None,
+            ac: false,
+            wake_irqs: None,
+        });
+        let hp = part.history_json(3600.0, 60, &["charge_asleep".to_string()]);
+        let bp = hp["series"][0]["avg"].as_array().unwrap();
+        assert!(bp[20].as_f64().unwrap() > 70.0, "{:?}", bp[20]);
+        assert!(bp[19].is_null());
+        // No resume reading: the recent drain rate (6 % over 20 min = 18 %/h) carries it.
+        let mut fb = App::new(Paths { ..app.paths.clone() });
+        fb.sleeps.items.clear();
+        let mk = |start: f64, end: f64, after: Option<f64>| crate::sleeps::Sleep {
+            start,
+            end,
+            charge_before: Some(80.0),
+            charge_after: after,
+            energy_before_wh: None,
+            energy_after_wh: None,
+            ac: false,
+            wake_irqs: None,
+        };
+        fb.sleeps.append(mk(now - 86400.0, now - 86400.0 + 1200.0, Some(74.0)));
+        fb.sleeps.append(mk(now - 2400.0, now - 1200.0, None));
+        let hf = fb.history_json(3600.0, 60, &["charge_asleep".to_string()]);
+        let bf = hf["series"][0]["avg"].as_array().unwrap();
+        let v = bf[30].as_f64().unwrap();
+        assert!(v < 80.0 && v >= 42.0, "{}", v);
+        // With no history to take a rate from, the column stays a gap.
+        let mut none = App::new(Paths { ..app.paths.clone() });
+        none.sleeps.items.clear();
+        none.sleeps.append(mk(now - 2400.0, now - 1200.0, None));
+        let hn = none.history_json(3600.0, 60, &["charge_asleep".to_string()]);
+        assert!(hn["series"][0]["avg"][30].is_null());
         let _ = std::fs::remove_dir_all(root);
     }
 

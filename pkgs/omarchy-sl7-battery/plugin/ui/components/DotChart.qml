@@ -28,6 +28,9 @@ import "../../lib/Spark.js" as Spark
 //                          futureFrom - 1 and futureFrom
 //   gapMarks: var          optional bool[]; a marked column is a gap (asleep) and its
 //                          track is drawn in gapColor
+//   bridgeMarks: var       optional bool[]; a marked column holds a projected (not measured)
+//                          value from a sleep span, and its lit dots draw hollow and faint
+//                          in bridgeColor
 //   gapColor, dividerColor, futureColor: color; dividerWidth: real
 //   readonly columns: int  how many columns fit the current width -- request that many
 //                          history points so no resampling is needed
@@ -51,6 +54,8 @@ Canvas {
     property color markColor: Color.urgent
     property int futureFrom: -1
     property var gapMarks: []
+    property var bridgeMarks: []
+    property color bridgeColor: Util.alpha(Color.foreground, 0.45)
     property color gapColor: Util.alpha(Color.foreground, 0.2)
     property color dividerColor: Util.alpha(Color.foreground, 0.35)
     property real dividerWidth: 1
@@ -74,6 +79,8 @@ Canvas {
     onFutureFromChanged: requestPaint()
     onGapMarksChanged: requestPaint()
     onGapColorChanged: requestPaint()
+    onBridgeMarksChanged: requestPaint()
+    onBridgeColorChanged: requestPaint()
     onDividerColorChanged: requestPaint()
     onDividerWidthChanged: requestPaint()
     onFutureColorChanged: requestPaint()
@@ -94,6 +101,7 @@ Canvas {
             hi = s.max
         }
         var gapped = Spark.resample((root.gapMarks || []).map(function(m) { return m ? 1 : 0 }), cols)
+        var bridged = Spark.resample((root.bridgeMarks || []).map(function(m) { return m ? 1 : 0 }), cols)
         var lit = Spark.levels(data, lo, hi, root.rows)
         var stepX = cols > 1 ? (root.width - root.dotSize) / (cols - 1) : 0
         var r = root.dotSize / 2
@@ -103,23 +111,26 @@ Canvas {
             var cx = r + c * stepX
             var level = lit[c]
             var hot = (marked[c] || 0) > 0
-            var gap = (gapped[c] || 0) > 0.5
             var future = c >= fut
+            var bridge = (bridged[c] || 0) > 0.5
+            // A projected sleep column is drawn as a line, not as a gray block.
+            var gap = (gapped[c] || 0) > 0.5 && !bridge
             for (var row = 0; row < root.rows; row++) {
                 // row 0 is the bottom dot
                 var cy = root.height - r - row * root.rowPitch
                 var on = level >= 0 && row < level
                 ctx.beginPath()
                 ctx.arc(cx, cy, r, 0, 2 * Math.PI)
-                if (on && future) {
-                    // Projection: a faint light-grey fill and a hollow ring, so the
-                    // forecast never reads as measured data.
-                    ctx.fillStyle = root.futureColor
+                if (on && (future || bridge)) {
+                    // Projection (forecast or sleep span): a faint light-grey fill and a
+                    // hollow ring, so it never reads as measured data.
+                    var tint = future ? root.futureColor : root.bridgeColor
+                    ctx.fillStyle = tint
                     ctx.globalAlpha = 0.12
                     ctx.fill()
                     ctx.beginPath()
                     ctx.arc(cx, cy, Math.max(0.5, r - 0.5), 0, 2 * Math.PI)
-                    ctx.strokeStyle = root.futureColor
+                    ctx.strokeStyle = tint
                     ctx.lineWidth = 1
                     ctx.globalAlpha = 0.35
                     ctx.stroke()

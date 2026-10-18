@@ -23,7 +23,10 @@ by the same author (MIT). Nothing of its daemon is reused: this is a laptop batt
 - **Power profile** picker (Power saver, Balanced, and Performance only if PPD lists it) and
   **Auto power saver below [30]%** (toggle and a 10-60 slider).
 - **Stats tab:** 6h / 24h / 7d / 30d, series Charge / Draw / Temp / Screen-on, a 16-row dot chart.
-  The charge chart has a fixed 0-100 axis, marks stretches on AC, shows sleep gaps as dim track
+  The charge chart has a fixed 0-100 axis, marks stretches on AC, draws each sleep span as a faint hollow line
+  from the pre-suspend level to the resume level (a projection; measured data wins, partly-asleep
+  columns are filled too, a sleep with no resume reading falls back to the recent suspend drain
+  rate, and a sleep with no usable reading stays a dim gap; AC plugged mid-sleep is not detected)
   and **projects forward**: faint hollow columns after a "now" divider run to the projected 0%
   (or to full when charging, to the charge limit if one is set, tapering above 80%), and the end
   label is human time ("Tonight 10pm", "This afternoon 3pm", "Today 11am", "Tomorrow 2am",

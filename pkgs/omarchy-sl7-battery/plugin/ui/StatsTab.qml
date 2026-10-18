@@ -10,7 +10,7 @@ import "../lib/Projection.js" as Projection
 
 // Stats tab: a window selector (6h, 24h, 7d, 30d), chips that pick the series (charge,
 // draw, temperature, screen-on) and one 16-row dot chart. The charge chart runs on a fixed
-// 0-100 axis, marks the stretches on AC, shows sleep gaps as dim track, and continues past
+// 0-100 axis, marks the stretches on AC, draws sleep as a dim projected line, and continues past
 // "now" with a hollow, faint projection to empty (or to full while charging).
 Item {
     id: root
@@ -38,7 +38,7 @@ Item {
 
     function fetchHistory() {
         if (!root.active || !root.service) return
-        var metrics = ["charge", "draw_w", "charge_w", "temp_c", "screen_on", "on_ac", "asleep"]
+        var metrics = ["charge", "draw_w", "charge_w", "temp_c", "screen_on", "on_ac", "asleep", "charge_asleep"]
         root.service.fetchHistory(root.windowName, metrics, root.points, function(ok, data, err) {
             if (!ok) {
                 if (String(err).indexOf("unknown_command") >= 0) root.daemonOld = true
@@ -78,7 +78,19 @@ Item {
     }
 
     // ---- derived data ----------------------------------------------------------
-    readonly property var chargePct: values("charge")
+    readonly property var chargeMeasured: values("charge")
+    readonly property var chargeBridge: values("charge_asleep")
+    // Measured charge, with sleep spans filled from the daemon's projected line; a
+    // measured value always wins, so only columns with no reading take the bridge.
+    readonly property var chargePct: root.chargeMeasured.map(function(v, i) {
+        if (v !== null && v !== undefined) return v
+        var b = root.chargeBridge[i]
+        return b !== null && b !== undefined ? b : null
+    })
+    readonly property var bridgeFlags: root.chargeMeasured.map(function(v, i) {
+        var b = root.chargeBridge[i]
+        return (v === null || v === undefined) && b !== null && b !== undefined
+    })
     readonly property var drawW: values("draw_w")
     readonly property var tempC: values("temp_c")
     readonly property var screenOn: values("screen_on")
@@ -149,6 +161,14 @@ Item {
     }
     readonly property var gapMarks: {
         var past = Spark.resample(root.asleep, root.lay.pastCols).map(function(v) { return v !== null && v > 0.5 })
+        var pad = []
+        for (var i = 0; i < root.lay.futureCols; i++) pad.push(false)
+        return past.concat(pad)
+    }
+    readonly property var bridgeMarks: {
+        if (root.metricIndex !== 0) return []
+        var past = Spark.resample(root.bridgeFlags.map(function(b) { return b ? 1 : 0 }), root.lay.pastCols)
+            .map(function(v) { return v !== null && v > 0.5 })
         var pad = []
         for (var i = 0; i < root.lay.futureCols; i++) pad.push(false)
         return past.concat(pad)
@@ -279,6 +299,7 @@ Item {
                 rows: 16
                 marks: root.acMarks
                 gapMarks: root.gapMarks
+                bridgeMarks: root.bridgeMarks
                 futureFrom: root.projecting && root.lay.futureCols > 0 ? root.lay.pastCols : -1
                 futureColor: root.popup.muted
                 dividerColor: root.popup.accent
