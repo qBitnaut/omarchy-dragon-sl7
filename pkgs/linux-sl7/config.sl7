@@ -57,3 +57,48 @@ CONFIG_SENSORS_QCOM_PLD_POWER=m
 # which keeps DDR from collapsing in suspend. 7.3 marks it BROKEN (df373d39c6f0),
 # and the ARMv8 Crypto Extensions cover the kernel's crypto needs.
 # CONFIG_CRYPTO_DEV_QCE is not set
+
+# Memory (synced from Omarchy's linux-omarchy-aarch64 config): zswap on at boot
+# with its shrinker, zram defaulting to zstd (zstd and lz4 backends), MGLRU
+# enabled, transparent huge pages always
+CONFIG_ZSWAP_DEFAULT_ON=y
+CONFIG_ZSWAP_SHRINKER_DEFAULT_ON=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_BACKEND_LZ4=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
+CONFIG_ZRAM_DEF_COMP="zstd"
+CONFIG_LRU_GEN=y
+CONFIG_LRU_GEN_ENABLED=y
+CONFIG_TRANSPARENT_HUGEPAGE=y
+CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y
+# CONFIG_TRANSPARENT_HUGEPAGE_MADVISE is not set
+
+# Maximum ASLR entropy for 4K pages (39-bit VA gives 18, 48-bit gives 33)
+CONFIG_ARCH_MMAP_RND_BITS=33
+
+# Security modules: lockdown (off until requested), IMA with a readable and
+# writable policy, BPF LSM; the LSM order matches Omarchy
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_BPF_LSM=y
+CONFIG_INTEGRITY=y
+CONFIG_IMA=y
+CONFIG_IMA_READ_POLICY=y
+CONFIG_IMA_WRITE_POLICY=y
+CONFIG_LSM="landlock,lockdown,yama,integrity,bpf"
+
+# BTF for BPF CO-RE (needs DWARF 5 debug info and pahole), no debug-preempt checks
+# CONFIG_DEBUG_INFO_NONE is not set
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_DEBUG_INFO_BTF=y
+# CONFIG_DEBUG_PREEMPT is not set
+
+# Signed modules (ephemeral per-build key, not forced), sha512 like Omarchy;
+# the in-tree build of v4l2loopback is signed by modules_install as well
+CONFIG_MODULE_SIG=y
+CONFIG_MODULE_SIG_ALL=y
+CONFIG_MODULE_SIG_SHA512=y
+CONFIG_MODULE_SIG_HASH="sha512"
+
+# Kexec handover available, off unless kho=on is passed
+CONFIG_KEXEC_HANDOVER=y
+# CONFIG_KEXEC_HANDOVER_ENABLE_DEFAULT is not set

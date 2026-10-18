@@ -1,6 +1,6 @@
 # linux-sl7
 
-A Linux 7.2.9 kernel package for the Microsoft Surface Laptop 7 (Snapdragon X
+A Linux 7.2.11 kernel package for the Microsoft Surface Laptop 7 (Snapdragon X
 Plus and X Elite) on Arch Linux ARM and Omarchy. This is v0: the base config,
 a patch queue and the CI that builds them. Nothing here has been booted on
 hardware yet.
@@ -8,7 +8,7 @@ hardware yet.
 ## What v0 is
 
 - **Base:** Arch Linux ARM `core/linux-aarch64` (PKGBUILD and config, 7.2.x),
-  upstream linux 7.2 plus the 7.2.9 stable patch. ALARM's own five patches
+  upstream linux 7.2 plus the 7.2.11 stable patch. ALARM's own five patches
   (Rockchip and Raspberry Pi 5 only) are not carried.
 - **Packages:** `linux-sl7` and `linux-sl7-headers`.
 - **Side by side:** no `provides` or `conflicts` for `linux` or
@@ -35,12 +35,19 @@ hardware yet.
 | `VIDEO_QCOM_CAMSS=m`, `PHY_QCOM_MIPI_CSI2=m`, `I2C_QCOM_CCI=m`, `CLK_X1E80100_CAMCC=m`, `V4L2_FWNODE=m`, `V4L2_CCI_I2C=m` | X1E camera subsystem (patches 0025-0037) |
 | `VIDEO_OV02C10=m`, `VIDEO_VD55G=m` | front RGB and IR sensors (`VIDEO_VD55G` replaces `VIDEO_VD55G1`) |
 | `LEDS_CLASS_FLASH=m`, `LEDS_QCOM_FLASH=m`, `V4L2_FLASH_LED_CLASS=m` | PMIC flash LED class; not described in the DT, so nothing fires the illuminator |
+| `ZSWAP_DEFAULT_ON=y`, `ZSWAP_SHRINKER_DEFAULT_ON=y`, `ZRAM_BACKEND_ZSTD=y`, `ZRAM_BACKEND_LZ4=y`, `ZRAM_DEF_COMP_ZSTD=y` (`ZRAM_DEF_COMP="zstd"`) | zswap on at boot, zram defaults to zstd (synced from Omarchy's `config.aarch64`) |
+| `LRU_GEN=y`, `LRU_GEN_ENABLED=y`, `TRANSPARENT_HUGEPAGE=y` with `_ALWAYS=y` | MGLRU and transparent huge pages always on (Omarchy) |
+| `ARCH_MMAP_RND_BITS=33` | maximum ASLR entropy for 4K pages (Omarchy) |
+| `SECURITY_LOCKDOWN_LSM=y`, `BPF_LSM=y`, `INTEGRITY=y`, `IMA=y`, `IMA_READ_POLICY=y`, `IMA_WRITE_POLICY=y`, `LSM="landlock,lockdown,yama,integrity,bpf"` | Omarchy's security module set and order; lockdown stays off until requested (`LOCK_DOWN_KERNEL_FORCE_NONE`) |
+| `DEBUG_INFO_NONE` off, `DEBUG_INFO_DWARF5=y`, `DEBUG_INFO_BTF=y`, `DEBUG_PREEMPT` off | BTF for BPF CO-RE (needs pahole, already a makedepend); DWARF 5 is the price, so expect a larger `vmlinux` and a longer link |
+| `MODULE_SIG=y`, `MODULE_SIG_ALL=y`, `MODULE_SIG_SHA512=y` | modules signed with a per-build ephemeral key, signatures not enforced; the in-tree built v4l2loopback is signed by `modules_install` too |
+| `KEXEC_HANDOVER=y`, `KEXEC_HANDOVER_ENABLE_DEFAULT` off | KHO available, enabled only with `kho=on` (Omarchy) |
 
 ## Patch queue
 
 `patches/series` lists the patches in apply order. Each patch has `Origin:`
 and `Upstream-Status:` headers in its commit message. Patches apply with plain
-`patch -p1` on linux 7.2.9.
+`patch -p1` on linux 7.2.11.
 
 | # | Patch | Origin | Upstream status |
 |---|---|---|---|
@@ -89,6 +96,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0100 | SL7 local: romulus front camera clocked from a 12 MHz `fixed-clock` node (CAMCC MCLK4 reference and its 19.2 MHz assigned rate dropped, gpio100 pinctrl kept), `link-frequencies` 250 MHz | ours | not submitted (SL7 specific) |
 | 0101 | SL7 local: vd55g registers with `v4l2_async_register_subdev_sensor()` (was `v4l2_async_register_subdev()`), so the V4L2 core looks up the sensor's optional "privacy" LED; probe defers until that LED exists | ours | not submitted (generic, upstream candidate) |
 | 0102 | SL7 local: the camera indicator (`white:camera-indicator`, GPIO 225) gets the label `camera_privacy_led`, loses `panic-indicator`, and is the `privacy` LED of the OV02C10 (romulus) and the VD55G0 (romulus13). It lights while either camera streams. Windows lights it for the front RGB camera only (ACPI CAMP owns GPIO 225, CAMI has none); lighting it for the IR camera too, so a face scan is visible, is our choice. The LED is shared without a reference count: if one camera stops while the other still streams, it goes off | ours | not submitted (SL7 specific) |
+| 0103 | media: iris: reset the CPU-to-VPU AHB bridge (`CPU_CS_AHB_BRIDGE_SYNC_RESET`: SW reset, then HW reset disable, then 0) before `iris_vpu_set_hwmode()` switches the video power domain to hardware control, so a stale bridge FIFO from a powered-down core cannot break the next session. Fixes 95a337f92f0a, Cc: stable | linux-media `cc330f558996` (Vikash Garodia, Renjiang Han; reported and tested by Birk Skyum on a Yoga Slim 7x), carried by Omarchy as `2000-media-iris-reset-AHB-bridge-before-enabling-HW-mode.patch` | accepted in linux-media, not in 7.2.11; drop when it reaches stable |
 
 PMIC IR LED patches (0080, 0081, 0091 to 0093, 0095, 0096): retired. The PM8550 flash LED path
 proved to have no load (open circuit); the IR emitter is lit by the sensor's GPIO 1 strobe (0094,
@@ -577,6 +585,15 @@ apply in order with no fuzz and no offset failures. The 7.2.8 to 7.2.9 delta tou
 the files our queue patches, no patch landed upstream (none dropped), and the config
 fragment is unchanged. Omarchy's own `linux-omarchy` (x86, omarchy-pkgs) is at
 7.2.8-5, so linux-sl7 is one stable release ahead of it.
+
+Stable bump 7.2.9 to 7.2.11 (7.2.11-26, 2026-10-18): `patch-7.2.11.xz` (sha256 `534895f6...`,
+checked against kernel.org `sha256sums.asc`) now covers 7.2.10 and 7.2.11. All 96 patches apply in
+order with no fuzz and no rejects; 12 hunks in patches 0050, 0052, 0064, 0066, 0068, 0069 and 0085
+(pinctrl-msm, x1e80100 and hamoa DTS, qcom_geni_serial, ath12k) apply with offsets of up to 86
+lines. `config.alarm` is refreshed from ALARM's `core/linux-aarch64` 7.2.11-1 (new: the AMU
+CONSTCNT and erratum 3821522 workarounds, `IGC=m`, `TYPEC_RT1711H=m`; the file's own header still
+says 7.2.10). Patch 0103 (Iris AHB bridge reset) and the Omarchy config sync are new in this
+release; see the config fragment table.
 
 ## Camera (Phase A of IR face unlock)
 

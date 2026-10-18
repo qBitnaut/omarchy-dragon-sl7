@@ -1,4 +1,4 @@
-# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.9).
+# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.11).
 # One file name per line; lines starting with # are comments.
 # Every patch carries Origin: and Upstream-Status: headers.
 
@@ -165,3 +165,6 @@
 # 23. Camera indicator LED (GPIO 225) as the "privacy" LED of both cameras: vd55g registers as a sensor subdev so the V4L2 core finds it; the romulus DT links the OV02C10 and the VD55G0 to it (SL7 local)
 0101-SL7-local-media-i2c-vd55g-Look-up-the-privacy-LED.patch
 0102-SL7-arm64-dts-qcom-x1e80100-romulus-Light-the-camera-indicator-for-both-cameras.patch
+
+# 24. Iris: reset the CPU-to-VPU AHB bridge before switching the video power domain to hardware mode, so a stale bridge FIFO cannot hang the next session (linux-media cc330f558996, Cc: stable; carried by Omarchy)
+0103-media-iris-reset-AHB-bridge-before-enabling-HW-mode.patch
