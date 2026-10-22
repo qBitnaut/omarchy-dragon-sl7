@@ -1,0 +1,47 @@
+From 10a47fb67340bca274276faf855d7d460afd9a7a Mon Sep 17 00:00:00 2001
+From: Will Deacon <will@kernel.org>
+Date: Fri, 26 Jun 2026 15:17:28 +0100
+Subject: [PATCH] tools: linux/types.h: Add 128-bit integer types for arm64
+ UAPI structures
+
+The arm64 UAPI exposes some 128-bit integer types to represent things
+such as fpsimd registers in the sigcontext. In preparation for defining
+these using the '__u128' typedef implemented by uapi/linux/types.h, copy
+that typedef over to the private linux/types.h header used by the tools
+directory.
+
+Cc: Arnd Bergmann <arnd@arndb.de>
+Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: David Matlack <dmatlack@google.com>
+Signed-off-by: Will Deacon <will@kernel.org>
+
+Why linux-sl7 carries this: linux-api-headers 7.3 (Arch Linux ARM, rolling)
+installs arm64 asm/ptrace.h and asm/sigcontext.h that use __u128. The host
+tools of a 7.2 tree (tools/bpf/resolve_btfids, needed by CONFIG_DEBUG_INFO_BTF)
+compile with -I tools/include first, so <linux/types.h> resolves to the
+tools copy, which has no __u128 before this change, and glibc's <signal.h>
+then fails on the system headers. The 7.3 tools tree has this hunk; it is not
+in linux-7.2.y.
+
+Origin: torvalds/linux 10a47fb67340bca274276faf855d7d460afd9a7a (v7.3-rc1)
+Upstream-Status: Backport (merged in v7.3; not in linux-7.2.y as of 7.2.15); drop when the base is 7.3 or later
+
+---
+ tools/include/linux/types.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/tools/include/linux/types.h b/tools/include/linux/types.h
+--- a/tools/include/linux/types.h
++++ b/tools/include/linux/types.h
+@@ -23,6 +23,11 @@ typedef enum {
+ 	__GFP_HIGH
+ } gfp_t;
+ 
++#ifdef __SIZEOF_INT128__
++typedef __signed__ __int128 __s128 __attribute__((aligned(16)));
++typedef unsigned __int128 __u128 __attribute__((aligned(16)));
++#endif
++
+ /*
+  * We define u64 as uint64_t for every architecture
+  * so that we can print it with "%"PRIx64 without getting warnings.

@@ -111,6 +111,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0115 | i2c: qcom-cci: reset the controller on every runtime resume (a master can stop starting transfers after a target on its bus was power cycled while the controller kept its clocks, "master 1 queue 0 timeout"; OV02C10 starts failed 3 of 40 times, 0 of 40 with the reset) | Birk Skyum, carried by Omarchy as `2208-i2c-qcom-cci-Reset-the-controller-when-it-resumes.patch` | no upstream posting named in the Omarchy header |
 | 0116 | i2c: qcom-cci: autosuspend the controller 50 ms (was 1 s) after the last transfer, so the reset of 0115 runs between quick camera close and reopen cycles (OV02C10 restarts after short pauses failed in most cycles before, 0 of 100 after) | Birk Skyum, carried by Omarchy as `2209-i2c-qcom-cci-Suspend-the-controller-50-ms-after-the-last-transfer.patch` | no upstream posting named in the Omarchy header |
 | 0117 | SL7 local: dt-bindings: `qcom,x1e80100-camcc` accepts the display MDSS GDSC as an optional third power domain (`minItems: 2`; `required-opps` stays at two entries, one per MXC and MMCX domain). Without it `dtbs_check` fails the romulus DTBs with "power-domains ... is too long" because of 0114 | ours | not submitted; send with 0114 if that is ever posted |
+| 0118 | tools: `linux/types.h` gains the `__s128`/`__u128` typedefs. Arch Linux ARM's `linux-api-headers` 7.3 installs arm64 `asm/ptrace.h` and `asm/sigcontext.h` that use `__u128`; the host tools of a 7.2 tree (`resolve_btfids`, needed by `CONFIG_DEBUG_INFO_BTF`) compile with `-I tools/include` first, so `<linux/types.h>` is the tools copy and glibc's `<signal.h>` fails with "unknown type name `__u128`". Drop when the base is 7.3 or later | Will Deacon, `10a47fb67340` | torvalds, v7.3-rc1; not in linux-7.2.y (checked 7.2.15) |
 
 PMIC IR LED patches (0080, 0081, 0091 to 0093, 0095, 0096): retired. The PM8550 flash LED path
 proved to have no load (open circuit); the IR emitter is lit by the sensor's GPIO 1 strobe (0094,
@@ -620,6 +621,10 @@ read and IRQ deadlock fixes, DPU and DP fixes, CAMSS display GDSC hold and the C
 autosuspend); 0117 is our own binding change that 0114 needs for `dtbs_check`. No suspend-path patch (GMU and gcc sync_state, ADSP_PWR_LMTS, cluster idle, PCIe,
 pmdomain) is in this release, so a change in deep-suspend behaviour can be attributed to the
 later release that adds them.
+
+Patch 0118 (host tools) fixes the CI build: the Arch Linux ARM container upgrades `linux-api-headers` to 7.3, whose
+arm64 `asm/ptrace.h` and `asm/sigcontext.h` need `__u128`, which `tools/include/linux/types.h` only has from
+7.3. Without it `resolve_btfids` (libbpf, libsubcmd) fails to compile on any 7.2.y tree.
 
 ## Camera (Phase A of IR face unlock)
 
