@@ -23,7 +23,7 @@ Tested-by: Birk Skyum <birk.skyum@pm.me> # Lenovo Yoga Slim 7x
 Signed-off-by: Bryan O'Donoghue <bod@kernel.org>
 
 Origin: linux-media cc330f558996 (Vikash Garodia), carried by Omarchy linux-omarchy-aarch64 as 2000
-Upstream-Status: Accepted in linux-media (Cc: stable), not in 7.2.11
+Upstream-Status: Accepted in linux-media (Cc: stable), not in 7.2.12
 
 ---
  drivers/media/platform/qcom/iris/iris_vpu_common.c | 5 +++++
