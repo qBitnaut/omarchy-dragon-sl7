@@ -1,0 +1,136 @@
+sl7-faceunlock overlay patch 3: howdy-lock-upstream-4.0.6.patch
+Ports the stock omarchy.lock changes between the fork base (omacom/omarchy
+f73740ff, 2026-08-13) and tag v4.0.6 into nate.howdy-lock e5e5402, written
+against Service.qml as howdy-lock-pam.patch and howdy-lock-state-sync.patch
+leave it. Contents: #14553 (import qs.Commons as Commons; Commons.Color for
+Qt 6.12), #15020 (stranded-lock check via omarchy-hyprland-session-lock-stranded
+"$PPID"), #14978 (currentlyLocked() everywhere a decision is made; replaces the
+state-sync patch's freshLocked()). Marker: "sl7-faceunlock: upstream 4.0.6 sync".
+Applies on v4.0.6 and v4.5.0-rc1 hosts alike (helper binary and Commons alias
+exist on both).
+--- a/Service.qml
++++ b/Service.qml
+@@ -4,6 +4,7 @@
+ import Quickshell.Services.Pam
+ import Quickshell.Wayland
+ import qs.Commons
++import qs.Commons as Commons
+
+ // sl7-faceunlock: PAM patch (omarchy-sl7-faceunlock lock apply).
+ // Face unlock authenticates through the PAM service omarchy-lock-face
+@@ -52,6 +53,14 @@
+   // stays silent.
+   property bool sessionLockHeld: false
+   readonly property bool locked: lockRequested || sessionLockHeld || sessionLock.secure
++
++  // sl7-faceunlock: upstream 4.0.6 sync (omacom/omarchy #14553, #15020, #14978).
++  // Decisions read the lock state afresh. A property binding that missed a change
++  // notification once reported locked after an unlock, and a lock request before
++  // suspend then took that for done and never locked the session.
++  function currentlyLocked() {
++    return lockRequested || sessionLock.locked || sessionLock.secure
++  }
+   readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating || howdyAuthenticating
+
+   function realScreenCount() {
+@@ -94,13 +103,16 @@
+   }
+
+   // ext-session-lock outlives its client, and a restart carries no lock over, so
+-  // a session locked this early is an orphan behind Hyprland's failsafe. Outputs
+-  // are often still absent here, so ask until the answer means something.
++  // a session locked this early may be an orphan behind Hyprland's failsafe. It
++  // may also be another shell's live lock, which Hyprland would let this one
++  // take over and then strand on exit, so the helper answers undetermined while
++  // another locker runs. Outputs are often still absent here, so ask until the
++  // answer means something.
+   function checkStrandedLock() {
+     if (strandedLockResolved || strandedLockCheckProc.running) return
+
+     // A lock this shell took is nobody's orphan.
+-    if (locked || lockRequested) {
++    if (currentlyLocked()) {
+       strandedLockResolved = true
+       return
+     }
+@@ -109,7 +121,7 @@
+   }
+
+   function recoverStrandedLock() {
+-    if (!strandedLock || locked || !passwordPamConfigured) return
++    if (!strandedLock || currentlyLocked() || !passwordPamConfigured) return
+
+     strandedLock = false
+     logEvent("lock-stranded: recovering")
+@@ -182,11 +194,6 @@
+     return true
+   }
+
+-  // Uncached view of the lock state, straight from the session lock object.
+-  function freshLocked() {
+-    return lockRequested || sessionLock.locked || sessionLock.secure
+-  }
+-
+   // The session lock went away (unlock, or the compositor ended it).
+   function releaseLockRequest() {
+     if (!lockRequested) return
+@@ -208,7 +215,7 @@
+   }
+
+   function finishUnlock() {
+-    if (!root.locked && !lockRequested) return
++    if (!root.currentlyLocked()) return
+
+     lockRequested = false
+     pendingSessionLock = false
+@@ -394,7 +401,7 @@
+
+     WlSessionLockSurface {
+       id: lockSurface
+-      color: Color.background
++      color: Commons.Color.background
+
+       LockView {
+         id: lockView
+@@ -576,7 +583,8 @@
+
+   Process {
+     id: strandedLockCheckProc
+-    command: ["bash", "-c", "omarchy-hyprland-session-locked"]
++    // $PPID is this shell: a crash re-execs in place, so its pid is the one to skip.
++    command: ["bash", "-c", "omarchy-hyprland-session-lock-stranded \"$PPID\""]
+     onExited: function(exitCode) {
+       // No output to read the lock off yet.
+       if (exitCode === 2) return
+@@ -584,7 +592,7 @@
+       root.strandedLockResolved = true
+
+       // A lock taken while this was in flight is this shell's own.
+-      root.strandedLock = exitCode === 0 && !root.locked && !root.lockRequested
++      root.strandedLock = exitCode === 0 && !root.currentlyLocked()
+       root.recoverStrandedLock()
+     }
+   }
+@@ -708,19 +716,19 @@
+     function lock(): string {
+       if (!root.passwordPamConfigured) return "missing-pam"
+       root.syncSessionLockState()
+-      var fresh = root.freshLocked()
++      var fresh = root.currentlyLocked()
+       if (root.locked !== fresh) root.logEvent("lock-state-drift: cached=" + root.locked + " fresh=" + fresh)
+       if (!fresh && !root.beginLock()) return "failed"
+       return "ok"
+     }
+
+     function isLocked(): string {
+-      return root.freshLocked() ? "true" : "false"
++      return root.currentlyLocked() ? "true" : "false"
+     }
+
+     function status(): string {
+       return JSON.stringify({
+-        locked: root.freshLocked(),
++        locked: root.currentlyLocked(),
+         lockedCached: root.locked,
+         requested: root.lockRequested,
+         pending: root.pendingSessionLock,

@@ -12,18 +12,38 @@
 LOCK_ID=nate.howdy-lock
 LOCK_URL=${SL7_LOCK_URL:-https://github.com/nate8199/omarchy-plugin-howdy-face.git}
 LOCK_PIN=e5e5402
+# sha256 of each patched file at LOCK_PIN, used to warn about drift.
 LOCK_PRISTINE_SHA256=1144e7a896f971001276997595f24c0d471ddbf196aee09c83f4f5809b620326
+LOCK_PRISTINE_LOCKVIEW_SHA256=d60d682b6972a179774096fba8ba3d9f3340ff8f1e9e48978ed32db556c5f69f
+
+# The plugin files the overlay edits, with their pristine hashes ("file|sha256").
+LOCK_FILES=(
+  "Service.qml|$LOCK_PRISTINE_SHA256"
+  "LockView.qml|$LOCK_PRISTINE_LOCKVIEW_SHA256"
+)
 
 # The overlay is an ordered list of patches, applied top to bottom, each one
-# with the marker it leaves in Service.qml ("file|marker"). A later patch is
-# written against the file as the earlier ones leave it:
-#   howdy-lock-pam.patch         face unlock through PAM service omarchy-lock-face
-#   howdy-lock-state-sync.patch  stale `locked` after unlock (quickshell 0.3.2,
-#                                omacom/omarchy#14588)
+# with the file it edits and the marker it leaves there ("patch|file|marker").
+# A later patch is written against the file as the earlier ones leave it:
+#   howdy-lock-pam.patch           face unlock through PAM service omarchy-lock-face
+#   howdy-lock-state-sync.patch    stale `locked` after unlock (quickshell 0.3.2,
+#                                  omacom/omarchy#14588)
+#   howdy-lock-upstream-4.0.6.patch  Service.qml follows Omarchy 4.0.6 lock-state
+#                                  logic (currentlyLocked(), stranded-lock
+#                                  helper) and Commons.Color (Qt 6.12)
+#   howdy-lock-view-4.0.6.patch    LockView.qml: Commons.Color, plain-text
+#                                  status, key auto-repeat guard
 LOCK_PATCHES=(
-  'howdy-lock-pam.patch|sl7-faceunlock: PAM patch'
-  'howdy-lock-state-sync.patch|sl7-faceunlock: lock-state sync'
+  'howdy-lock-pam.patch|Service.qml|sl7-faceunlock: PAM patch'
+  'howdy-lock-state-sync.patch|Service.qml|sl7-faceunlock: lock-state sync'
+  'howdy-lock-upstream-4.0.6.patch|Service.qml|sl7-faceunlock: upstream 4.0.6 sync'
+  'howdy-lock-view-4.0.6.patch|LockView.qml|sl7-faceunlock: lock-view sync'
 )
+
+# Field accessors for a LOCK_PATCHES / LOCK_FILES entry.
+lock_entry_patch() { printf '%s' "${1%%|*}"; }
+lock_entry_file() { local r=${1#*|}; printf '%s' "${r%%|*}"; }
+lock_entry_mark() { local r=${1#*|}; printf '%s' "${r#*|}"; }
 
 lock_plugin_dir() {
   printf '%s/%s' "${SL7_PLUGIN_DIR:-$HOME/.config/omarchy/plugins}" "$LOCK_ID"
@@ -33,16 +53,18 @@ lock_installed() {
   [[ -f $(lock_plugin_dir)/Service.qml ]]
 }
 
-# Is the patch whose marker is $1 present in the installed Service.qml?
+# Is the patch entry $1 present in the file it edits?
 lock_patch_applied() {
-  lock_installed && grep -qF -- "$1" "$(lock_plugin_dir)/Service.qml"
+  local f
+  f=$(lock_plugin_dir)/$(lock_entry_file "$1")
+  lock_installed && [[ -f $f ]] && grep -qF -- "$(lock_entry_mark "$1")" "$f"
 }
 
 # Every patch of the overlay is in.
 lock_patched() {
   local entry
   for entry in "${LOCK_PATCHES[@]}"; do
-    lock_patch_applied "${entry#*|}" || return 1
+    lock_patch_applied "$entry" || return 1
   done
 }
 
@@ -50,10 +72,10 @@ lock_patched() {
 lock_patch_lines() {
   local entry
   for entry in "${LOCK_PATCHES[@]}"; do
-    if lock_patch_applied "${entry#*|}"; then
-      say "patch ${entry%%|*}: applied"
+    if lock_patch_applied "$entry"; then
+      say "patch $(lock_entry_patch "$entry"): applied"
     else
-      say "patch ${entry%%|*}: missing"
+      say "patch $(lock_entry_patch "$entry"): missing"
     fi
   done
 }
@@ -69,7 +91,7 @@ lock_status() {
 lock_patchset_version() {
   local entry
   for entry in "${LOCK_PATCHES[@]}"; do
-    cat -- "$SL7_LIB/lock-patch/${entry%%|*}" 2>/dev/null
+    cat -- "$SL7_LIB/lock-patch/$(lock_entry_patch "$entry")" 2>/dev/null
   done | sha256sum | cut -c1-16
 }
 
@@ -109,65 +131,87 @@ lock_disable_plugin() {
 }
 
 # Apply the overlay: every patch, in order, the ones already in skipped.
-# Idempotent. The patches are tried on a scratch copy first and the result is
-# swapped in atomically, so Service.qml is never half patched. On failure the
-# stock lock is left in charge (the plugin stays or is made disabled) and the
-# return code is non-zero.
+# Idempotent. The patches are tried on a scratch copy of every patched file
+# first and the results are swapped in atomically, so no file is ever half
+# patched. On failure the stock lock is left in charge (the plugin stays or is
+# made disabled) and the return code is non-zero.
 lock_apply_patch() {
-  local dir svc work entry file mark patch sum marked=0
+  local dir work entry fentry file mark patch sum target pristine marked
+  local -a touched=()
   dir=$(lock_plugin_dir)
-  svc=$dir/Service.qml
-  [[ -f $svc ]] || { err "$LOCK_ID is not installed"; return 1; }
+  for fentry in "${LOCK_FILES[@]}"; do
+    file=$(lock_entry_patch "$fentry")
+    [[ -f $dir/$file ]] || { err "$LOCK_ID is not installed (no $file)"; return 1; }
+  done
   for entry in "${LOCK_PATCHES[@]}"; do
-    [[ -f $SL7_LIB/lock-patch/${entry%%|*} ]] || { err "patch file missing: $SL7_LIB/lock-patch/${entry%%|*}"; return 1; }
+    patch=$(lock_entry_patch "$entry")
+    [[ -f $SL7_LIB/lock-patch/$patch ]] || { err "patch file missing: $SL7_LIB/lock-patch/$patch"; return 1; }
   done
   if lock_patched; then
     ok "lock overlay already applied (${#LOCK_PATCHES[@]} patches)"
     lock_record_patchset
     return 0
   fi
-  for entry in "${LOCK_PATCHES[@]}"; do
-    lock_patch_applied "${entry#*|}" && marked=1
-  done
-  if ((marked == 0)); then
-    sum=$(sha256sum "$svc" | cut -d' ' -f1)
-    [[ $sum == "$LOCK_PRISTINE_SHA256" ]] ||
-      warn "Service.qml differs from the version the patches were written for (upstream changed?); trying anyway"
-  fi
-
+  # A file none of whose patches is in yet is still upstream's: check its hash
+  # and keep a pristine backup of it.
   work=$(mktemp -d) || { err "cannot create a scratch directory"; return 1; }
-  cp -p "$svc" "$work/Service.qml"
+  for fentry in "${LOCK_FILES[@]}"; do
+    file=$(lock_entry_patch "$fentry")
+    pristine=${fentry#*|}
+    marked=0
+    for entry in "${LOCK_PATCHES[@]}"; do
+      [[ $(lock_entry_file "$entry") == "$file" ]] && lock_patch_applied "$entry" && marked=1
+    done
+    if ((marked == 0)); then
+      touched+=("$file")
+      sum=$(sha256sum "$dir/$file" | cut -d' ' -f1)
+      [[ $sum == "$pristine" ]] ||
+        warn "$file differs from the version the patches were written for (upstream changed?); trying anyway"
+    fi
+    cp -p "$dir/$file" "$work/$file"
+  done
+
   for entry in "${LOCK_PATCHES[@]}"; do
-    file=${entry%%|*}
-    mark=${entry#*|}
-    patch=$SL7_LIB/lock-patch/$file
-    if grep -qF -- "$mark" "$work/Service.qml"; then
-      note "$file already applied"
+    patch=$(lock_entry_patch "$entry")
+    target=$(lock_entry_file "$entry")
+    mark=$(lock_entry_mark "$entry")
+    if grep -qF -- "$mark" "$work/$target"; then
+      note "$patch already applied"
       continue
     fi
-    if ! patch -p1 --dry-run -s -d "$work" -i "$patch" >/dev/null 2>&1 ||
-      ! patch -p1 -s -d "$work" -i "$patch" >/dev/null 2>&1 ||
-      ! grep -qF -- "$mark" "$work/Service.qml"; then
+    if ! patch -p1 --dry-run -s -d "$work" -i "$SL7_LIB/lock-patch/$patch" >/dev/null 2>&1 ||
+      ! patch -p1 -s -d "$work" -i "$SL7_LIB/lock-patch/$patch" >/dev/null 2>&1 ||
+      ! grep -qF -- "$mark" "$work/$target"; then
       rm -rf -- "$work"
-      err "the overlay patch $file does not apply to this version of $LOCK_ID"
+      err "the overlay patch $patch does not apply to this version of $LOCK_ID"
       warn "leaving the stock Omarchy lock screen in place"
       lock_disable_plugin
       return 1
     fi
-    note "$file applies"
+    note "$patch applies"
   done
   if [[ $DRY_RUN == 1 ]]; then
     rm -rf -- "$work"
-    note "[dry-run] would patch $svc"
+    note "[dry-run] would patch $dir"
     return 0
   fi
-  ((marked == 0)) && { [[ -e $svc.sl7-orig ]] || cp -p "$svc" "$svc.sl7-orig"; }
-  cp -p "$svc" "$work/orig"
-  if ! cp -p "$work/Service.qml" "$svc.sl7-new" || ! mv -f "$svc.sl7-new" "$svc" || ! lock_patched; then
-    cp -p "$work/orig" "$svc"
-    rm -rf -- "$work" "$svc.sl7-new"
-    err "patching failed; previous file restored"
-    lock_disable_plugin
+  mkdir -p -- "$work/orig"
+  for file in "${touched[@]}"; do
+    [[ -e $dir/$file.sl7-orig ]] || cp -p "$dir/$file" "$dir/$file.sl7-orig"
+  done
+  for fentry in "${LOCK_FILES[@]}"; do
+    file=$(lock_entry_patch "$fentry")
+    cp -p "$dir/$file" "$work/orig/$file"
+  done
+  for fentry in "${LOCK_FILES[@]}"; do
+    file=$(lock_entry_patch "$fentry")
+    if ! cp -p "$work/$file" "$dir/$file.sl7-new" || ! mv -f "$dir/$file.sl7-new" "$dir/$file"; then
+      lock_swap_failed "$dir" "$work"
+      return 1
+    fi
+  done
+  if ! lock_patched; then
+    lock_swap_failed "$dir" "$work"
     return 1
   fi
   rm -rf -- "$work"
@@ -175,16 +219,31 @@ lock_apply_patch() {
   ok "lock overlay applied (${#LOCK_PATCHES[@]} patches; face unlock goes through PAM service omarchy-lock-face)"
 }
 
-# Back to upstream's Service.qml, ready to re-patch.
+# Put every patched file back as it was before the swap.
+lock_swap_failed() {
+  local dir=$1 work=$2 fentry file
+  for fentry in "${LOCK_FILES[@]}"; do
+    file=$(lock_entry_patch "$fentry")
+    cp -p "$work/orig/$file" "$dir/$file"
+    rm -f -- "$dir/$file.sl7-new"
+  done
+  rm -rf -- "$work"
+  err "patching failed; previous files restored"
+  lock_disable_plugin
+}
+
+# Back to upstream's files, ready to re-patch.
 lock_restore_original() {
-  local dir svc
+  local dir fentry file
   dir=$(lock_plugin_dir)
-  svc=$dir/Service.qml
-  if [[ -e $svc.sl7-orig ]]; then
-    cp -p "$svc.sl7-orig" "$svc"
-  elif git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "$dir" checkout -- Service.qml
-  fi
+  for fentry in "${LOCK_FILES[@]}"; do
+    file=$(lock_entry_patch "$fentry")
+    if [[ -e $dir/$file.sl7-orig ]]; then
+      cp -p "$dir/$file.sl7-orig" "$dir/$file"
+    elif git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+      git -C "$dir" checkout -- "$file"
+    fi
+  done
 }
 
 lock_install() {
@@ -240,8 +299,8 @@ lock_remove() {
 }
 
 # Is a session lock in force right now? Reads the live fields of
-# `omarchy-shell lock status` (not the cached "locked", which is what the state
-# sync patch repairs). 0 = locked or cannot tell, 1 = certainly not locked.
+# `omarchy-shell lock status` (not the cached "locked", which the plugin now
+# derives the way upstream 4.0.6 does). 0 = locked or cannot tell, 1 = certainly not locked.
 # When the shell is not running there is no lock of ours to disturb.
 lock_session_locked() {
   local json

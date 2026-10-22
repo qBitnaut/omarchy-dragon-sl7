@@ -307,18 +307,33 @@ STUB
   svc=$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml
   check "lock state-sync marker" grep -q 'sl7-faceunlock: lock-state sync' "$svc"
   check "lock locked uses the mirror" grep -q 'readonly property bool locked: lockRequested || sessionLockHeld || sessionLock.secure' "$svc"
-  check "lock has freshLocked and syncSessionLockState" bash -c "grep -q 'function freshLocked()' '$svc' && grep -q 'function syncSessionLockState()' '$svc' && grep -q 'function releaseLockRequest()' '$svc'"
-  check "lock IPC lock() decides on the fresh state" bash -c "grep -A8 'function lock(): string' '$svc' | grep -q 'freshLocked()'"
-  check "lock status reports each patch" bash -c "'$APP' lock status | grep -q 'howdy-lock-pam.patch: applied' && '$APP' lock status | grep -q 'howdy-lock-state-sync.patch: applied'"
+  check "lock has currentlyLocked and syncSessionLockState" bash -c "grep -q 'function currentlyLocked()' '$svc' && grep -q 'function syncSessionLockState()' '$svc' && grep -q 'function releaseLockRequest()' '$svc'"
+  check "lock no longer has freshLocked" bash -c "! grep -q 'freshLocked' '$svc'"
+  check "lock IPC lock() decides on the live state" bash -c "grep -A8 'function lock(): string' '$svc' | grep -q 'currentlyLocked()'"
+  check "lock upstream-4.0.6 marker" grep -q 'sl7-faceunlock: upstream 4.0.6 sync' "$svc"
+  check "lock uses the stranded-lock helper" grep -q 'omarchy-hyprland-session-lock-stranded' "$svc"
+  lv=$SL7_PLUGIN_DIR/nate.howdy-lock/LockView.qml
+  check "lock-view marker" grep -q 'sl7-faceunlock: lock-view sync' "$lv"
+  check "lock-view uses Commons.Color" bash -c "grep -q 'Commons.Color' '$lv' && ! grep -E '(^|[^.A-Za-z])Color\\.' '$lv' | grep -vq '^[[:space:]]*//'"
+  check "lock-view status text is plain" grep -q 'Text.PlainText' "$lv"
+  check "LockView.qml backup kept" test -f "$lv.sl7-orig"
+  check "LockView.qml backup is pristine" bash -c "[[ \$(sha256sum '$lv.sl7-orig' | cut -d' ' -f1) == d60d682b6972a179774096fba8ba3d9f3340ff8f1e9e48978ed32db556c5f69f ]]"
+  check "lock status reports each patch" bash -c "for p in howdy-lock-pam howdy-lock-state-sync howdy-lock-upstream-4.0.6 howdy-lock-view-4.0.6; do '$APP' lock status | grep -q \"\$p.patch: applied\" || exit 1; done"
   check "lock status patched=yes" bash -c "'$APP' lock status | grep -q 'patched=yes'"
   check "lock records the patch set" bash -c "[[ -s '$XDG_STATE_HOME/omarchy-sl7-faceunlock/lock-patchset' ]]"
   # upgrade from a PAM-only overlay (previous package): apply adds the missing patch
   cp -p "$svc" "$T/svc.full"
+  cp -p "$lv" "$T/lv.full"
   cp -p "$svc.sl7-orig" "$svc"
+  cp -p "$lv.sl7-orig" "$lv"
   patch -p1 -s -d "$SL7_PLUGIN_DIR/nate.howdy-lock" -i "$LIB/lock-patch/howdy-lock-pam.patch" >/dev/null 2>&1
   check "PAM-only overlay reported" bash -c "'$APP' lock status | grep -q 'howdy-lock-state-sync.patch: missing'"
   check "lock apply upgrades a PAM-only overlay" "$APP" lock apply
-  check "upgraded overlay equals a fresh one" cmp -s "$svc" "$T/svc.full"
+  check "upgraded overlay equals a fresh one" bash -c "cmp -s '$svc' '$T/svc.full' && cmp -s '$lv' '$T/lv.full'"
+  # a plugin dir from the previous package (Service.qml patched, no LockView.qml backup)
+  cp -p "$lv.sl7-orig" "$lv"
+  rm -f "$lv.sl7-orig"
+  check "lock apply backs up an untouched LockView.qml" bash -c "'$APP' lock apply && cmp -s '$lv' '$T/lv.full' && test -f '$lv.sl7-orig'"
   # login hook: skips while locked, applies when not, then goes quiet
   cat >"$T/bin/omarchy-shell" <<STUB
 #!/bin/bash
@@ -328,6 +343,7 @@ echo "\$*" >>"$T/shell.log"
 STUB
   chmod +x "$T/bin/omarchy-shell"
   cp -p "$svc.sl7-orig" "$svc"
+  cp -p "$lv.sl7-orig" "$lv"
   patch -p1 -s -d "$SL7_PLUGIN_DIR/nate.howdy-lock" -i "$LIB/lock-patch/howdy-lock-pam.patch" >/dev/null 2>&1
   rm -f "$XDG_STATE_HOME/omarchy-sl7-faceunlock/lock-patchset"
   : >"$T/shell.log"
@@ -336,10 +352,21 @@ STUB
   check "lock auto while locked edits nothing" bash -c "! grep -q 'lock-state sync' '$svc'"
   printf '{"locked":true,"requested":false,"sessionLocked":false,"secure":false}\n' >"$T/shell-state"
   check "lock auto ignores the stale cached locked" "$APP" lock auto
-  check "lock auto applied the missing patch" grep -q 'sl7-faceunlock: lock-state sync' "$svc"
+  check "lock auto applied the missing patches" bash -c "grep -q 'sl7-faceunlock: lock-state sync' '$svc' && grep -q 'sl7-faceunlock: lock-view sync' '$lv'"
   check "lock auto rescans plugins" grep -q 'shell rescanPlugins' "$T/shell.log"
   : >"$T/shell.log"
   check "lock auto is quiet once current" bash -c "'$APP' lock auto && [[ ! -s '$T/shell.log' ]]"
+  # LockView.qml drift: nothing is written, Service.qml included
+  cp -p "$svc" "$T/svc.full"
+  cp -p "$svc.sl7-orig" "$svc"
+  patch -p1 -s -d "$SL7_PLUGIN_DIR/nate.howdy-lock" -i "$LIB/lock-patch/howdy-lock-pam.patch" >/dev/null 2>&1
+  printf 'import QtQuick\nItem {}\n' >"$lv"
+  rm -rf "$lv.sl7-orig" "$SL7_PLUGIN_DIR/nate.howdy-lock/.git"
+  check_not "drifted LockView.qml: apply fails" "$APP" lock apply
+  check "drifted LockView.qml: Service.qml is not half patched" bash -c "! grep -q 'sl7-faceunlock: lock-state sync' '$svc'"
+  check "drifted LockView.qml: file untouched" bash -c "[[ \$(head -n1 '$lv') == 'import QtQuick' ]]"
+  cp -p "$T/svc.full" "$svc"
+  cp -p "$T/lv.full" "$lv"
   # upstream drift: patch must fail safe
   rm -rf "$SL7_PLUGIN_DIR/nate.howdy-lock/.git" "$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml.sl7-orig"
   printf 'import QtQuick\nItem {}\n' >"$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml"
