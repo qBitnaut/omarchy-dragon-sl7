@@ -1,0 +1,408 @@
+From 76c85f1ef46dbeccde9b21b806b9769df7e33398 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 14:54:29 -0500
+Subject: [PATCH 6/7] ipa: simple: awb: leave clipped pixels out of the grey
+ world sums
+
+The software ISP AWB is a plain grey world: the gains are the ratios of
+the sums of the channels over the statistics window, clipped pixels
+included. In bright scenes (outdoors, windows, sky) a fifth or more of
+the green samples clip while red and blue, which have a lower response,
+mostly do not. The sums then underestimate the red and blue gains and
+the picture has a green cast.
+
+Make SwStatsCpu also sum the channels over the 2x2 blocks in which no
+sample reaches 97% of the full scale, and count the blocks sampled and
+the blocks left unclipped. Both the CPU and the EGL debayer gather their
+statistics with SwStatsCpu, so both get the new fields.
+
+The AWB algorithm uses the sums of the unclipped blocks, with the black
+level removed per unclipped block, once at least 15% of the blocks are
+unclipped, and the sums of all blocks below 5%, blending the two gains
+in between so that they do not jump. The gains also move by half of the
+distance to the new estimate per update after the first, to keep them
+from hunting when the clipped blocks follow the exposure.
+
+Signed-off-by: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+---
+ .../internal/software_isp/swisp_stats.h       | 15 ++++
+ .../internal/software_isp/swstats_cpu.h       |  1 +
+ src/ipa/simple/algorithms/awb.cpp             | 87 +++++++++++++++----
+ src/ipa/simple/ipa_context.h                  |  1 +
+ src/libcamera/software_isp/swstats_cpu.cpp    | 73 ++++++++++++++--
+ 5 files changed, 157 insertions(+), 20 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index d9d0d9b..c800f75 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -31,6 +31,21 @@ struct SwIspStats {
+ 	 * \brief Sums of colour channels of all the sampled pixels
+ 	 */
+ 	RGB<uint64_t> sum_;
++	/**
++	 * \brief Sums of colour channels of the sampled pixels, leaving out
++	 *        the 2x2 blocks in which any sample is clipped
++	 *
++	 * Scaled like sum_, so that the black level offset applies per block.
++	 */
++	RGB<uint64_t> sumUnclipped_;
++	/**
++	 * \brief Number of 2x2 blocks that contributed to sum_
++	 */
++	uint32_t nBlocks;
++	/**
++	 * \brief Number of 2x2 blocks that contributed to sumUnclipped_
++	 */
++	uint32_t nUnclipped;
+ 	/**
+ 	 * \brief Number of bins in the yHistogram
+ 	 */
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index 5518709..07f8d04 100644
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -120,6 +120,7 @@ private:
+ 	unsigned int xShift_;
+ 	unsigned int stride_;
+ 	unsigned int sumShift_;
++	uint16_t clipLevel_;
+
+ 	std::vector<SwIspStats> stats_;
+ 	SharedMemObject<SwIspStats> sharedStats_;
+diff --git a/src/ipa/simple/algorithms/awb.cpp b/src/ipa/simple/algorithms/awb.cpp
+index 05155c8..330457a 100644
+--- a/src/ipa/simple/algorithms/awb.cpp
++++ b/src/ipa/simple/algorithms/awb.cpp
+@@ -7,6 +7,7 @@
+
+ #include "awb.h"
+
++#include <algorithm>
+ #include <numeric>
+ #include <stdint.h>
+
+@@ -23,11 +24,49 @@ LOG_DEFINE_CATEGORY(IPASoftAwb)
+
+ namespace ipa::soft::algorithms {
+
++/*
++ * Clipped samples carry no colour information, and in bright scenes the
++ * green channel clips well before red and blue, which biases a grey world
++ * estimate towards green. The statistics therefore also provide sums over the
++ * 2x2 blocks without any clipped sample. They are used when enough blocks
++ * remain: below kMinUnclippedRatio the estimate from all the blocks is used
++ * alone, above kFullUnclippedRatio the estimate from the unclipped blocks is
++ * used alone, and in between the two are blended, so that the gains do not
++ * jump when the clipped fraction crosses a threshold.
++ */
++static constexpr float kMinUnclippedRatio = 0.05;
++static constexpr float kFullUnclippedRatio = 0.15;
++
++/*
++ * Fraction of the distance to the new gains covered by each update, to
++ * avoid the gains hunting when the clipped blocks change with the exposure.
++ * The first update after configure() is applied in full.
++ */
++static constexpr float kGainsSmoothing = 0.5;
++
++/*
++ * Calculate the red and blue gains from the sums of the channels. The sums
++ * are at least minValid, while the black level offset is removed. The gains
++ * are clamped at 4.0, which also avoids 0 division.
++ */
++static RGB<float> greyWorldGains(const RGB<uint64_t> &sums, uint64_t offset)
++{
++	const uint64_t minValid = 1;
++	const RGB<uint64_t> sum = sums.max(offset + minValid) - offset;
++
++	return { {
++		sum.r() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.r(),
++		1.0,
++		sum.b() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.b(),
++	} };
++}
++
+ int Awb::configure(IPAContext &context,
+ 		   [[maybe_unused]] const IPAConfigInfo &configInfo)
+ {
+ 	auto &gains = context.activeState.awb.gains;
+ 	gains = { { 1.0, 1.0, 1.0 } };
++	context.activeState.awb.updated = false;
+
+ 	return 0;
+ }
+@@ -66,23 +105,41 @@ void Awb::process(IPAContext &context,
+ 	const uint64_t nPixels = std::accumulate(
+ 		histogram.begin(), histogram.end(), uint64_t(0));
+ 	const uint64_t offset = blackLevel * nPixels;
+-	const uint64_t minValid = 1;
+-	/*
+-	 * Make sure the sums are at least minValid, while preventing unsigned
+-	 * integer underflow.
+-	 */
+-	const RGB<uint64_t> sum = stats->sum_.max(offset + minValid) - offset;
+
+-	/*
+-	 * Calculate red and blue gains for AWB.
+-	 * Clamp max gain at 4.0, this also avoids 0 division.
+-	 */
++	RGB<float> newGains = greyWorldGains(stats->sum_, offset);
++
++	if (stats->nBlocks && stats->nUnclipped) {
++		const float unclippedRatio =
++			static_cast<float>(stats->nUnclipped) / stats->nBlocks;
++		const float weight = std::clamp(
++			(unclippedRatio - kMinUnclippedRatio) /
++				(kFullUnclippedRatio - kMinUnclippedRatio),
++			0.0f, 1.0f);
++
++		if (weight > 0.0f) {
++			const RGB<float> unclippedGains = greyWorldGains(
++				stats->sumUnclipped_,
++				static_cast<uint64_t>(blackLevel) * stats->nUnclipped);
++
++			newGains = { {
++				weight * unclippedGains.r() + (1.0f - weight) * newGains.r(),
++				1.0,
++				weight * unclippedGains.b() + (1.0f - weight) * newGains.b(),
++			} };
++		}
++	}
++
+ 	auto &gains = context.activeState.awb.gains;
+-	gains = { {
+-		sum.r() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.r(),
+-		1.0,
+-		sum.b() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.b(),
+-	} };
++	if (context.activeState.awb.updated) {
++		gains = { {
++			gains.r() + kGainsSmoothing * (newGains.r() - gains.r()),
++			1.0,
++			gains.b() + kGainsSmoothing * (newGains.b() - gains.b()),
++		} };
++	} else {
++		gains = newGains;
++		context.activeState.awb.updated = true;
++	}
+
+ 	RGB<double> rgbGains{ { 1 / gains.r(), 1 / gains.g(), 1 / gains.b() } };
+ 	context.activeState.awb.temperatureK = estimateCCT(rgbGains);
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index 3f7f695..4868ffa 100644
+--- a/src/ipa/simple/ipa_context.h
++++ b/src/ipa/simple/ipa_context.h
+@@ -52,6 +52,7 @@ struct IPAActiveState {
+ 	struct {
+ 		RGB<float> gains;
+ 		unsigned int temperatureK;
++		bool updated;
+ 	} awb;
+
+ 	Matrix<float, 3, 3> combinedMatrix;
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index 7fb77ce..80499e9 100644
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -11,6 +11,8 @@
+
+ #include "libcamera/internal/software_isp/swstats_cpu.h"
+
++#include <algorithm>
++
+ #include <libcamera/base/log.h>
+
+ #include <libcamera/stream.h>
+@@ -167,6 +169,18 @@ SwStatsCpu::SwStatsCpu(const CameraManager &cm)
+ 			<< "Failed to create shared memory for statistics";
+ }
+
++/*
++ * A sample at or above this percentage of the full scale value is considered
++ * clipped. Right below the sensor saturation level the response is no longer
++ * linear, so such samples bias the white balance statistics.
++ */
++static constexpr unsigned int kClipPercent = 97;
++
++static constexpr uint16_t kClipLevel(unsigned int bitDepth)
++{
++	return (((1u << bitDepth) - 1) * kClipPercent) / 100;
++}
++
+ static constexpr unsigned int kRedYMul = 77; /* 0.299 * 256 */
+ static constexpr unsigned int kGreenYMul = 150; /* 0.587 * 256 */
+ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+@@ -177,22 +191,49 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+                                           \
+ 	uint64_t sumR = 0;                \
+ 	uint64_t sumG = 0;                \
+-	uint64_t sumB = 0;
++	uint64_t sumB = 0;                \
++                                          \
++	bool clipped;                     \
++	uint32_t nBlocks = 0;             \
++	uint32_t nUnclipped = 0;          \
++	uint64_t sumUnclippedR = 0;       \
++	uint64_t sumUnclippedG = 0;       \
++	uint64_t sumUnclippedB = 0;
++
++/*
++ * Must be called before the two green samples are averaged. A 2x2 block is
++ * clipped when any of its four samples is at or above clipLevel_.
++ */
++#define SWSTATS_CHECK_CLIPPED() \
++	clipped = std::max({ r, g, g2, b }) >= clipLevel_;
+
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+ 	sumR += r;                         \
+ 	sumG += g;                         \
+ 	sumB += b;                         \
+                                            \
++	nBlocks++;                         \
++	if (!clipped) {                    \
++		sumUnclippedR += r;        \
++		sumUnclippedG += g;        \
++		sumUnclippedB += b;        \
++		nUnclipped++;              \
++	}                                  \
++                                           \
+ 	yVal = r * kRedYMul;               \
+ 	yVal += g * kGreenYMul;            \
+ 	yVal += b * kBlueYMul;             \
+ 	stats.yHistogram[yVal * SwIspStats::kYHistogramSize / (256 * 256 * (div))]++;
+
+-#define SWSTATS_FINISH_LINE_STATS() \
+-	stats.sum_.r() += sumR;     \
+-	stats.sum_.g() += sumG;     \
+-	stats.sum_.b() += sumB;
++#define SWSTATS_FINISH_LINE_STATS()                    \
++	stats.sum_.r() += sumR;                        \
++	stats.sum_.g() += sumG;                        \
++	stats.sum_.b() += sumB;                        \
++	stats.sumUnclipped_.r() += sumUnclippedR;      \
++	stats.sumUnclipped_.g() += sumUnclippedG;      \
++	stats.sumUnclipped_.b() += sumUnclippedB;      \
++	stats.nBlocks += nBlocks;                      \
++	stats.nUnclipped += nUnclipped;
+
+ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[], SwIspStats &stats)
+ {
+@@ -211,6 +252,7 @@ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[], SwIspStats &stats)
+ 		g2 = src1[x];
+ 		r = src1[x + 1];
+
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
+@@ -236,6 +278,7 @@ void SwStatsCpu::statsBGGR10Line0(const uint8_t *src[], SwIspStats &stats)
+ 		g2 = src1[x];
+ 		r = src1[x + 1];
+
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+
+ 		/* divide Y by 4 for 10 -> 8 bpp value */
+@@ -262,6 +305,7 @@ void SwStatsCpu::statsBGGR12Line0(const uint8_t *src[], SwIspStats &stats)
+ 		g2 = src1[x];
+ 		r = src1[x + 1];
+
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+
+ 		/* divide Y by 16 for 12 -> 8 bpp value */
+@@ -289,6 +333,7 @@ void SwStatsCpu::statsBGGR10PLine0(const uint8_t *src[], SwIspStats &stats)
+ 		g = src0[x + 1];
+ 		g2 = src1[x];
+ 		r = src1[x + 1];
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+ 		/* Data is already 8 bits, divide by 1 */
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
+@@ -315,6 +360,7 @@ void SwStatsCpu::statsGBRG10PLine0(const uint8_t *src[], SwIspStats &stats)
+ 		b = src0[x + 1];
+ 		r = src1[x];
+ 		g2 = src1[x + 1];
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+ 		/* Data is already 8 bits, divide by 1 */
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
+@@ -341,6 +387,7 @@ void SwStatsCpu::statsBGGR12PLine0(const uint8_t *src[], SwIspStats &stats)
+ 		g2 = src1[x];
+ 		r = src1[x + 1];
+
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
+@@ -367,6 +414,7 @@ void SwStatsCpu::statsGBRG12PLine0(const uint8_t *src[], SwIspStats &stats)
+ 		r = src1[x];
+ 		g2 = src1[x + 1];
+
++		SWSTATS_CHECK_CLIPPED()
+ 		g = (g + g2) / 2;
+
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
+@@ -391,6 +439,9 @@ void SwStatsCpu::startFrame(uint32_t frame)
+
+ 	for (auto &s : stats_) {
+ 		s.sum_ = RGB<uint64_t>({ 0, 0, 0 });
++		s.sumUnclipped_ = RGB<uint64_t>({ 0, 0, 0 });
++		s.nBlocks = 0;
++		s.nUnclipped = 0;
+ 		s.yHistogram.fill(0);
+ 	}
+ }
+@@ -408,14 +459,21 @@ void SwStatsCpu::finishFrame(uint32_t frame, uint32_t bufferId)
+
+ 	if (valid) {
+ 		sharedStats_->sum_ = RGB<uint64_t>({ 0, 0, 0 });
++		sharedStats_->sumUnclipped_ = RGB<uint64_t>({ 0, 0, 0 });
++		sharedStats_->nBlocks = 0;
++		sharedStats_->nUnclipped = 0;
+ 		sharedStats_->yHistogram.fill(0);
+ 		for (const auto &s : stats_) {
+ 			sharedStats_->sum_ += s.sum_;
++			sharedStats_->sumUnclipped_ += s.sumUnclipped_;
++			sharedStats_->nBlocks += s.nBlocks;
++			sharedStats_->nUnclipped += s.nUnclipped;
+ 			for (unsigned int j = 0; j < SwIspStats::kYHistogramSize; j++)
+ 				sharedStats_->yHistogram[j] += s.yHistogram[j];
+ 		}
+
+ 		sharedStats_->sum_ >>= sumShift_;
++		sharedStats_->sumUnclipped_ >>= sumShift_;
+ 	}
+
+ 	sharedStats_->valid = valid;
+@@ -480,14 +538,17 @@ int SwStatsCpu::configure(const StreamConfiguration &inputCfg, unsigned int stat
+ 		case 8:
+ 			stats0_ = &SwStatsCpu::statsBGGR8Line0;
+ 			sumShift_ = 0;
++			clipLevel_ = kClipLevel(8);
+ 			return 0;
+ 		case 10:
+ 			stats0_ = &SwStatsCpu::statsBGGR10Line0;
+ 			sumShift_ = 2;
++			clipLevel_ = kClipLevel(10);
+ 			return 0;
+ 		case 12:
+ 			stats0_ = &SwStatsCpu::statsBGGR12Line0;
+ 			sumShift_ = 4;
++			clipLevel_ = kClipLevel(12);
+ 			return 0;
+ 		}
+ 	}
+@@ -507,6 +568,8 @@ int SwStatsCpu::configure(const StreamConfiguration &inputCfg, unsigned int stat
+ 		ySkipMask_ = 0x02;
+ 		xShift_ = 0;
+ 		sumShift_ = 0;
++		/* The packed stats functions only read the 8 MSBs of a sample */
++		clipLevel_ = kClipLevel(8);
+ 		processFrame_ = &SwStatsCpu::processBayerFrame2;
+
+ 		switch (bayerFormat.order) {
+--
+2.56.0
+

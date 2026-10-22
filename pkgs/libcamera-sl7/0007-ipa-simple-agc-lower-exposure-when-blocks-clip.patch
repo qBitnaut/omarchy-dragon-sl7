@@ -1,0 +1,70 @@
+From 73499a08082c3ce11bfee4a55277ec6c1fb42777 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 14:54:29 -0500
+Subject: [PATCH 7/7] ipa: simple: agc: lower the exposure when many blocks
+ clip
+
+The MSV is a mean of the histogram, so a scene with a large bright area
+reaches the target while a quarter of its blocks are clipped, and the
+picture is overexposed. Raise the measured MSV by 4 per unit of clipped
+block ratio above 10%, up to 0.8, so that the AGC settles on a lower
+exposure when the highlights clip. The penalty is zero up to 10% clipped
+blocks and continuous above, so the usual scenes are not affected.
+
+Depends on the clipped block counts added to SwIspStats by the AWB
+patch.
+
+Signed-off-by: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+---
+ src/ipa/simple/algorithms/agc.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/ipa/simple/algorithms/agc.cpp b/src/ipa/simple/algorithms/agc.cpp
+index 3cc60bb..7d3d950 100644
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -72,6 +72,19 @@ static constexpr unsigned int kFastStartUpdates = 6;
+ static constexpr float kFastStartMinFactor = 0.25;
+ static constexpr float kFastStartMaxFactor = 4.0;
+
++/*
++ * The MSV is a mean, so a scene with a large bright area (a window, the sky)
++ * can have a quarter of its blocks clipped and still reach the target. When
++ * more than kClippedFree of the sampled 2x2 blocks contain a clipped sample,
++ * the measured MSV is raised by kClippedPenaltyPerRatio for every unit of
++ * clipped ratio above that, up to kClippedMaxPenalty, which makes the AGC
++ * settle on a lower exposure. The penalty is continuous, and zero for the
++ * usual scenes, which have only a few clipped blocks.
++ */
++static constexpr float kClippedFree = 0.10;
++static constexpr float kClippedPenaltyPerRatio = 4.0;
++static constexpr float kClippedMaxPenalty = 0.8;
++
+ Agc::Agc()
+ {
+ }
+@@ -238,6 +251,21 @@ void Agc::process(IPAContext &context,
+ 	}
+
+ 	float exposureMSV = (denom == 0 ? 0 : static_cast<float>(num) / denom);
++
++	if (denom && stats->nBlocks) {
++		const float clippedRatio =
++			1.0f - static_cast<float>(stats->nUnclipped) / stats->nBlocks;
++		const float penalty = std::clamp(
++			(clippedRatio - kClippedFree) * kClippedPenaltyPerRatio,
++			0.0f, kClippedMaxPenalty);
++
++		if (penalty > 0.0f)
++			LOG(IPASoftExposure, Debug)
++				<< "clipped ratio " << clippedRatio
++				<< " MSV " << exposureMSV << " + " << penalty;
++		exposureMSV += penalty;
++	}
++
+ 	updateExposure(context, frameContext, exposureMSV);
+ }
+
+--
+2.56.0
+

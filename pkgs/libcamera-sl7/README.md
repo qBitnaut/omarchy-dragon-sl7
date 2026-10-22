@@ -1,7 +1,7 @@
 # libcamera-sl7
 
 Arch Linux ARM's `libcamera` 0.7.2 rebuilt for the Surface Laptop 7, with a camera sensor
-helper for the front camera (OmniVision OV02C10), three software ISP fixes, and a pipeline handler
+helper for the front camera (OmniVision OV02C10), five software ISP fixes, and a pipeline handler
 patch that hides the infrared camera. It builds the same split packages
 (`libcamera`, `libcamera-ipa`, `libcamera-tools`, `gst-plugin-libcamera`, `python-libcamera`),
 so the omarchy-sl7 repository replaces Arch's with a plain `sudo pacman -Syu`.
@@ -29,16 +29,24 @@ sensor is never opened, its links are never touched, and `cam -l` lists only the
 WirePlumber rule in `omarchy-surface-sl7` backs this up for other libcamera builds. The IR
 camera is not usable by libcamera here anyway (mono, no tuning, no software ISP path).
 
-## Software ISP fixes (0002 to 0004)
+## Software ISP fixes (0002 to 0004, 0006, 0007)
 
 Found by reading a debug capture from the laptop (libcamera 0.7.2, software ISP with the Adreno
-EGL debayer). Each is a separate patch against 0.7.2, in the style of an upstream submission.
+EGL debayer; 0006 and 0007 from raw frames of a bright scene). Each is a separate patch against
+0.7.2, in the style of an upstream submission.
 
 | Patch | What it does and why |
 |---|---|
 | `0002-ipa-simple-agc-converge-quickly-after-stream-start` | The AGC corrects the exposure by at most about 10% per statistics update, so the first seconds of a stream are badly exposed. For the first six updates it scales the total exposure (exposure time times gain) by the squared ratio of the optimal to the measured mean sample value (limited to 0.25 to 4) and splits the result in one go: exposure time first up to its maximum, the remainder as gain (when darkening, gain first, then exposure time). Afterwards the existing proportional step applies, capped at +-15% both ways. A black frame (MSV 0) takes the maximum step; a non-finite MSV is ignored. |
 | `0003-libcamera-software_isp-debayer_egl-compute-stats-on-the-displayed-area` | `DebayerEGL::configure()` set the statistics window to `Rectangle(window_.size())`, origin 0,0, but the EGL path passes the whole input buffer to `SwStatsCpu::processFrame()` (the CPU debayer passes only the part it processes, so there 0,0 is right). When the output is smaller than the sensor frame, such as 720p, AGC and AWB measured the top left corner instead of the displayed area. The patch passes `window_` with its offset. |
 | `0004-ipa-simple-adjust-read-default-gamma-contrast-saturation-from-tuning` | `Adjust::init()` ignored its tuning data. It now reads optional `gamma`, `contrast` and `saturation` keys from the `Adjust` block and uses them as the defaults, also in the control info; controls set by an application still override them. A tuning file without the keys behaves as before. `sl7-camera-tuning` writes contrast 1.2 and saturation 1.15. |
+| `0006-ipa-simple-awb-exclude-clipped-pixels-from-grey-world` | The software ISP AWB is a plain grey world that counts clipped pixels. In bright scenes (outdoors, windows, sky in frame) a fifth or more of the green samples clip while red and blue mostly do not, so the red and blue gains come out too low and the picture is green (issue #11). `SwStatsCpu` now also sums R/G/B over the 2x2 Bayer blocks in which no sample reaches 97% of full scale (clip level 247 for the 8-bit data of packed 10/12-bit formats, 992 for unpacked 10-bit, 3972 for unpacked 12-bit) and counts the sampled and the unclipped blocks; the CPU and the EGL debayer both use `SwStatsCpu`, so both get it. AWB uses the unclipped sums (black level removed per unclipped block) once at least 15% of the blocks are unclipped, the all-block sums below 5% (the old behaviour), and blends the two gain estimates in between. Gains stay capped at 4, and after the first update they move halfway to the new estimate to avoid hunting. Scenes without clipping give the same gains as before. |
+| `0007-ipa-simple-agc-lower-exposure-when-blocks-clip` | The MSV is a mean, so the AGC accepts a frame with a quarter of its blocks clipped. It now adds `4 * (clipped block ratio - 0.10)` to the measured MSV, capped at 0.8, so the exposure settles lower when highlights clip; the penalty is zero up to 10% clipped blocks. Needs 0006 for the block counts. Backlit scenes (a window behind the face) may expose somewhat darker; to drop the penalty, remove 0007 from `source`, `sha256sums`, `prepare()` and `.SRCINFO`. |
+
+0006 and 0007 are by Chris McLaughlin (Signed-off-by in both patches). Upstream status: not
+submitted. The thresholds (97% clip level, 15% and 5% blend limits, 0.5 smoothing, AGC constants
+0.10, 4 and 0.8) are first choices and have not been tuned beyond short indoor and outdoor tests.
+Debug logging for the AGC penalty: `LIBCAMERA_LOG_LEVELS=IPASoftExposure:DEBUG`.
 
 Not done: the first one or two frames are still rendered with the debayer's built-in defaults
 (black level 0, gamma 1, identity matrix, white balance gains 1) because `SoftwareIsp::process()`
@@ -54,8 +62,8 @@ whether 0003 and 0004 are still needed.
 
 | | |
 |---|---|
-| Version | `0.7.2-4.3`: pkgrel 4.3 sorts above ALARM's 4. A later ALARM pkgrel (5 or more) would win again; bump ours when that happens. |
-| Patches | the OV02C10 helper; the three software ISP fixes above; the IR camera hiding patch (0005); ALARM's Python 3.14 fix, with trailing whitespace stripped |
+| Version | `0.7.2-4.6`: pkgrel 4.6 sorts above ALARM's 4 and the earlier 4.4 and 4.5 (4.5 was a local build of 0006 and 0007 only; 4.6 replaces it with the CI-built, signed set). A later ALARM pkgrel (5 or more) would win again; bump ours when that happens. |
+| Patches | the OV02C10 helper; the software ISP fixes above (0002 to 0004, 0006, 0007); the IR camera hiding patch (0005); ALARM's Python 3.14 fix, with trailing whitespace stripped |
 | Not built | `libcamera-docs` (it needs TeX Live), tests and `check()` |
 | Unchanged | dependencies, build options, split packages, the signed IPA modules |
 
