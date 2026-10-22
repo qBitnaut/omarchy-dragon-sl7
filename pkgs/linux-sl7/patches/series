@@ -1,4 +1,4 @@
-# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.11).
+# linux-sl7 patch queue, applied in order with `patch -p1` (base: linux 7.2.12).
 # One file name per line; lines starting with # are comments.
 # Every patch carries Origin: and Upstream-Status: headers.
 
@@ -37,8 +37,8 @@
 0021-usb-typec-mux-ps883x-add-a-delay-after-writing-confi.patch
 0022-usb-typec-mux-ps883x-disable-USB4-on-incomplete-USB4.patch
 
-# 7. ath12k rfkill hack
-0023-HACK-disable-rfkill-of-ath12k_pci.patch
+# 7. ath12k: skip hardware rfkill setup on the Surface Pro 11 and Surface Laptop 7 (ath-next 5949d1910f; replaces the linux-sp11 HACK)
+0023-wifi-ath12k-skip-hardware-rfkill-setup-on-Microsoft-Surface-devices.patch
 
 # 8. EXPERIMENTAL eDP VRR (default off, msm.vrr_enabled=1)
 0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch
@@ -168,3 +168,27 @@
 
 # 24. Iris: reset the CPU-to-VPU AHB bridge before switching the video power domain to hardware mode, so a stale bridge FIFO cannot hang the next session (linux-media cc330f558996, Cc: stable; carried by Omarchy)
 0103-media-iris-reset-AHB-bridge-before-enabling-HW-mode.patch
+
+# 25. qcom_battmgr: notify the charger supplies when the charging source changes, so UPower sees plug and unplug (linux-next 87fd20da8c); keep the charge limits and report failed requests (Brandon Williams, carried by Omarchy)
+0104-power-supply-qcom_battmgr-Notify-charger-supplies-of-online-changes.patch
+0105-power-supply-qcom_battmgr-preserve-charge-limits.patch
+
+# 26. ath12k: a vdev restart is not a vdev start, so the started-vdev count stays right after the AP changes channel or width and the 3 s fw stats timeouts stop (WCN7850; Birk Skyum, carried by Omarchy)
+0106-wifi-ath12k-don-t-count-a-vdev-restart-as-a-started-.patch
+
+# 27. Iris: out-of-bounds read in the timestamp metadata fallback, and the power-off IRQ deadlock (revert of disable_irq(), then wait for the threaded handler with core->lock released) (Vishnu Reddy, carried by Omarchy)
+0107-media-iris-Fix-out-of-bounds-read-in-timestamp-metad.patch
+0108-Revert-media-qcom-iris-use-disable_irq-during-power-.patch
+0109-media-qcom-iris-Wait-for-threaded-IRQ-completion-dur.patch
+
+# 28. MSM display: colour blocks re-programmed after a modeset, DPU core clock rate reasserted on runtime resume (with the failure path), PSR uses the direct SDP flush (carried by Omarchy)
+0110-drm-msm-dpu-re-program-colour-processing-blocks-on-t.patch
+0111-drm-msm-dpu-Reassert-core-clock-rate-on-runtime-resu.patch
+0112-drm-msm-dp-use-direct-SDP-flush-for-PSR.patch
+0113-drm-msm-dpu-disable-the-clocks-if-the-core-rate-rest.patch
+
+# 29. Camera: CAMCC holds MDSS_GDSC so CAMSS keeps delivering frames with the display off (with the binding change dtbs_check needs, SL7 local); the CCI controller is reset on runtime resume and suspends 50 ms after the last transfer (Birk Skyum, carried by Omarchy)
+0114-arm64-dts-qcom-hamoa-Power-the-display-GDSC-while-the-camera-runs.patch
+0115-i2c-qcom-cci-Reset-the-controller-when-it-resumes.patch
+0116-i2c-qcom-cci-Suspend-the-controller-50-ms-after-the-last-transfer.patch
+0117-SL7-local-dt-bindings-clock-qcom-x1e80100-camcc-Allow-the-display-GDSC.patch

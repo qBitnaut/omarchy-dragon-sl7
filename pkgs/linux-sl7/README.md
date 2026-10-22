@@ -1,6 +1,6 @@
 # linux-sl7
 
-A Linux 7.2.11 kernel package for the Microsoft Surface Laptop 7 (Snapdragon X
+A Linux 7.2.12 kernel package for the Microsoft Surface Laptop 7 (Snapdragon X
 Plus and X Elite) on Arch Linux ARM and Omarchy. This is v0: the base config,
 a patch queue and the CI that builds them. Nothing here has been booted on
 hardware yet.
@@ -8,7 +8,7 @@ hardware yet.
 ## What v0 is
 
 - **Base:** Arch Linux ARM `core/linux-aarch64` (PKGBUILD and config, 7.2.x),
-  upstream linux 7.2 plus the 7.2.11 stable patch. ALARM's own five patches
+  upstream linux 7.2 plus the 7.2.12 stable patch. ALARM's own five patches
   (Rockchip and Raspberry Pi 5 only) are not carried.
 - **Packages:** `linux-sl7` and `linux-sl7-headers`.
 - **Side by side:** no `provides` or `conflicts` for `linux` or
@@ -47,7 +47,7 @@ hardware yet.
 
 `patches/series` lists the patches in apply order. Each patch has `Origin:`
 and `Upstream-Status:` headers in its commit message. Patches apply with plain
-`patch -p1` on linux 7.2.11.
+`patch -p1` on linux 7.2.12.
 
 | # | Patch | Origin | Upstream status |
 |---|---|---|---|
@@ -59,7 +59,7 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0018 | SCMI perf: ignore a sustained frequency below the lowest OPP | rafaelguariento, omacom/omarchy discussion 12441 | not submitted |
 | 0019 | qcom_battmgr: report capacity on X1E80100 | Liviu Nicoara, patchwork series 1169875 | submitted 2026-09-20 |
 | 0020-0022 | ps883x v5 (DP state F, config delay, disable USB4 on incomplete platforms) | Jens Glathe, usb-next `42411ff1a7bb`, `d9eadbba6663`, `647f31f34d40` | in usb-next, expected in 7.4 |
-| 0023 | ath12k: ignore the false rfkill hard block | linux-sp11 `37f883437b` (Jiajie Chen) | will not go upstream |
+| 0023 | wifi: ath12k: skip hardware rfkill setup on Microsoft Surface devices: a table of WCN7850 hw2.0 boards (`microsoft,denali`, `microsoft,romulus13`, `microsoft,romulus15`) matched with `of_machine_is_compatible()` (replaces the linux-sp11 HACK that returned early for every board, 7.2.11-26 and older) | ath-next `5949d1910f` (Francois Roux; Tested-by Dale Whinham; Reviewed-by Baochen Qiang; seen in linux-next 2026-10-22) | accepted in the ath tree, not in 7.2.12; drop when it reaches stable |
 | 0024 | eDP variable refresh (DPU INTF AVR, MSA ignore, `vrr_capable`) behind `msm.vrr_enabled=1` (kernel default 0; omarchy-surface-sl7 sets it on the default cmdline) | scuggo/x1e-nixos `msm-vrr-avr.patch` (ca7db70), rebased and gated by us | will not go upstream as is |
 | 0025-0026 | qcom MIPI CSI2 DPHY schema and driver (`phy-qcom-mipi-csi2`) | Bryan O'Donoghue v18 (patchwork 1166977, 2026-09-16) | in linux-next, expected in 7.4 |
 | 0027-0032 | `phy_get_by_of_node()` helpers, CAMSS PHY API, data-lanes start at 1 | Bryan O'Donoghue v20 (patchwork 1168715, 2026-09-18) | posted v20 |
@@ -96,7 +96,21 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0100 | SL7 local: romulus front camera clocked from a 12 MHz `fixed-clock` node (CAMCC MCLK4 reference and its 19.2 MHz assigned rate dropped, gpio100 pinctrl kept), `link-frequencies` 250 MHz | ours | not submitted (SL7 specific) |
 | 0101 | SL7 local: vd55g registers with `v4l2_async_register_subdev_sensor()` (was `v4l2_async_register_subdev()`), so the V4L2 core looks up the sensor's optional "privacy" LED; probe defers until that LED exists | ours | not submitted (generic, upstream candidate) |
 | 0102 | SL7 local: the camera indicator (`white:camera-indicator`, GPIO 225) gets the label `camera_privacy_led`, loses `panic-indicator`, and is the `privacy` LED of the OV02C10 (romulus) and the VD55G0 (romulus13). It lights while either camera streams. Windows lights it for the front RGB camera only (ACPI CAMP owns GPIO 225, CAMI has none); lighting it for the IR camera too, so a face scan is visible, is our choice. The LED is shared without a reference count: if one camera stops while the other still streams, it goes off | ours | not submitted (SL7 specific) |
-| 0103 | media: iris: reset the CPU-to-VPU AHB bridge (`CPU_CS_AHB_BRIDGE_SYNC_RESET`: SW reset, then HW reset disable, then 0) before `iris_vpu_set_hwmode()` switches the video power domain to hardware control, so a stale bridge FIFO from a powered-down core cannot break the next session. Fixes 95a337f92f0a, Cc: stable | linux-media `cc330f558996` (Vikash Garodia, Renjiang Han; reported and tested by Birk Skyum on a Yoga Slim 7x), carried by Omarchy as `2000-media-iris-reset-AHB-bridge-before-enabling-HW-mode.patch` | accepted in linux-media, not in 7.2.11; drop when it reaches stable |
+| 0103 | media: iris: reset the CPU-to-VPU AHB bridge (`CPU_CS_AHB_BRIDGE_SYNC_RESET`: SW reset, then HW reset disable, then 0) before `iris_vpu_set_hwmode()` switches the video power domain to hardware control, so a stale bridge FIFO from a powered-down core cannot break the next session. Fixes 95a337f92f0a, Cc: stable | linux-media `cc330f558996` (Vikash Garodia, Renjiang Han; reported and tested by Birk Skyum on a Yoga Slim 7x), carried by Omarchy as `2000-media-iris-reset-AHB-bridge-before-enabling-HW-mode.patch` | accepted in linux-media, not in 7.2.12; drop when it reaches stable |
+| 0104 | power: supply: qcom_battmgr: call `power_supply_changed()` for the AC, USB and wireless supplies when the charging source in the battery status response changes, so UPower sees the charger plugged in or out (a laptop booted on the charger never went on battery). Fixes 29e8142b5623, Cc: stable | linux-next `87fd20da8c` (Brandon Williams, Sebastian Reichel's power-supply tree), carried by Omarchy as `2002-power-supply-qcom_battmgr-Notify-charger-supplies-of-online-changes.patch` | accepted in linux-next, not in 7.2.12; drop when it reaches stable |
+| 0105 | power: supply: qcom_battmgr: charge-control setters return the PMIC GLINK request status instead of always succeeding, threshold calculation and cache update stay under the request lock, and the cached charge window is reapplied after notification registration when the remote service restarts | Brandon Williams, carried by Omarchy as `2133-power-supply-qcom_battmgr-preserve-charge-limits.patch` | no upstream posting named in the Omarchy header; independent of 0019 (capacity property), both touch other hunks of `qcom_battmgr.c` |
+| 0106 | wifi: ath12k: `ath12k_mac_vdev_start_restart()` no longer increments `num_started_vdevs` for a restart (a restart has no matching stop), so after the AP changes channel or width the vdev stats request completes again instead of timing out for 3 s with the wiphy lock held (WCN7850). Fixes d889913205cf | Birk Skyum, linux-wireless <https://lore.kernel.org/all/20261020213505.31624-1-birk.skyum@pm.me/>, carried by Omarchy as `2003-wifi-ath12k-don-t-count-a-vdev-restart-as-a-started-.patch` | posted, not in 7.2.12; drop when it reaches stable |
+| 0107 | media: iris: the timestamp metadata fallback in `iris_get_ts_metadata()` reads the last written entry (`metadata_idx - 1`, slot 0 if none) instead of `tss[32]`, one past the 32-entry array (UBSAN). Fixes 17f2a485ca67, Cc: stable | Vishnu Reddy, linux-media <https://lore.kernel.org/all/20261017-fix-oob-tss-v1-1-fb86f4cabf65@oss.qualcomm.com/> (Tested-by Birk Skyum), carried by Omarchy as `2004-media-iris-Fix-out-of-bounds-read-in-timestamp-metad.patch` | posted, not in 7.2.12; drop when it reaches stable |
+| 0108 | Revert "media: qcom: iris: use disable_irq() during power-off": `iris_vpu_power_off()` runs with `core->lock` held and the threaded IRQ handler needs it, so `disable_irq()` can deadlock. Fixes b9c2215bdedc9c, Cc: stable | Vishnu Reddy, linux-media <https://lore.kernel.org/all/20261007-fix-disable-irq-safely-v1-1-45746f9a92de@oss.qualcomm.com/>, carried by Omarchy as `2005-Revert-media-qcom-iris-use-disable_irq-during-power-.patch` | posted, not in 7.2.12; drop when it reaches stable |
+| 0109 | media: qcom: iris: wait for an in-flight threaded IRQ handler before power is removed: `disable_irq()` with `core->lock` released and re-taken (new `irq_disabling` flag and waitqueue serialise power management meanwhile), replacing `disable_irq_nosync()` after power-down. Fixes bb8a95aa038e, Cc: stable. Omarchy backport (context only) | Vishnu Reddy, linux-media <https://lore.kernel.org/all/20261007-fix-disable-irq-safely-v1-2-45746f9a92de@oss.qualcomm.com/>, carried by Omarchy as `2006-media-qcom-iris-Wait-for-threaded-IRQ-completion-dur.patch` | posted, not in 7.2.12; drop when it reaches stable |
+| 0110 | drm/msm/dpu: the colour-processing blocks programmed during a modeset are programmed again on the next commit, once the pipeline runs, because the SRAM-backed GC LUT writes are lost before the first flush (random tint on one half of a dual-mixer panel after resume or DPMS with a GAMMA_LUT user such as wlsunset) | Brandon Williams, carried by Omarchy as `2142-drm-msm-dpu-re-program-colour-processing-blocks-on-t.patch` (tested on Surface Pro 11) | no upstream posting named in the Omarchy header |
+| 0111 | drm/msm/dpu: `dpu_runtime_resume()` reasserts the current core clock rate (`dev_pm_opp_set_rate()`) so the OPP required-opps vote matches the clock after the power domain dropped its performance state. Fixes b0530eb11913 | Xilin Wu (Radxa), carried by Omarchy as `2145-drm-msm-dpu-Reassert-core-clock-rate-on-runtime-resu.patch` | no upstream posting named in the Omarchy header |
+| 0112 | drm/msm/dp: select the direct `UPDATE_SDP` flush mode when configuring PSR (the peripheral-update flush can report success while the sink captures a black frame) | Lars Karlslund, carried by Omarchy as `2146-drm-msm-dp-use-direct-SDP-flush-for-PSR.patch` | no upstream posting named in the Omarchy header |
+| 0113 | drm/msm/dpu: disable the DPU clocks again when the core rate restore of 0111 fails on resume | Brandon Williams, carried by Omarchy as `2156-drm-msm-dpu-disable-the-clocks-if-the-core-rate-rest.patch` | no upstream posting named in the Omarchy header; follows 0111 |
+| 0114 | arm64: dts: qcom: hamoa: `&dispcc MDSS_GDSC` as a third power domain of the camera clock controller, so the display GDSC is on whenever TITAN_TOP_GDSC is and CAMSS keeps delivering frames after the display subsystem was powered down (panel off, MMCX at low_svs). Needs 0117 or `dtbs_check` rejects the third domain | Birk Skyum, carried by Omarchy as `2207-arm64-dts-qcom-hamoa-Power-the-display-GDSC-while-the-camera-runs.patch` | no upstream posting named in the Omarchy header |
+| 0115 | i2c: qcom-cci: reset the controller on every runtime resume (a master can stop starting transfers after a target on its bus was power cycled while the controller kept its clocks, "master 1 queue 0 timeout"; OV02C10 starts failed 3 of 40 times, 0 of 40 with the reset) | Birk Skyum, carried by Omarchy as `2208-i2c-qcom-cci-Reset-the-controller-when-it-resumes.patch` | no upstream posting named in the Omarchy header |
+| 0116 | i2c: qcom-cci: autosuspend the controller 50 ms (was 1 s) after the last transfer, so the reset of 0115 runs between quick camera close and reopen cycles (OV02C10 restarts after short pauses failed in most cycles before, 0 of 100 after) | Birk Skyum, carried by Omarchy as `2209-i2c-qcom-cci-Suspend-the-controller-50-ms-after-the-last-transfer.patch` | no upstream posting named in the Omarchy header |
+| 0117 | SL7 local: dt-bindings: `qcom,x1e80100-camcc` accepts the display MDSS GDSC as an optional third power domain (`minItems: 2`; `required-opps` stays at two entries, one per MXC and MMCX domain). Without it `dtbs_check` fails the romulus DTBs with "power-domains ... is too long" because of 0114 | ours | not submitted; send with 0114 if that is ever posted |
 
 PMIC IR LED patches (0080, 0081, 0091 to 0093, 0095, 0096): retired. The PM8550 flash LED path
 proved to have no load (open circuit); the IR emitter is lit by the sensor's GPIO 1 strobe (0094,
@@ -594,6 +608,18 @@ lines. `config.alarm` is refreshed from ALARM's `core/linux-aarch64` 7.2.11-1 (n
 CONSTCNT and erratum 3821522 workarounds, `IGC=m`, `TYPEC_RT1711H=m`; the file's own header still
 says 7.2.10). Patch 0103 (Iris AHB bridge reset) and the Omarchy config sync are new in this
 release; see the config fragment table.
+
+Stable bump 7.2.11 to 7.2.12 (7.2.12-27): `patch-7.2.12.xz` (sha256 `db20b9c8...`, checked
+against kernel.org `sha256sums.asc`). All 96 existing patches apply in order, then the 14 new ones
+(0104 to 0117, 110 in all) with no rejects. `config.alarm` is unchanged: ALARM's `core/linux-aarch64`
+is still 7.2.11-1. `config.sl7` is unchanged and `check-config.sh` passes (60 options). Patch 0023
+is now the ath-next version of the Surface rfkill quirk instead of the linux-sp11 HACK. Patches
+0104 to 0116 are the low-risk part of Omarchy's linux-omarchy-aarch64 2000 series that we lacked
+(battmgr charger-online notify and charge limits, an ath12k vdev count fix, the Iris out-of-bounds
+read and IRQ deadlock fixes, DPU and DP fixes, CAMSS display GDSC hold and the CCI reset and
+autosuspend); 0117 is our own binding change that 0114 needs for `dtbs_check`. No suspend-path patch (GMU and gcc sync_state, ADSP_PWR_LMTS, cluster idle, PCIe,
+pmdomain) is in this release, so a change in deep-suspend behaviour can be attributed to the
+later release that adds them.
 
 ## Camera (Phase A of IR face unlock)
 

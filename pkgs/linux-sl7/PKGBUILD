@@ -14,8 +14,8 @@ pkgbase=linux-sl7
 pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
-pkgver=7.2.11
-pkgrel=26
+pkgver=7.2.12
+pkgrel=27
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -63,7 +63,7 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0020-usb-typec-mux-ps883x-support-TYPEC_DP_STATE_F.patch'
         'patches/0021-usb-typec-mux-ps883x-add-a-delay-after-writing-confi.patch'
         'patches/0022-usb-typec-mux-ps883x-disable-USB4-on-incomplete-USB4.patch'
-        'patches/0023-HACK-disable-rfkill-of-ath12k_pci.patch'
+        'patches/0023-wifi-ath12k-skip-hardware-rfkill-setup-on-Microsoft-Surface-devices.patch'
         'patches/0024-EXPERIMENTAL-drm-msm-eDP-variable-refresh-AVR-behind-msm.vrr_enabled.patch'
         'patches/0025-dt-bindings-phy-qcom-Add-CSI2-C-PHY-DPHY-schema.patch'
         'patches/0026-phy-qcom-mipi-csi2-Add-a-CSI2-MIPI-DPHY-driver.patch'
@@ -137,11 +137,25 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0101-SL7-local-media-i2c-vd55g-Look-up-the-privacy-LED.patch'
         'patches/0102-SL7-arm64-dts-qcom-x1e80100-romulus-Light-the-camera-indicator-for-both-cameras.patch'
         'patches/0103-media-iris-reset-AHB-bridge-before-enabling-HW-mode.patch'
+        'patches/0104-power-supply-qcom_battmgr-Notify-charger-supplies-of-online-changes.patch'
+        'patches/0105-power-supply-qcom_battmgr-preserve-charge-limits.patch'
+        'patches/0106-wifi-ath12k-don-t-count-a-vdev-restart-as-a-started-.patch'
+        'patches/0107-media-iris-Fix-out-of-bounds-read-in-timestamp-metad.patch'
+        'patches/0108-Revert-media-qcom-iris-use-disable_irq-during-power-.patch'
+        'patches/0109-media-qcom-iris-Wait-for-threaded-IRQ-completion-dur.patch'
+        'patches/0110-drm-msm-dpu-re-program-colour-processing-blocks-on-t.patch'
+        'patches/0111-drm-msm-dpu-Reassert-core-clock-rate-on-runtime-resu.patch'
+        'patches/0112-drm-msm-dp-use-direct-SDP-flush-for-PSR.patch'
+        'patches/0113-drm-msm-dpu-disable-the-clocks-if-the-core-rate-rest.patch'
+        'patches/0114-arm64-dts-qcom-hamoa-Power-the-display-GDSC-while-the-camera-runs.patch'
+        'patches/0115-i2c-qcom-cci-Reset-the-controller-when-it-resumes.patch'
+        'patches/0116-i2c-qcom-cci-Suspend-the-controller-50-ms-after-the-last-transfer.patch'
+        'patches/0117-SL7-local-dt-bindings-clock-qcom-x1e80100-camcc-Allow-the-display-GDSC.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
-            '534895f65175db29e0635fecfef4d4e9cce7574bde3c144f090add61ab681817'
+            'db20b9c86ae2680a27c4d8ceb50c47cb78f4319d7dddc1ce99ced8a59e429283'
             'SKIP'
             'SKIP'
          'SKIP'
@@ -239,6 +253,20 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
          'SKIP'
          'SKIP'
          'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'

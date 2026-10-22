@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: François Roux <franzelfranzel@gmail.com>
+Date: Tue, 6 Oct 2026 08:27:28 +0200
+Subject: [PATCH] wifi: ath12k: skip hardware rfkill setup on Microsoft Surface
+ devices
+
+On the Microsoft Surface Pro 11 and Surface Laptop 7 (X1E80100), the
+WCN7850 hardware rfkill input reads as "radio off" and the OS has no
+way to control it. ath12k enables hardware rfkill handling, so Wi-Fi
+stays hard-blocked:
+
+  iwd: Error bringing interface 4 up: Operation not possible due to RF-kill
+
+ACPI platforms can opt out through ath12k_acpi_get_disable_rfkill(),
+but DT platforms cannot. A DT property was proposed for this and
+rejected, because it describes what the OS should do rather than the
+hardware. The suggested alternative was to handle these machines in
+the driver until a connector binding can describe a broken rfkill line.
+
+Add a table of board compatibles and hardware revisions on which
+hardware rfkill is known to be unusable, and skip the rfkill setup
+there. Other affected machines then only need a new table entry.
+
+Tested on a Surface Pro 11 (microsoft,denali) with next-20260929,
+booted with the unmodified mainline DTB: the interface is no longer
+blocked and connects. The Surface Laptop 7 entries (microsoft,romulus13
+and microsoft,romulus15) are based on reports from Jérôme de Bretagne
+and Dale Whinham. I have not tested them.
+
+Link: https://lore.kernel.org/all/2ixwny6hzumlqmok5cjwutvtk7nzmx4t3dhxc44ao4l2u755pj@n6m7jyxf2o62/
+Suggested-by: Manivannan Sadhasivam <mani@kernel.org>
+Assisted-by: LLM
+Signed-off-by: François Roux <franzelfranzel@gmail.com>
+Tested-by: Dale Whinham <daleyo@gmail.com>
+Reviewed-by: Baochen Qiang <baochen.qiang@oss.qualcomm.com>
+Link: https://patch.msgid.link/20261006062728.45007-1-franzelfranzel@gmail.com
+Signed-off-by: Jeff Johnson <jeff.johnson@oss.qualcomm.com>
+
+Origin: ath-next 5949d1910f (François Roux), seen in linux-next 2026-10-22; replaces the linux-sp11 HACK (37f883437b, Jiajie Chen) that was patch 0023
+Upstream-Status: Accepted in the ath tree (ath-next, via linux-next), not in 7.2.12
+
+---
+ drivers/net/wireless/ath/ath12k/core.c | 32 ++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+index 3ed98eb746..c9df99bc54 100644
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -74,6 +74,35 @@ ath12k_mem_profile_based_param ath12k_mem_profile_based_param[] = {
+ 	},
+ };
+ 
++/*
++ * On these machines the OS cannot control the WCN7850 hardware rfkill
++ * input, which reads as "radio off", so hardware rfkill must stay
++ * disabled. Ideally this would come from the connector node of the board
++ * DT, but that binding does not exist yet.
++ */
++static const struct ath12k_core_broken_rfkill_table {
++	enum ath12k_hw_rev hw_rev;
++	const char *compatible;
++} ath12k_core_broken_rfkill_table[] = {
++	{ ATH12K_HW_WCN7850_HW20, "microsoft,denali" },
++	{ ATH12K_HW_WCN7850_HW20, "microsoft,romulus13" },
++	{ ATH12K_HW_WCN7850_HW20, "microsoft,romulus15" },
++	{ /* Sentinel */ }
++};
++
++static bool ath12k_core_rfkill_is_broken(struct ath12k_base *ab)
++{
++	const struct ath12k_core_broken_rfkill_table *entry;
++
++	for (entry = ath12k_core_broken_rfkill_table; entry->compatible; entry++) {
++		if (ab->hw_rev == entry->hw_rev &&
++		    of_machine_is_compatible(entry->compatible))
++			return true;
++	}
++
++	return false;
++}
++
+ static int ath12k_core_rfkill_config(struct ath12k_base *ab)
+ {
+ 	struct ath12k *ar;
+@@ -85,6 +114,9 @@ static int ath12k_core_rfkill_config(struct ath12k_base *ab)
+ 	if (ath12k_acpi_get_disable_rfkill(ab))
+ 		return 0;
+ 
++	if (ath12k_core_rfkill_is_broken(ab))
++		return 0;
++
+ 	for (i = 0; i < ab->num_radios; i++) {
+ 		ar = ab->pdevs[i].ar;
+ 

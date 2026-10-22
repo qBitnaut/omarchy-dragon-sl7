@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 12:00:00 -0500
+Subject: [PATCH] SL7 local: dt-bindings: clock: qcom,x1e80100-camcc: Allow the
+ display GDSC as a third power domain
+
+The previous patch lists the display MDSS_GDSC as a third power domain
+of the camera clock controller, so the display GDSC is on while the
+camera runs. The schema allows exactly two power domains, so dtbs_check
+rejects the romulus device trees with "power-domains: [...] is too
+long".
+
+Accept a third, optional power domain. required-opps stays at two
+entries: it describes the performance points of the MXC and MMCX
+domains by index, and the GDSC has none.
+
+Origin: omarchy-dragon-sl7 (companion to the preceding patch, from Omarchy linux-omarchy-aarch64 2207)
+Upstream-Status: Not submitted (2207 itself is not upstream)
+
+---
+ Documentation/devicetree/bindings/clock/qcom,x1e80100-camcc.yaml | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/clock/qcom,x1e80100-camcc.yaml b/Documentation/devicetree/bindings/clock/qcom,x1e80100-camcc.yaml
+--- a/Documentation/devicetree/bindings/clock/qcom,x1e80100-camcc.yaml
++++ b/Documentation/devicetree/bindings/clock/qcom,x1e80100-camcc.yaml
+@@ -36,9 +36,13 @@
+       - description: Sleep clock source
+ 
+   power-domains:
++    minItems: 2
+     items:
+       - description: A phandle to the MXC power-domain
+       - description: A phandle to the MMCX power-domain
++      - description:
++          A phandle to the display MDSS GDSC, held on while the camera runs
++          (optional, required-opps covers the first two domains only)
+ 
+   required-opps:
+     items:
