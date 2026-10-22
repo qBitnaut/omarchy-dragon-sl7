@@ -192,12 +192,13 @@ The "Unlock with face" button (camera only when pressed), the attempt cap of
 five and everything else are nate8199's. Do not run the plugin's `setup.sh`: it
 installs howdy-git and python-dlib.
 
-The overlay is an ordered list of patches, each with its own marker in
-`Service.qml`. `lock apply` restores nate8199's file, tries every patch on a
-scratch copy (pristine checksum, dry run, marker check), swaps the result in
-atomically and keeps `Service.qml.sl7-orig` as the backup. If any patch no
-longer applies the app says so, leaves the file untouched and disables the
-plugin so the stock lock screen returns. `lock status` reports each patch.
+The overlay is an ordered list of patches, each naming the file it edits
+(`Service.qml` or `LockView.qml`) and leaving its own marker there. `lock apply`
+restores nate8199's files, tries every patch on a scratch copy of both files
+(pristine checksums, dry run, marker check), swaps the results in atomically and
+keeps `Service.qml.sl7-orig` and `LockView.qml.sl7-orig` as the backups. If any
+patch no longer applies the app says so, leaves the files untouched and disables
+the plugin so the stock lock screen returns. `lock status` reports each patch.
 
 ### The stale lock state (quickshell 0.3.2)
 
@@ -216,12 +217,43 @@ and the running lock on this machine is the patched clone of `nate.howdy-lock`,
 so the second patch, `lock-patch/howdy-lock-state-sync.patch`, fixes it in the
 clone, in the spirit of justcarlson's patch on #14588: `locked` reads a plain
 `sessionLockHeld` mirror, refreshed from `onLockStateChanged`, right after
-`finishUnlock()` and after `secure` changes; the IPC `lock()`, `isLocked()` and
-`status()` use `freshLocked()` (the live object) and log `lock-state-drift`
-when the cache was wrong. `status` keeps the live `sessionLocked` and adds
-`lockedCached`. The mirror is only set once the lock is really held, so a
-failed acquisition cannot latch it. Drop the patch when the fixed quickshell
-and Omarchy are in.
+`finishUnlock()` and after `secure` changes. The mirror is only set once the
+lock is really held, so a failed acquisition cannot latch it. The IPC `lock()`,
+`isLocked()` and `status()` decide on the live object through
+`currentlyLocked()` (see the next section) and log `lock-state-drift` when the
+cache was wrong; `status` keeps the live `sessionLocked` and adds
+`lockedCached`. Drop the patch when the fixed quickshell and Omarchy are in.
+
+### Following upstream 4.0.6
+
+nate8199's clone was forked from `omarchy.lock` before Omarchy 4.0.6, so two
+more patches bring it level with the stock lock screen, and the plugin now
+follows upstream 4.0.6 lock-state logic:
+
+- `lock-patch/howdy-lock-upstream-4.0.6.patch` (`Service.qml`): the
+  stranded-lock check through `omarchy-hyprland-session-lock-stranded`
+  (omacom/omarchy#15020), `currentlyLocked()` at every place a decision is made
+  (#14978; it replaces the `freshLocked()` of the state-sync patch), and the
+  `Commons` import alias (#14553).
+- `lock-patch/howdy-lock-view-4.0.6.patch` (`LockView.qml`): `Commons.Color`
+  instead of the bare `Color` singleton (needed for Qt 6.12),
+  a plain-text status line, and the key auto-repeat guard (#7806), kept ahead of
+  the fork's Escape-cancels-face branch.
+
+One fork serves both Omarchy 4.0.x stable and 4.5-class edge: the helper binary
+and the `Commons` alias exist on both. These two patches are the only ones
+that depend on the 4.0.6 shell (the stranded-lock helper and the `Commons`
+alias).
+
+After the package is installed or upgraded, on each Surface Laptop 7, while the
+screen is unlocked:
+
+1. `omarchy-sl7-faceunlock lock apply && omarchy-restart-shell`
+2. Check the shell journal for QML errors from the plugin, for example
+   `journalctl --user -b | grep -i 'nate.howdy-lock'`; there must be no
+   `TypeError` lines.
+3. Lock and unlock once, then `omarchy-shell lock status` must report
+   `"locked":false`.
 
 ### Upgrades
 
