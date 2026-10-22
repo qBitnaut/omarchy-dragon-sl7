@@ -119,14 +119,14 @@ jobs:
       - name: Guard against firmware in the repository
         run: pkgs/linux-sl7/scripts/guard-artifacts.sh repo
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: omarchy-sl7-repo
           path: repo/
           if-no-files-found: error
           retention-days: 14
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-versions
           path: dl-versions.txt
@@ -240,7 +240,7 @@ jobs:
             while read -r n v; do echo "| $n | $v |"; done < "$GITHUB_WORKSPACE/dl-versions.txt"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: omarchy-sl7-installer-iso
           path: out/
