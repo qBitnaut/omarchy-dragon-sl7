@@ -192,3 +192,6 @@
 0115-i2c-qcom-cci-Reset-the-controller-when-it-resumes.patch
 0116-i2c-qcom-cci-Suspend-the-controller-50-ms-after-the-last-transfer.patch
 0117-SL7-local-dt-bindings-clock-qcom-x1e80100-camcc-Allow-the-display-GDSC.patch
+
+# 30. Host tools: tools/include/linux/types.h gains __u128 so resolve_btfids builds against linux-api-headers 7.3 (upstream 10a47fb67340, v7.3-rc1)
+0118-tools-linux-types.h-Add-128-bit-integer-types-for-arm64-UAPI-structures.patch
