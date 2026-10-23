@@ -192,11 +192,12 @@ use this tool for the SL7.
     or reconnect after installing.
   - `/usr/lib/NetworkManager/dispatcher.d/90-omarchy-sl7-wifi-powersave` runs on `up` and
     `dhcp4-change` (also `dhcp6-change`, `reapply`) of a wireless interface and sets
-    `iw dev <wlan> set power_save on` on battery and `off` on AC, when `power.conf` has
+    `iw dev <wlan> set power_save on` on battery or with the `power-saver` profile and `off` on AC
+    otherwise, when `power.conf` has
     `ENABLE=yes` and `WIFI_PS=yes`. NetworkManager applies its own value during activation,
-    before `up`, so the dispatcher has the last word. On AC power save is therefore off again
-    right after connecting.
-  - `sl7-doctor` warns when power save is not on while on battery (`WARN`, not `FAIL`).
+    before `up`, so the dispatcher has the last word. On AC (without `power-saver`) power save is
+    therefore off again right after connecting.
+  - `sl7-doctor` warns when power save is not on while on battery or in `power-saver` (`WARN`, not `FAIL`).
   Trade-off: a sleeping radio adds latency, tens of milliseconds on the first packet after the
   link idled (SSH keystrokes, game input, the first request of a page load). Omarchy disables
   power save for that reason and for Intel BE200/BE211 link drops; ath12k (WCN7850) on this laptop

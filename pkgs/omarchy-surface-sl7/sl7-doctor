@@ -232,6 +232,8 @@ fi
 wifi_net=${OMARCHY_SL7_NET:-/sys/class/net}
 wifi_ps_dir=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
 wifi_conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
+wifi_profile=
+[[ -x $powermode ]] && wifi_profile=$("$powermode" profile 2>/dev/null)
 read -r wifi_enable wifi_policy < <(
   ENABLE=yes
   WIFI_PS=yes
@@ -262,12 +264,12 @@ for wifi_w in "$wifi_net"/*/wireless; do
     printf 'INFO  Wi-Fi power save: %s is %s (policy off in power.conf)\n' "$wifi_dev" "${wifi_cur:-unknown}"
   elif ((!wifi_have_source)); then
     printf 'INFO  Wi-Fi power save: %s is %s (power source unknown)\n' "$wifi_dev" "${wifi_cur:-unknown}"
-  elif ((wifi_on_ac)); then
+  elif ((wifi_on_ac)) && [[ $wifi_profile != power-saver ]]; then
     printf 'INFO  Wi-Fi power save: %s is %s (on AC, off is expected)\n' "$wifi_dev" "${wifi_cur:-unknown}"
   elif [[ $wifi_cur == on ]]; then
-    pass "Wi-Fi power save is on for $wifi_dev (battery)"
+    pass "Wi-Fi power save is on for $wifi_dev (battery or power-saver)"
   else
-    warn "Wi-Fi power save is ${wifi_cur:-unknown} for $wifi_dev on battery (want on): check /usr/lib/NetworkManager/conf.d/zz-omarchy-sl7-wifi-powersave.conf and /usr/lib/NetworkManager/dispatcher.d/90-omarchy-sl7-wifi-powersave, then sudo omarchy-sl7-powermode auto"
+    warn "Wi-Fi power save is ${wifi_cur:-unknown} for $wifi_dev on battery or power-saver (want on): check /usr/lib/NetworkManager/conf.d/zz-omarchy-sl7-wifi-powersave.conf and /usr/lib/NetworkManager/dispatcher.d/90-omarchy-sl7-wifi-powersave, then sudo omarchy-sl7-powermode auto"
   fi
 done
 
