@@ -28,6 +28,8 @@ Panel {
     readonly property int charge: (status && status.charge !== null && status.charge !== undefined) ? status.charge : -1
     readonly property bool discharging: !!(status && status.flow === "discharging")
     readonly property bool charging: !!(status && status.flow === "charging")
+    // Bolt state: charging, or on AC and not discharging (full, or held at a charge limit).
+    readonly property bool pluggedIn: !discharging && (charging || !!(status && status.ac === true))
     readonly property bool saverForced: !!(status && status.auto && status.auto.forced)
     readonly property bool criticalBattery: discharging && charge >= 0 && charge <= 10
     readonly property int saverThreshold: (status && status.auto && status.auto.enabled && status.auto.threshold !== null && status.auto.threshold !== undefined) ? status.auto.threshold : 30
@@ -74,7 +76,7 @@ Panel {
     // ---- bar state ------------------------------------------------------------
     readonly property string glyphChar: {
         if (root.daemonDown || !root.present || root.charge < 0) return Format.glyph("power_plug_off")
-        return Format.batteryGlyph(root.charge, root.charging)
+        return Format.batteryGlyph(root.charge, root.pluggedIn)
     }
 
     readonly property string colorToken: {

@@ -43,6 +43,8 @@ Item {
     readonly property var autoInfo: s.auto ? s.auto : ({})
     readonly property bool discharging: s.flow === "discharging"
     readonly property bool charging: s.flow === "charging"
+    // Bolt state: charging, or on AC and not discharging (full, or held at a charge limit).
+    readonly property bool pluggedIn: !discharging && (charging || s.ac === true)
     readonly property int charge: s.charge !== null && s.charge !== undefined ? s.charge : -1
     readonly property bool lowBattery: discharging && charge >= 0 && charge <= 10
     // Warn colours only from the auto power-saver threshold down (default 30%), so a
@@ -134,7 +136,7 @@ Item {
                     textFormat: Text.PlainText
                     text: {
                         if (!root.live || root.charge < 0) return Format.glyph("power_plug_off")
-                        return Format.batteryGlyph(root.charge, root.charging)
+                        return Format.batteryGlyph(root.charge, root.pluggedIn)
                     }
                     color: root.stateColor
                     font.family: root.fontFamily
