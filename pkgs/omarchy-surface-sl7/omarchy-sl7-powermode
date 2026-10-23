@@ -2,7 +2,7 @@
 # Power mode switcher for the Surface Laptop 7 (X1E, qcom-battmgr): the knobs follow the
 # power source (AC or battery) and the power-profiles-daemon ActiveProfile.
 #
-#   omarchy-sl7-powermode [--system|--user] auto|battery|ac|status
+#   omarchy-sl7-powermode [--system|--user] auto|battery|ac|status|profile
 #   omarchy-sl7-powermode --system watch   (root daemon, omarchy-surface-sl7-powermode.service)
 #   omarchy-sl7-powermode watch            (user daemon, see omarchy-sl7-powermode.service)
 #
@@ -67,7 +67,7 @@ load_conf() {
 load_conf
 
 usage() {
-  echo "usage: ${0##*/} [--system|--user] auto|battery|ac|status" >&2
+  echo "usage: ${0##*/} [--system|--user] auto|battery|ac|status|profile" >&2
   echo "       ${0##*/} [--system] watch" >&2
   exit 2
 }
@@ -195,6 +195,17 @@ put() {
 
 is_num() { [[ ${1:-} =~ ^[0-9]+$ ]]; }
 
+# cpufreq stores a written scaling_max_freq rounded down to a step of the policy, so round
+# the wanted cap the same way, or status never matches what was written.
+# cpu_step POLICY_DIR KHZ -> the highest scaling_available_frequencies entry <= KHZ, else KHZ.
+cpu_step() {
+  local f best=
+  for f in $(cat "$1/scaling_available_frequencies" 2>/dev/null); do
+    [[ $f =~ ^[0-9]+$ ]] && ((f <= $2 && f > ${best:-0})) && best=$f
+  done
+  echo "${best:-$2}"
+}
+
 sys_cpu() { # level
   local pol min max cap want
   want=$(cpu_cap_khz "$1")
@@ -209,6 +220,7 @@ sys_cpu() { # level
       cap=$want
       ((cap > max)) && cap=$max
       ((cap < min)) && cap=$min
+      cap=$(cpu_step "$pol" "$cap")
     fi
     put "$pol/scaling_max_freq" "$cap" || true
   done
@@ -467,6 +479,7 @@ status() {
         want=$max
       elif [[ -n $want ]]; then
         ((want > max)) && want=$max
+        want=$(cpu_step "$pol" "$want")
       fi
       if [[ -n $want ]]; then
         [[ $cur == "$want" ]] || bad=1
@@ -617,6 +630,7 @@ case $cmd in
     if [[ $part == system ]]; then sys_watch; else watch; fi
     ;;
   status) status ;;
+  profile) detect_profile ;;
   auto | battery | ac)
     mode=$cmd
     if [[ $cmd == auto ]]; then

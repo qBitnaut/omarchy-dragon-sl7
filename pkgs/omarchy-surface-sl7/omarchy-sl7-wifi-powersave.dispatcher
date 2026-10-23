@@ -6,7 +6,8 @@
 # interface may not even exist when omarchy-sl7-powermode runs at boot, so the
 # udev/boot/resume runs alone can leave power save off. This runs right after
 # the connection is up (and on a DHCP change) and does what omarchy-sl7-powermode
-# does: "iw dev <wlan> set power_save on" on battery, "off" on AC, only when
+# does: "iw dev <wlan> set power_save on" on battery or with the power-saver profile,
+# "off" on AC otherwise, only when
 # /etc/omarchy-surface-sl7/power.conf has ENABLE=yes and WIFI_PS=yes.
 iface=${1:-}
 action=${2:-}
@@ -19,6 +20,7 @@ esac
 net=${OMARCHY_SL7_NET:-/sys/class/net}
 ps=${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}
 conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
+powermode=${OMARCHY_SL7_POWERMODE:-/usr/bin/omarchy-sl7-powermode}
 
 [[ $iface =~ ^[A-Za-z0-9._-]+$ && -d $net/$iface/wireless ]] || exit 0
 command -v iw >/dev/null 2>&1 || exit 0
@@ -42,7 +44,9 @@ for supply in "$ps"/*; do
 done
 ((have_source)) || exit 0
 
-if ((on_ac)); then state=off; else state=on; fi
+profile=
+[[ -x $powermode ]] && profile=$("$powermode" profile 2>/dev/null)
+if ((on_ac)) && [[ $profile != power-saver ]]; then state=off; else state=on; fi
 iw dev "$iface" set power_save "$state" &&
   echo "omarchy-sl7-wifi-powersave: $iface power_save $state ($action)"
 exit 0
