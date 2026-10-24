@@ -11,6 +11,11 @@ test('batteryGlyph picks the alert glyph below 10%', () => {
   assert.equal(Format.batteryGlyph(NaN, false), String.fromCodePoint(0xF0083));
 });
 
+test('batteryGlyph uses the 10% bolt below 10% while charging', () => {
+  assert.equal(Format.batteryGlyph(5, true), String.fromCodePoint(0xF089C));
+  assert.equal(Format.batteryGlyph(NaN, true), String.fromCodePoint(0xF0083));
+});
+
 test('batteryGlyph rounds to the nearest 10% bucket while on mains (not charging)', () => {
   assert.equal(Format.batteryGlyph(100, false), String.fromCodePoint(0xF0079));
   assert.equal(Format.batteryGlyph(87, false), String.fromCodePoint(0xF0082)); // rounds to 90

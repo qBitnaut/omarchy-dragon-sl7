@@ -32,11 +32,13 @@ function _bucket10(pct) {
     return Math.max(10, Math.min(100, b))
 }
 
-// `pct` 0..100, `charging` bool. Falls back to the alert glyph below 10% or on a
-// missing/NaN reading.
+// `pct` 0..100, `charging` bool (true for any plugged-in state, so the bolt also marks a
+// full or limit-held battery on AC). Falls back to the alert glyph below 10% while not
+// charging, or on a missing/NaN reading; while charging, below 10% uses the 10% bolt.
 function batteryGlyph(pct, charging) {
     var p = Number(pct)
-    if (isNaN(p) || p < 10) return String.fromCodePoint(CODEPOINT.battery_alert)
+    if (isNaN(p)) return String.fromCodePoint(CODEPOINT.battery_alert)
+    if (p < 10) return String.fromCodePoint(charging ? BATTERY_CHARGING[10] : CODEPOINT.battery_alert)
     var bucket = _bucket10(p)
     var table = charging ? BATTERY_CHARGING : BATTERY_PLAIN
     var cp = table[bucket] || CODEPOINT.battery_alert
