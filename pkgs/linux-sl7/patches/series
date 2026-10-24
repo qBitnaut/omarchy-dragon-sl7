@@ -195,3 +195,6 @@
 
 # 30. Host tools: tools/include/linux/types.h gains __u128 so resolve_btfids builds against linux-api-headers 7.3 (upstream 10a47fb67340, v7.3-rc1)
 0118-tools-linux-types.h-Add-128-bit-integer-types-for-arm64-UAPI-structures.patch
+
+# 31. Cluster idle: drop cluster_cl5 from the three CPU cluster power domains (X1E reset-hunt test; Jens Glathe RFC, DC ZVA mitigation)
+0119-arm64-dts-qcom-hamoa-Drop-cluster_cl5-idle-state-from-CPU-clusters.patch
