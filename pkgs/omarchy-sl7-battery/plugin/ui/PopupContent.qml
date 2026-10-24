@@ -43,8 +43,8 @@ Item {
     readonly property var autoInfo: s.auto ? s.auto : ({})
     readonly property bool discharging: s.flow === "discharging"
     readonly property bool charging: s.flow === "charging"
-    // Bolt state: charging, or on AC and not discharging (full, or held at a charge limit).
-    readonly property bool pluggedIn: !discharging && (charging || s.ac === true)
+    // Bolt state: AC online (any percentage, whatever sysfs status says) or charging.
+    readonly property bool pluggedIn: s.ac === true || charging
     readonly property int charge: s.charge !== null && s.charge !== undefined ? s.charge : -1
     readonly property bool lowBattery: discharging && charge >= 0 && charge <= 10
     // Warn colours only from the auto power-saver threshold down (default 30%), so a
