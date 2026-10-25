@@ -198,3 +198,6 @@
 
 # 31. Cluster idle: drop cluster_cl5 from the three CPU cluster power domains (X1E reset-hunt test; Jens Glathe RFC, DC ZVA mitigation)
 0119-arm64-dts-qcom-hamoa-Drop-cluster_cl5-idle-state-from-CPU-clusters.patch
+
+# 32. PCIe qcom: retry a failed resume link training and keep the DBI clocked if it stays down (experimental, Wi-Fi root port D3cold)
+0120-SL7-local-PCI-qcom-retry-a-failed-resume-link-and-keep-DBI-clocked.patch

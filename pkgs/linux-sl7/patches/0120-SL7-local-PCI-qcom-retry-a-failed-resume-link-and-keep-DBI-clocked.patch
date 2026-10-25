@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris McLaughlin <19711592+qBitnaut@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 12:00:00 -0500
+Subject: [PATCH] PCI: qcom: retry a failed resume link and keep DBI clocked
+
+EXPERIMENTAL, unverified on hardware.
+
+If the link does not train during system resume,
+dw_pcie_resume_noirq() stops the link and powers the controller down
+again, but leaves pci->suspended set. qcom_pcie_resume_noirq() then
+returns the error and the PM core still resumes the Root Port, whose
+config space accesses go through the DBI of a controller with its clocks
+off.
+
+Wrap the call in qcom_pcie_resume_link():
+
+- retry up to three times; each retry cuts the endpoint power (also when
+  it was kept on for wakeup), waits n * 100 ms, and waits n * 100 ms again
+  after the endpoint power is back, before PERST# is released
+- if the link is still down, bring the controller up once more without
+  link training and clear pci->suspended, so DBI stays accessible and
+  config accesses behind the Root Port return ~0
+  (dw_pcie_other_conf_map_bus() refuses them with the link down)
+- log the return value, the LTSSM state and the attempt count with
+  dev_info()/dev_err() so a following hang leaves evidence in the journal
+
+The first attempt, and every successful first attempt, is unchanged apart
+from one dev_info() line. -ENODEV/-EIO (no or inactive endpoint) are still
+reported as success by dw_pcie_resume_noirq() and are not retried.
+
+Origin: SL7 local, ours
+Upstream-Status: Not submitted
+
+---
+ drivers/pci/controller/dwc/pcie-qcom.c | 75 ++++++++++++++++++++++++++++---
+ 1 file changed, 71 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index d62cf302d..12366d8e1 100644
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -292,6 +292,7 @@ struct qcom_pcie {
+ 	struct list_head ports;
+ 	struct gpio_desc *reset;
+ 	bool use_pm_opp;
++	unsigned int pwr_settle_ms;
+ };
+ 
+ #define to_qcom_pcie(x)		dev_get_drvdata((x)->dev)
+@@ -1384,6 +1385,10 @@ static int qcom_pcie_host_init(struct dw_pcie_rp *pp)
+ 		ret = pci_pwrctrl_power_on_devices(pci->dev);
+ 		if (ret)
+ 			goto err_pwrctrl_destroy;
++
++		/* Non-zero only while retrying a failed resume. */
++		if (pcie->pwr_settle_ms)
++			msleep(pcie->pwr_settle_ms);
+ 	}
+ 
+ 	if (pcie->cfg->ops->post_init) {
+@@ -2251,6 +2256,67 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
+ 	return ret;
+ }
+ 
++#define QCOM_PCIE_RESUME_RETRIES	3
++#define QCOM_PCIE_RESUME_SETTLE_MS	100
++
++/*
++ * Resume the link, retrying a bounded number of times if it fails.
++ *
++ * dw_pcie_resume_noirq() powers the controller down again when the link does
++ * not train and leaves pci->suspended set. The PM core still resumes the
++ * children, so the Root Port would then read config space through the DBI of
++ * an unclocked controller. After the last retry, bring the controller up
++ * without link training so that DBI stays accessible; config accesses behind
++ * the Root Port then fail in dw_pcie_other_conf_map_bus() instead of faulting.
++ *
++ * The first attempt is unchanged. Retries cut the endpoint power, wait
++ * attempt * QCOM_PCIE_RESUME_SETTLE_MS, and wait that long again after the
++ * endpoint power is back, before PERST# is released.
++ */
++static int qcom_pcie_resume_link(struct qcom_pcie *pcie)
++{
++	struct dw_pcie *pci = pcie->pci;
++	struct device *dev = pci->dev;
++	int ret, last, attempt = 0;
++
++	for (;;) {
++		ret = dw_pcie_resume_noirq(pci);
++		if (!pci->suspended) {
++			dev_info(dev, "resume: dw_pcie_resume_noirq() = %d, LTSSM 0x%x, attempts %d\n",
++				 ret, dw_pcie_get_ltssm(pci), attempt + 1);
++			return 0;
++		}
++
++		dev_err(dev, "resume: dw_pcie_resume_noirq() = %d, attempt %d of %d, controller powered down\n",
++			ret, attempt + 1, QCOM_PCIE_RESUME_RETRIES + 1);
++		if (attempt >= QCOM_PCIE_RESUME_RETRIES)
++			break;
++
++		attempt++;
++		if (pci->pp.skip_pwrctrl_off) {
++			/* Endpoint was kept powered: really cycle it. */
++			pci_pwrctrl_power_off_devices(dev);
++			pci->pp.skip_pwrctrl_off = false;
++		}
++		pcie->pwr_settle_ms = attempt * QCOM_PCIE_RESUME_SETTLE_MS;
++		msleep(pcie->pwr_settle_ms);
++	}
++	pcie->pwr_settle_ms = 0;
++	last = ret;
++
++	if (!pci->pp.ops->init(&pci->pp)) {
++		dw_pcie_setup_rc(&pci->pp);
++		pci->suspended = false;
++		dev_err(dev, "resume: link down after %d attempts (last %d), LTSSM 0x%x, controller kept up without a link\n",
++			attempt + 1, last, dw_pcie_get_ltssm(pci));
++		return 0;
++	}
++
++	dev_err(dev, "resume: link down after %d attempts (last %d) and the controller could not be kept up\n",
++		attempt + 1, last);
++	return last;
++}
++
+ static int qcom_pcie_resume_noirq(struct device *dev)
+ {
+ 	struct qcom_pcie *pcie;
+@@ -2282,11 +2348,12 @@ static int qcom_pcie_resume_noirq(struct device *dev)
+ 		}
+ 
+ 		/*
+-		 * Ignore -ENODEV & -EIO here since it is expected when no
+-		 * endpoint is connected to the PCIe link.
++		 * A missing or not yet active endpoint (-ENODEV, -EIO) is
++		 * expected and not an error: dw_pcie_resume_noirq() reports
++		 * success for it.
+ 		 */
+-		ret = dw_pcie_resume_noirq(pcie->pci);
+-		if (ret && ret != -ENODEV && ret != -EIO)
++		ret = qcom_pcie_resume_link(pcie);
++		if (ret)
+ 			goto disable_icc_mem;
+ 	} else {
+ 		if (pm_suspend_target_state != PM_SUSPEND_MEM) {
