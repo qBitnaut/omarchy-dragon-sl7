@@ -50,6 +50,8 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/cpuidle/cpuidle-psci.o \
         drivers/cpuidle/cpuidle-psci-domain.o \
         drivers/soc/qcom/pmic_glink.o \
+        drivers/soc/qcom/smp2p.o \
+        drivers/soc/qcom/qcom_adsp_pwr_lmts.o \
         drivers/soc/qcom/pmic_glink_altmode.o \
         drivers/usb/typec/ucsi/ucsi.o \
         drivers/hwmon/qcom_pld_power.o
