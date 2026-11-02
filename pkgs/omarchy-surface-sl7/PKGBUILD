@@ -6,7 +6,7 @@
 
 pkgname=omarchy-surface-sl7
 pkgver=0.1.0
-pkgrel=59
+pkgrel=60
 pkgdesc='Omarchy add-on for the Microsoft Surface Laptop 7 (Snapdragon X): initramfs, UKI device trees, touch resume, firmware installer'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
@@ -35,7 +35,8 @@ backup=('etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf'
         'etc/pacman.d/omarchy-sl7.conf'
         'etc/omarchy-surface-sl7/power.conf'
         'etc/omarchy-surface-sl7/usb-rpm.conf'
-        'etc/omarchy-surface-sl7/bag-guard.conf')
+        'etc/omarchy-surface-sl7/bag-guard.conf'
+        'etc/UPower/UPower.conf.d/50-sl7-low-battery.conf')
 install=omarchy-surface-sl7.install
 
 # valeronm/sl7-mac (MIT): factory Wi-Fi/Bluetooth MAC from UEFI, pinned.
@@ -109,7 +110,9 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'bag-guard.conf'
         'omarchy-surface-sl7-camera-stage'
         'omarchy-surface-sl7-camera-stage.service'
-        '51-omarchy-surface-sl7-ir-camera.conf')
+        '51-omarchy-surface-sl7-ir-camera.conf'
+        '50-omarchy-surface-sl7-low-battery.conf'
+        'omarchy-surface-sl7-low-battery-poweroff')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -179,7 +182,9 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '6ef7d9f902a3361333e52a78caca27d0d4fc574ed8a1a7d5c166f768a270e95a'
             'dabf2db2200e5ed537a3b52e73fd029b9d8235d99fe93846e7563b58bbe5d031'
             '93de124366cf20d310560e6c369f6bacc822980106c985533d829d7f6179bda2'
-            '17ca36de1a8baba478dd83cca059ad7afc8785d25a8aff2b981d46da2b63d8c8')
+            '17ca36de1a8baba478dd83cca059ad7afc8785d25a8aff2b981d46da2b63d8c8'
+            '74fe2181112758ee58319503f469af288172b1c54e11e57dd46c9cedbce96d10'
+            '6667363bb31312cc23b7d0b6434a1577b361d1f3b37d201efbf0d6f09daee8e4')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"
@@ -318,6 +323,15 @@ package() {
     "$pkgdir/usr/lib/systemd/system/omarchy-surface-sl7-bag-guard.service"
   ln -s ../omarchy-surface-sl7-bag-guard.service \
     "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/omarchy-surface-sl7-bag-guard.service"
+
+  # 8b4. low-battery policy: UPower powers off at 5% (CriticalPowerAction=Auto
+  # chose a plain suspend at 0% and the machine looped suspend/wake until it
+  # browned out), and a system-sleep hook powers off on a resume at or below 5%
+  # while discharging. No RTC wake alarm exists, so power off is the safe action.
+  install -Dm644 50-omarchy-surface-sl7-low-battery.conf \
+    "$pkgdir/etc/UPower/UPower.conf.d/50-sl7-low-battery.conf"
+  install -Dm755 omarchy-surface-sl7-low-battery-poweroff \
+    "$pkgdir/usr/lib/systemd/system-sleep/zz-low-battery-poweroff"
 
   # 8b2. touchpad defaults: tap-to-click off, appended once per user to
   # ~/.config/hypr/input.lua by a user service (new and existing installs)

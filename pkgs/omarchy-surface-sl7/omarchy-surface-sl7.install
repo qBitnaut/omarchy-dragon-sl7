@@ -72,6 +72,10 @@ _sl7_setup() {
   /usr/bin/omarchy-sl7-test-entry cleanup --legacy || true
   # The battery pacman hook only fires on omarchy (re)installs: apply now.
   "$_sl7_dir/omarchy-sl7-battery-patch" || true
+  # Pick up the low-battery drop-in (/etc/UPower/UPower.conf.d); not in image builds.
+  if ! { command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --chroot; }; then
+    systemctl try-restart upower.service >/dev/null 2>&1 || true
+  fi
 
   if [[ -f /etc/default/limine ]] && grep -Eq '^[[:space:]]*ENABLE_UKI="?no' /etc/default/limine; then
     echo "omarchy-surface-sl7: WARNING: /etc/default/limine sets ENABLE_UKI=no."

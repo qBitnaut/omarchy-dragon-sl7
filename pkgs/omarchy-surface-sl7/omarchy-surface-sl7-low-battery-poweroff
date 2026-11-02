@@ -1,0 +1,56 @@
+#!/bin/sh
+# Low-battery guard (installed as /usr/lib/systemd/system-sleep/zz-low-battery-poweroff).
+# On every resume, if the battery is at or below THRESH percent and discharging,
+# power off cleanly instead of letting the machine fall back asleep and brown out.
+#
+# systemd calls it with: $1 = pre|post, $2 = suspend|hibernate|...
+# Manual dry run (changes nothing): sh zz-low-battery-poweroff check
+# Override the threshold for a dry run: LOWBATT_THRESH=90 sh zz-low-battery-poweroff check
+#
+# Always exits 0 so it can never block a suspend or resume.
+
+THRESH="${LOWBATT_THRESH:-5}"
+LOG=/var/log/sleep-trace.log
+
+# First battery supply, whatever the kernel names it (qcom-battmgr-bat on the SL7).
+BAT=
+for d in /sys/class/power_supply/*; do
+    [ -r "$d/type" ] || continue
+    [ "$(cat "$d/type" 2>/dev/null)" = "Battery" ] || continue
+    BAT=$d
+    break
+done
+
+low_and_discharging() {
+    [ -n "$BAT" ] && [ -r "$BAT/capacity" ] && [ -r "$BAT/status" ] || return 1
+    cap=$(cat "$BAT/capacity" 2>/dev/null)
+    status=$(cat "$BAT/status" 2>/dev/null)
+    [ "$status" = "Discharging" ] || return 1
+    [ "$cap" -le "$THRESH" ] 2>/dev/null || return 1
+    return 0
+}
+
+case "$1" in
+    post)
+        if low_and_discharging; then
+            msg="low-battery guard: ${cap}% and discharging after resume, powering off cleanly"
+            logger -t sl7-lowbatt "$msg" 2>/dev/null
+            [ -w "$LOG" ] && echo "=== LOW-BATTERY-POWEROFF $(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG" 2>/dev/null
+            sync
+            # --no-block: this hook runs inside systemd-suspend.service, so a
+            # blocking poweroff would wait on the very service that is running it.
+            systemctl --no-block poweroff
+        fi
+        ;;
+    check)
+        if low_and_discharging; then
+            echo "WOULD POWER OFF: ${cap}% ${status} (threshold ${THRESH}%)"
+        else
+            cap=$([ -n "$BAT" ] && cat "$BAT/capacity" 2>/dev/null)
+            status=$([ -n "$BAT" ] && cat "$BAT/status" 2>/dev/null)
+            echo "no action: ${cap:-?}% ${status:-?} (threshold ${THRESH}%)"
+        fi
+        ;;
+esac
+
+exit 0
