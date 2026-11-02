@@ -27,6 +27,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
 | 8b3 | bag guard: suspend, then power off, a laptop left awake with the lid closed on battery (section 8) | `/usr/bin/omarchy-sl7-bag-guard`, `omarchy-surface-sl7-bag-guard.service`, `/etc/omarchy-surface-sl7/bag-guard.conf` |
+| 8b4 | low-battery policy: UPower powers off at 5% and a resume hook powers off at or below 5% while discharging (section 8) | `/etc/UPower/UPower.conf.d/50-sl7-low-battery.conf`, `/usr/lib/systemd/system-sleep/zz-low-battery-poweroff` |
 | 8d | optional kernel test boot entries, PSR (known broken) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | `leds_qcom_flash` kept unloaded (the PMIC IR LED path is retired), read-only `sl7-ir-emitter-test --status` and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
@@ -113,6 +114,15 @@ iptsd's own `system-sleep` script only re-triggers udev `add`, which does not re
 running unit. Our hook, on `post`, schedules (`systemd-run --on-active=2`, so spi-hid has
 re-initialised) `restart-iptsd`, which finds the hidraw nodes by `HID_ID` (vendor
 `045E`, product `0C77`/`0C6E`) and restarts their `iptsd@dev-hidrawN.service`.
+
+### 4b. Wi-Fi board data (`sl7-ath12k-board`)
+
+Do not drop the `sl7-ath12k-board` hook because linux-firmware 20261019 "now has the SL7": its
+`board-2.bin` carries the SL7's exact board name (`17cb:1107`, `qmi-board-id=255`) on the Samsung
+Galaxy Book4 Edge calibration data (linux-firmware commit 575bbe3f), not the 3378 data we use.
+Our hook appends the name to the 3378 entry, which comes first, so ath12k's first match should
+keep our data (inferred, not tested). `sl7-doctor` only greps for the name, so it cannot tell
+the two apart.
 
 ### 5. Wi-Fi/Bluetooth MAC
 
@@ -274,6 +284,18 @@ use this tool for the SL7.
   should print `s "yes"`.
   `ENABLED=0` leaves the service running but idle; `systemctl disable --now
   omarchy-surface-sl7-bag-guard` removes it.
+- **Low-battery poweroff** (`/etc/UPower/UPower.conf.d/50-sl7-low-battery.conf`, a conffile, and
+  `/usr/lib/systemd/system-sleep/zz-low-battery-poweroff`). UPower's default
+  `CriticalPowerAction=Auto` requested a plain suspend at 0%, and the machine then looped
+  suspend/wake until it browned out (a brownout can leave the touchpad dead until an EC drain).
+  The drop-in sets `PercentageLow=20`, `PercentageCritical=8`, `PercentageAction=5` and
+  `CriticalPowerAction=PowerOff`. The hook runs after every resume and, when the battery is at or
+  below 5% and `Discharging`, logs to the journal (`journalctl -t sl7-lowbatt`) and runs
+  `systemctl --no-block poweroff`; it always exits 0. There is no RTC wake alarm and hibernate is
+  untested on the SL7, so power off is the only critical action used. Dry run, changing nothing:
+  `sh /usr/lib/systemd/system-sleep/zz-low-battery-poweroff check`, or with
+  `LOWBATT_THRESH=100` to see `WOULD POWER OFF` while discharging. A real drain to 5% on battery
+  has not been tested yet.
 
 ### 8f. Touchpad defaults (tap-to-click off)
 
