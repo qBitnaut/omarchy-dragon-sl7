@@ -34,6 +34,7 @@ hardware yet.
 | `VIDEO_QCOM_IRIS=m`, `SM_VIDEOCC_8550=m` | hardware video decode |
 | `VIDEO_QCOM_CAMSS=m`, `PHY_QCOM_MIPI_CSI2=m`, `I2C_QCOM_CCI=m`, `CLK_X1E80100_CAMCC=m`, `V4L2_FWNODE=m`, `V4L2_CCI_I2C=m` | X1E camera subsystem (patches 0025-0037) |
 | `VIDEO_OV02C10=m`, `VIDEO_VD55G=m` | front RGB and IR sensors (`VIDEO_VD55G` replaces `VIDEO_VD55G1`) |
+| `QCOM_ADSP_PWR_LMTS=m` | ADSP power-limits Modern Standby notification (patches 0122 and 0123), EXPERIMENTAL; a module so it can be kept off without a rebuild, see "ADSP Modern Standby notification" |
 | `LEDS_CLASS_FLASH=m`, `LEDS_QCOM_FLASH=m`, `V4L2_FLASH_LED_CLASS=m` | PMIC flash LED class; not described in the DT, so nothing fires the illuminator |
 | `ZSWAP_DEFAULT_ON=y`, `ZSWAP_SHRINKER_DEFAULT_ON=y`, `ZRAM_BACKEND_ZSTD=y`, `ZRAM_BACKEND_LZ4=y`, `ZRAM_DEF_COMP_ZSTD=y` (`ZRAM_DEF_COMP="zstd"`) | zswap on at boot, zram defaults to zstd (synced from Omarchy's `config.aarch64`) |
 | `LRU_GEN=y`, `LRU_GEN_ENABLED=y`, `TRANSPARENT_HUGEPAGE=y` with `_ALWAYS=y` | MGLRU and transparent huge pages always on (Omarchy) |
@@ -114,6 +115,9 @@ and `Upstream-Status:` headers in its commit message. Patches apply with plain
 | 0118 | tools: `linux/types.h` gains the `__s128`/`__u128` typedefs. Arch Linux ARM's `linux-api-headers` 7.3 installs arm64 `asm/ptrace.h` and `asm/sigcontext.h` that use `__u128`; the host tools of a 7.2 tree (`resolve_btfids`, needed by `CONFIG_DEBUG_INFO_BTF`) compile with `-I tools/include` first, so `<linux/types.h>` is the tools copy and glibc's `<signal.h>` fails with "unknown type name `__u128`". Drop when the base is 7.3 or later | Will Deacon, `10a47fb67340` | torvalds, v7.3-rc1; not in linux-7.2.y (checked 7.2.15) |
 | 0119 | arm64: dts: qcom: hamoa: `cluster_pd0`, `cluster_pd1` and `cluster_pd2` list only `cluster_cl4` in `domain-idle-states`; `cluster_cl5` is dropped from all three (the node stays defined). Test patch for spontaneous SoC resets (PMIC log: PS_HOLD HARD_RESET, no PMIC fault): the cluster_cl5 idle state is suspected of triggering DC ZVA misbehaviour that resets X1 SoCs. Patch 0052 (CL5 exit latency 4000 to 2000 us) stays but is moot while the state is unused | Jens Glathe (Suggested-by Marc Zyngier), carried by Omarchy as `2151-arm64-dts-qcom-hamoa-Drop-cluster_cl5-idle-state-fro.patch` | RFC posted <https://lore.kernel.org/all/20260604-dc_zva_mitigation-v1-1-d1148c1c0259@oldschoolsolutions.biz/>, not in 7.2.12; remove 0119 and restore pkgrel 27 to revert |
 | 0120 | SL7 local, EXPERIMENTAL: `pcie-qcom` resume of a D3cold controller retries a failed link training up to three times (endpoint power cycled, 100/200/300 ms settle before PERST# release) and, if the link stays down, brings the controller up without a link instead of leaving it powered off, so the Root Port's config accesses cannot hit an unclocked DBI; always-on log of the `dw_pcie_resume_noirq()` result, LTSSM and attempt count. Aimed at letting the Wi-Fi root port (`0004:00:00.0`) use D3cold in deep suspend (about 0.35 W instead of about 0.85 W with `d3cold_allowed=0`) without the suspend/resume hang. The hang mechanism is inferred from source, not reproduced; not tested on hardware | ours | not submitted; remove 0120 and restore pkgrel 28 to revert |
+| 0121 | soc: qcom: smp2p: cached inbound values are reset only when the restart flag changed (SMP2P v2 SSR detection). `qcom_smp2p_check_ssr()` reset them for every inbound notification, so persistent ready/handover bits looked like fresh rising edges, re-ran the q6v5 handlers and could keep the AP awake. Three lines: `if (!restart) return false;` before the reset loop. Not tested on the SL7; effect on suspend or resets unknown | Brandon Williams, carried by Omarchy as `2138-soc-qcom-smp2p-reset-inbound-state-only-on-restart.patch`; `Fixes: 42c4cf5d4828` | not upstream; remove 0121 and restore pkgrel 29 to revert |
+| 0122 | soc: qcom: new rpmsg driver `qcom_adsp_pwr_lmts` (Kconfig `QCOM_ADSP_PWR_LMTS`, built as a module): tells the ADSP when the system enters and leaves Modern Standby over its `APPS_ADSP_PWR_LMTS_GLINK_PORT` channel, from the rpmsg device's system suspend and resume callbacks, as Windows' PEP does. EXPERIMENTAL, not tested on the SL7. The Omarchy copy is the 7.2.8-era revision, which applies to 7.2.12; the current Omarchy one carries a 7.3 Kconfig hunk | Kirill (justririll), `github.com/justririll/x1e-sleep` `modules/adsp-pwr-lmts` @0f3f55b, GPL-2.0 (no Signed-off-by from the original author); carried by Omarchy as `2176-soc-qcom-add-ADSP-power-limits-Modern-Standby-notifi.patch` | not upstream; remove 0122 and 0123 and restore pkgrel 29 to revert |
+| 0123 | soc: qcom: adsp-pwr-lmts: drop an unused include and document why the standby message uses the blocking `rpmsg_send()` (glink has no intent queued on this channel, `rpmsg_trysend()` failed with `-EBUSY` on a Surface Pro 11) | Brandon Williams (Assisted-by Claude), Omarchy `2179-soc-qcom-adsp-pwr-lmts-drop-an-unused-include-and-sa.patch` | not upstream; goes with 0122 |
 
 PMIC IR LED patches (0080, 0081, 0091 to 0093, 0095, 0096): retired. The PM8550 flash LED path
 proved to have no load (open circuit); the IR emitter is lit by the sensor's GPIO 1 strobe (0094,
@@ -387,6 +391,50 @@ power1-7 are CPU_CLUSTER_0, CPU_CLUSTER_1, CPU_CLUSTER_2, GPU, PSU_USB, USBC_TOT
   driver's checks should pass either way, but this is read from the code, not seen on hardware.
 - It loads on every boot once built (the DT node triggers the module alias). To switch it off:
   `echo 'blacklist qcom_pld_power' | sudo tee /etc/modprobe.d/no-pld-power.conf`.
+
+## ADSP Modern Standby notification (7.2.12-30, patches 0121 to 0123), EXPERIMENTAL
+
+Pkgrel 30 adds the `qcom_adsp_pwr_lmts` module and an SMP2P restart fix. Status,
+stated plainly: **nothing here has been booted on the Surface Laptop 7.** On the
+Surface Pro 11, x1e-sleep reports CX/AOSS/DDR residency going from about 92% to
+99.9% in deep suspend with the notification. Here `cxsd`, `ddr` and `aosd` have
+counted 0 so far (see the baseline above), so the gain is unproven, and the effect
+on the spontaneous resets is unknown (an x1e-sleep user saw hourly PS_HOLD resets
+only while the SoC was in AOSD, which may mean this change helps or may mean it
+exposes them).
+
+The driver binds by rpmsg modalias to the ADSP `APPS_ADSP_PWR_LMTS_GLINK_PORT`
+channel and therefore **loads by itself on the first boot of pkgrel 30**. To test
+A/B without rebuilding, create this file **before the first boot of pkgrel 30** to
+keep it off:
+
+    echo 'install qcom_adsp_pwr_lmts /bin/false' | sudo tee /etc/modprobe.d/sl7-adsp-pwr-lmts-off.conf
+
+To enable it later (no reboot needed):
+
+    sudo rm /etc/modprobe.d/sl7-adsp-pwr-lmts-off.conf
+    sudo modprobe qcom_adsp_pwr_lmts
+    ls /sys/bus/rpmsg/devices | grep PWR_LMTS      # the channel device exists, bound to the driver
+    journalctl -k | grep -i 'standby'              # after a suspend: look for "failed to send standby state"
+
+A "failed to send standby state" line means the send did not reach the ADSP and
+the module is doing nothing useful. Unloading: `sudo modprobe -r qcom_adsp_pwr_lmts`
+and re-create the file.
+
+Measurement recipe, on battery, same conditions for both runs:
+
+1. Read `qcom_stats` (`cxsd`, `aosd`, `ddr` counts and durations, via debugfs or
+   `sl7-sleepstats`) before the suspend.
+2. Deep suspend for about 20 minutes (`PM: suspend entry (deep)` in the journal).
+3. Read `qcom_stats` again and diff. Residency in `cxsd`/`ddr`/`aosd` is the
+   signal; a count that stays 0 means the SoC still never reached them.
+4. Watts: the suspend interval in `sleeps.jsonl` written by `sl7-battery`
+   (omarchy-sl7-battery); compare module off against module on.
+
+Patch 0121 is independent of the module and always active. It changes
+`qcom_smp2p_check_ssr()` so cached inbound values are reset only on a real
+restart; Omarchy 2138 reports unrelated ADSP notifications otherwise looked like
+rising edges and kept the AP awake. Not measured here either.
 
 ## Runtime power, round 1 (7.2.8-13)
 

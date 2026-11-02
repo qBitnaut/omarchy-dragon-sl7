@@ -201,3 +201,10 @@
 
 # 32. PCIe qcom: retry a failed resume link training and keep the DBI clocked if it stays down (experimental, Wi-Fi root port D3cold)
 0120-SL7-local-PCI-qcom-retry-a-failed-resume-link-and-keep-DBI-clocked.patch
+
+# 33. Qualcomm SMP2P: reset cached inbound state only on a real restart (Brandon Williams, Omarchy 2138; Fixes 42c4cf5d4828)
+0121-soc-qcom-smp2p-reset-inbound-state-only-on-restart.patch
+
+# 34. ADSP power-limits Modern Standby notification, module qcom_adsp_pwr_lmts (EXPERIMENTAL, Kirill/justririll x1e-sleep; Omarchy 2176 + 2179)
+0122-soc-qcom-add-ADSP-power-limits-Modern-Standby-notification.patch
+0123-soc-qcom-adsp-pwr-lmts-drop-an-unused-include-and-say-why-the-send-blocks.patch

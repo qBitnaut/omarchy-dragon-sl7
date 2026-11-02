@@ -15,7 +15,7 @@ pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
 pkgver=7.2.12
-pkgrel=29
+pkgrel=30
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -154,6 +154,9 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0118-tools-linux-types.h-Add-128-bit-integer-types-for-arm64-UAPI-structures.patch'
         'patches/0119-arm64-dts-qcom-hamoa-Drop-cluster_cl5-idle-state-from-CPU-clusters.patch'
         'patches/0120-SL7-local-PCI-qcom-retry-a-failed-resume-link-and-keep-DBI-clocked.patch'
+        'patches/0121-soc-qcom-smp2p-reset-inbound-state-only-on-restart.patch'
+        'patches/0122-soc-qcom-add-ADSP-power-limits-Modern-Standby-notification.patch'
+        'patches/0123-soc-qcom-adsp-pwr-lmts-drop-an-unused-include-and-say-why-the-send-blocks.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
@@ -276,6 +279,9 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'SKIP'
             'SKIP'
             'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
          '968ce7359fa90078e15e7fd544ebd9fa74a28f1e7fb83bd8fd310e7e9ca7daee'
          'SKIP'
          '21a17702648aa6a937b88a93bd71ef9f547815ead28719cafcfcc247396643dc')
