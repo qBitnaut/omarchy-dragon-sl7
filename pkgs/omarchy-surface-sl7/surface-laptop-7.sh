@@ -6,18 +6,14 @@
 # install/hardware/microsoft/surface-laptop-7.sh, called from
 # install/hardware/all.sh BEFORE fix-surface-keyboard.sh.
 #
-# It pairs with a one-line guard at the top of fix-surface-keyboard.sh
-# (the open upstream fix is omacom/omarchy PR #8151):
-#
-#   omarchy-hw-qualcomm-soc && return 0
-#
-# which stops that script from writing the x86-only
-# MODULES=(... surface_kbd intel_lpss_pci 8250_dw) list on arm64.
+# Upstream (246f33a2fe, #14820) only runs fix-surface-keyboard.sh on x86
+# Surface, so no guard is needed to keep its x86-only
+# MODULES=(... surface_kbd intel_lpss_pci 8250_dw) list off arm64.
 
 mkinitcpio_dir=${OMARCHY_SL7_MKINITCPIO_DIR:-/etc/mkinitcpio.conf.d}
 limine_config_dir=${OMARCHY_SL7_LIMINE_CONFIG_DIR:-/etc/limine-entry-tool.d}
 
-if omarchy-hw-qualcomm-soc && omarchy-hw-match 'Surface Laptop, 7th Edition'; then
+if omarchy-hw-aarch64-qualcomm && omarchy-hw-match 'Surface Laptop, 7th Edition'; then
   echo "Detected Microsoft Surface Laptop 7, applying board-specific support..."
 
   # Keyboard (SAM), display and USB-C in the initramfs.
