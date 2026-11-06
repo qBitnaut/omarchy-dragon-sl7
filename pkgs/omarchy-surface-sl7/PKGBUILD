@@ -112,7 +112,7 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         '51-omarchy-surface-sl7-ir-camera.conf'
         '50-omarchy-surface-sl7-ppd.conf'
         'omarchy-sl7-preupdate-check')
-sha256sums=('c44c0eb16811b070bbb0c4fa505f62cc5ce05a7b3d89fa8bd5201ab9f2ff6f61'
+sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
             'c30667a4a8c7707c90afba346b8dad70a84ab1c0ef3f4c29a53d439de5f72f59'
