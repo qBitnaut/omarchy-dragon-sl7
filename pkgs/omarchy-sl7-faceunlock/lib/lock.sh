@@ -16,6 +16,13 @@ LOCK_PIN=e5e5402
 LOCK_PRISTINE_SHA256=1144e7a896f971001276997595f24c0d471ddbf196aee09c83f4f5809b620326
 LOCK_PRISTINE_LOCKVIEW_SHA256=d60d682b6972a179774096fba8ba3d9f3340ff8f1e9e48978ed32db556c5f69f
 
+# sha256 of Omarchy's own stock lock plugin files (omarchy.lock) as shipped in the
+# omarchy 4.5.0-3 package (pacman -Qkk clean), used to report drift of the stock lock
+# the overlay is compared against. Informational only: nothing is edited because of it.
+LOCK_STOCK_VERSION=4.5.0-3
+LOCK_STOCK_SERVICE_SHA256=cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9
+LOCK_STOCK_LOCKVIEW_SHA256=e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a
+
 # The plugin files the overlay edits, with their pristine hashes ("file|sha256").
 LOCK_FILES=(
   "Service.qml|$LOCK_PRISTINE_SHA256"
@@ -83,7 +90,23 @@ lock_patch_lines() {
 lock_status() {
   say "installed=$(lock_installed && echo yes || echo no) patched=$(lock_patched && echo yes || echo no) state=$(lock_enabled_state)"
   lock_patch_lines
+  say "stock-lock=$(lock_stock_state)"
   say "patchset=$(lock_patchset_version) applied-patchset=$(lock_recorded_patchset)"
+}
+
+# Compare Omarchy's stock lock files with the 4.5.0-3 hashes:
+# "matches omarchy X", "differs from omarchy X (stock lock changed; recheck the overlay)",
+# or "absent" when there is no stock lock plugin.
+lock_stock_state() {
+  local dir=${OMARCHY_PATH:-/usr/share/omarchy}/shell/plugins/lock svc lv
+  [[ -f $dir/Service.qml && -f $dir/LockView.qml ]] || { printf 'absent'; return; }
+  svc=$(sha256sum "$dir/Service.qml" | cut -d' ' -f1)
+  lv=$(sha256sum "$dir/LockView.qml" | cut -d' ' -f1)
+  if [[ $svc == "$LOCK_STOCK_SERVICE_SHA256" && $lv == "$LOCK_STOCK_LOCKVIEW_SHA256" ]]; then
+    printf 'matches omarchy %s' "$LOCK_STOCK_VERSION"
+  else
+    printf 'differs from omarchy %s (stock lock changed; recheck the overlay)' "$LOCK_STOCK_VERSION"
+  fi
 }
 
 # Changes whenever any patch file changes, so an upgrade that edits a patch is
@@ -314,6 +337,44 @@ lock_session_locked() {
   esac
 }
 
+# Does the session manager say the session is locked? 0 = locked or cannot tell,
+# 1 = certainly not. Used only when the lock plugin's own IPC cannot answer.
+lock_hint_locked() {
+  local hint
+  command -v loginctl >/dev/null 2>&1 || return 0
+  hint=$(loginctl show-session "${XDG_SESSION_ID:-self}" -p LockedHint --value 2>/dev/null) || return 0
+  [[ $hint == no ]] && return 1
+  return 0
+}
+
+# Health check of the enabled lock plugin: the shell answers (shell ping) but the plugin's
+# IPC (lock status) does not, twice in a row 10 s apart (SL7_LOCK_HEALTH_WAIT), so the
+# plugin failed to load or crashed and no lock can be requested. Then disable it (the stock
+# lock screen returns) and notify. Never acts while locked, when the lock state cannot be
+# read, when the shell is not up, or when the plugin is not enabled. Returns 1 only when it
+# disabled the plugin.
+lock_health_check() {
+  local wait=${SL7_LOCK_HEALTH_WAIT:-10}
+  command -v omarchy-shell >/dev/null 2>&1 || return 0
+  [[ $(lock_enabled_state) == enabled ]] || return 0
+  timeout 3 omarchy-shell shell ping >/dev/null 2>&1 || return 0
+  ! timeout 3 omarchy-shell lock status >/dev/null 2>&1 || return 0
+  sleep "$wait"
+  timeout 3 omarchy-shell shell ping >/dev/null 2>&1 || return 0
+  ! timeout 3 omarchy-shell lock status >/dev/null 2>&1 || return 0
+  if lock_hint_locked; then
+    note "lock plugin IPC is not answering, but the session is (or may be) locked; leaving it alone"
+    return 0
+  fi
+  warn "$LOCK_ID IPC is not answering while the shell is up; disabling it so the stock lock screen returns"
+  lock_disable_plugin
+  omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical -a 'Face Unlock' 'Face Unlock lock screen disabled' 'Its lock plugin did not answer; the stock Omarchy lock screen is back. Run: omarchy-sl7-faceunlock lock status' >/dev/null 2>&1 || true
+  fi
+  return 1
+}
+
 # Login-time hook (omarchy-sl7-faceunlock-lock.service): when the shipped patch
 # set differs from the one last applied, re-apply it. Never edits while the
 # screen is locked and never touches Omarchy's own files.
@@ -322,6 +383,7 @@ lock_auto_reapply() {
   export OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy}
   PATH=$PATH:$OMARCHY_PATH/bin
   lock_installed || return 0
+  lock_health_check || return 0
   cur=$(lock_patchset_version)
   if [[ $(lock_recorded_patchset) == "$cur" ]] && lock_patched; then
     return 0

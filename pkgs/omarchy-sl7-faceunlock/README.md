@@ -245,6 +245,13 @@ and the `Commons` alias exist on both. These two patches are the only ones
 that depend on the 4.0.6 shell (the stranded-lock helper and the `Commons`
 alias).
 
+The login hook (`lock auto`) also runs a health check: when the Omarchy shell answers
+(`omarchy-shell shell ping`) but the lock plugin's IPC (`lock status`) stays dead for
+10 seconds and the session is not locked (`loginctl` `LockedHint`), it disables the plugin so the stock
+lock screen returns and sends a notification. It never acts while the session is locked or
+its lock state cannot be read. `lock status` also reports `stock-lock=`: whether Omarchy's own
+`omarchy.lock` files still match the 4.5.0-3 hashes (informational; the overlay is not ported to 4.5).
+
 After the package is installed or upgraded, on each Surface Laptop 7, while the
 screen is unlocked:
 

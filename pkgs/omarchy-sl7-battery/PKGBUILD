@@ -14,12 +14,12 @@
 
 pkgname=omarchy-sl7-battery
 pkgver=0.1.0
-pkgrel=11
+pkgrel=12
 pkgdesc='Surface Laptop 7 battery app for Omarchy: charge, time left with a projection, history, sleep drain, power profiles and an auto power saver (replaces the Power bar widget)'
 arch=('aarch64')
 url='https://github.com/qBitnaut/omarchy-dragon-sl7'
 license=('MIT')
-depends=('gcc-libs' 'glibc' 'glib2' 'systemd' 'bash' 'jq' 'diffutils' 'coreutils'
+depends=('gcc-libs' 'glibc' 'glib2' 'python-gobject' 'systemd' 'bash' 'jq' 'diffutils' 'coreutils'
          'power-profiles-daemon' 'omarchy-surface-sl7>=0.1.0-55')
 makedepends=('cargo')
 optdepends=('omarchy: the shell, bar and plugin manager this app plugs into'
