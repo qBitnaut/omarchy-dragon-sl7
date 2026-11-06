@@ -648,15 +648,6 @@ is 1928x1092, so 720p is a downscale that saves power and CPU/GPU load. `sl7-cam
 `install/hardware/microsoft/surface-laptop-7.sh` doing the same via drop-ins, for
 upstreaming. The package does not run it.
 
-### 10b. Battery for Omarchy (TEMPORARY, omacom/omarchy#13029)
-
-Omarchy's `omarchy-battery-status`/`-present` match only `BAT*`; the SL7 battery is
-`qcom-battmgr-bat`. The bar reads UPower (works); the panel detail comes from
-`omarchy-battery-status`. Omarchy puts its own bin dir first in PATH, so a PATH override is
-impossible; `82-omarchy-sl7-battery.hook` runs `omarchy-sl7-battery-patch` after each
-`omarchy` install/upgrade (idempotent, no-op once upstream fixes the line). Also makes the
-negative `power_now` absolute. Remove both files and their PKGBUILD lines when #13029 lands.
-
 ### 7b. Hardware video (Iris)
 
 linux-sl7 7.2.8-13 enables the Iris codec (patch 0086) with the Microsoft signed

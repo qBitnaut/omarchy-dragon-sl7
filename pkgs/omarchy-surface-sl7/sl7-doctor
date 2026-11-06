@@ -200,7 +200,7 @@ if [[ -d ${OMARCHY_SL7_POWER_SUPPLY:-/sys/class/power_supply}/qcom-battmgr-bat ]
       if omarchy-battery-status --shell 2>/dev/null | grep -q '^percentage'; then
         pass "omarchy-battery-status reports the battery"
       else
-        fail "omarchy-battery-status finds no battery (rerun: sudo /usr/lib/omarchy-surface-sl7/omarchy-sl7-battery-patch)"
+        fail "omarchy-battery-status finds no battery (reinstall omarchy or run omarchy update; Omarchy 4.5 or newer handles qcom-battmgr)"
       fi
     fi
   else
