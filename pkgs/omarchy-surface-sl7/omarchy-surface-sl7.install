@@ -75,17 +75,24 @@ _sl7_ppd() {
   return 0
 }
 
+# The keyboard neutralize unit and hook are gone (upstream only runs
+# fix-surface-keyboard.sh on x86 Surface). The package no longer owns the unit, so
+# pacman drops its /usr/lib wants link; remove any /etc link an admin made.
+# The unit was a oneshot without RemainAfterExit, so nothing needs stopping.
+_sl7_legacy_neutralize() {
+  rm -f /etc/systemd/system/multi-user.target.wants/omarchy-surface-sl7-neutralize.service
+  return 0
+}
+
 _sl7_setup() {
   _sl7_repo
-  "$_sl7_dir/neutralize-surface-keyboard" || true
+  _sl7_legacy_neutralize
   "$_sl7_dir/ath12k-board-update" || true
   "$_sl7_dir/update-uki-dtbs" || true
   "$_sl7_dir/set-boot-order" || true
   # r6 left a psr-entry state file, hook and limine.conf block: drop them and
   # regenerate the enabled test entries (idempotent).
   /usr/bin/omarchy-sl7-test-entry cleanup --legacy || true
-  # The battery pacman hook only fires on omarchy (re)installs: apply now.
-  "$_sl7_dir/omarchy-sl7-battery-patch" || true
 
   if [[ -f /etc/default/limine ]] && grep -Eq '^[[:space:]]*ENABLE_UKI="?no' /etc/default/limine; then
     echo "omarchy-surface-sl7: WARNING: /etc/default/limine sets ENABLE_UKI=no."

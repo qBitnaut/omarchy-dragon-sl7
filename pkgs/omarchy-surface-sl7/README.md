@@ -19,7 +19,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | # | What | Files |
 |---|---|---|
 | 1 | initramfs modules and firmware hook | `/etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf`, `/usr/lib/initcpio/install/sl7-firmware` |
-| 2 | neutralise upstream `fix-surface-keyboard.sh` | `/usr/share/libalpm/hooks/70-omarchy-surface-sl7-keyboard.hook`, `/usr/lib/omarchy-surface-sl7/neutralize-surface-keyboard` |
+| 2 | filter x86-only modules out of the initramfs list | `zz-omarchy-surface-sl7.conf` (item 1) |
 | 3 | kernel command line, `ENABLE_UKI`, UKI device trees | `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, `85-omarchy-surface-sl7-dtbs.hook`, `/usr/lib/omarchy-surface-sl7/update-uki-dtbs`, `/usr/lib/omarchy-surface-sl7/set-boot-order` |
 | 4 | touch resume | `/usr/lib/systemd/system-sleep/omarchy-surface-sl7`, `/usr/lib/omarchy-surface-sl7/restart-iptsd` |
 | 5 | factory Wi-Fi/BT MAC | `/usr/bin/sl7-mac`, `sl7-wifi-mac.service`, `sl7-bt-mac.service`, `99-sl7-bt-mac.rules` |
@@ -54,32 +54,14 @@ as `.zst`/`.xz`. The hook looks for `qcom/gen70500_sqe.fw`, `qcom/gen70500_gmu.b
 `/usr/lib/firmware`, as plain, `.zst` or `.xz`, adds whichever exists, and only warns
 for the rest. A missing zap shader warns loudly: the panel stays black.
 
-### 2. `fix-surface-keyboard.sh` (upstream PR #8151)
+### 2. x86 Surface modules filter
 
-Omarchy's script runs when `omarchy-hw-surface` matches (it does on the SL7, vendor
-"Microsoft Corporation"). If `lsmod` shows a `pinctrl_*` module (ALARM-style kernels
-build the LPASS pinctrl as modules), it writes
-`/etc/mkinitcpio.conf.d/surface_device_modules.conf` with
-`MODULES=(... surface_kbd intel_lpss_pci 8250_dw)`. That assignment resets `MODULES` and
-names modules that do not exist on arm64, so mkinitcpio fails. PR #8151 is the open
-upstream change; until it merges (and a Qualcomm guard is added) we defend in layers:
-
-1. **The drop-in filters.** `zz-omarchy-surface-sl7.conf` sorts after
-   `surface_device_modules.conf` (`s` before `z`), appends our modules, then removes
-   `surface_kbd`, `intel_lpss_pci`, `8250_dw`, every `pinctrl_*` and duplicates from `MODULES`. This is the
-   protection that works even if Omarchy regenerates the file later.
-2. **The pacman hook moves the file aside.** `70-omarchy-surface-sl7-keyboard.hook`
-   (PostTransaction, Install/Upgrade) fires when the `omarchy` package replaces
-   `usr/share/omarchy/install/hardware/fix-surface-keyboard.sh`, or when our drop-in is
-   installed, and renames the generated file to
-   `surface_device_modules.conf.disabled-by-omarchy-surface-sl7` when
-   `omarchy-hw-qualcomm-soc` is true (or the device tree is not visible, as in a chroot).
-   A pacman hook cannot trigger on the generated file itself: pacman only matches
-   files that packages ship. The `.install` scriptlet also runs it.
-3. The script itself is never modified.
-
-The upstream fix is a guard `omarchy-hw-qualcomm-soc && return 0` at the top of the
-script; `surface-laptop-7.sh` shows the leaf that would replace this package's work.
+Omarchy's `fix-surface-keyboard.sh` only runs on x86 Surface machines (upstream
+`246f33a2fe`, #14820), so it does not fire on the SL7 and the package no longer ships a hook
+or service for it. `zz-omarchy-surface-sl7.conf` still sorts after
+`surface_device_modules.conf` and removes `surface_kbd`, `intel_lpss_pci`, `8250_dw`, every
+`pinctrl_*` and duplicates from `MODULES`, in case a `surface_device_modules.conf` ever
+appears. `sl7-doctor` fails if that file is active.
 
 ### 3. Command line, UKI, device trees
 
@@ -647,15 +629,6 @@ is 1928x1092, so 720p is a downscale that saves power and CPU/GPU load. `sl7-cam
 `surface-laptop-7.sh` (installed under `/usr/share/doc`) is an Omarchy-style
 `install/hardware/microsoft/surface-laptop-7.sh` doing the same via drop-ins, for
 upstreaming. The package does not run it.
-
-### 10b. Battery for Omarchy (TEMPORARY, omacom/omarchy#13029)
-
-Omarchy's `omarchy-battery-status`/`-present` match only `BAT*`; the SL7 battery is
-`qcom-battmgr-bat`. The bar reads UPower (works); the panel detail comes from
-`omarchy-battery-status`. Omarchy puts its own bin dir first in PATH, so a PATH override is
-impossible; `82-omarchy-sl7-battery.hook` runs `omarchy-sl7-battery-patch` after each
-`omarchy` install/upgrade (idempotent, no-op once upstream fixes the line). Also makes the
-negative `power_now` absolute. Remove both files and their PKGBUILD lines when #13029 lands.
 
 ### 7b. Hardware video (Iris)
 

@@ -33,7 +33,7 @@ jobs:
           shellcheck -x -s bash -S warning \
             omarchy-surface-sl7-firmware omarchy-surface-sl7-power \
             omarchy-surface-sl7-system-sleep update-uki-dtbs \
-            neutralize-surface-keyboard restart-iptsd power-event \
+            restart-iptsd power-event \
             sl7-firmware sl7-doctor set-boot-order surface-laptop-7.sh omarchy-surface-sl7.install \
             omarchy-sl7-repo-ensure 10-omarchy-sl7-repo sl7-ir-probe sl7-ir-emitter-test \
             sl7-usb-rpm sl7-park omarchy-sl7-powermode omarchy-sl7-test-entry \
@@ -99,7 +99,6 @@ jobs:
             etc/mkinitcpio.conf.d/zz-omarchy-surface-sl7.conf \
             etc/limine-entry-tool.d/omarchy-surface-sl7.conf \
             usr/lib/initcpio/install/sl7-firmware \
-            usr/share/libalpm/hooks/70-omarchy-surface-sl7-keyboard.hook \
             usr/share/libalpm/hooks/85-omarchy-surface-sl7-dtbs.hook \
             usr/lib/omarchy-surface-sl7/update-uki-dtbs \
             usr/lib/systemd/system-sleep/omarchy-surface-sl7 \
