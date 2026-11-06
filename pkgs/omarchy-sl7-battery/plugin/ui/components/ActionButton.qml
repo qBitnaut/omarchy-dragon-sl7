@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 import "../../lib/Theme.js" as Theme
@@ -37,11 +38,11 @@ Rectangle {
     property bool busy: false
     property bool available: true
     property string tooltipText: ""
-    property color foreground: Color.foreground
+    property color foreground: Commons.Color.foreground
     property color muted: Qt.darker(foreground, 1.4)
-    property color accent: Color.accent
-    property color urgent: Color.urgent
-    property color background: Color.popups.background
+    property color accent: Commons.Color.accent
+    property color urgent: Commons.Color.urgent
+    property color background: Commons.Color.popups.background
     property string fontFamily: Style.font.family
 
     signal triggered()

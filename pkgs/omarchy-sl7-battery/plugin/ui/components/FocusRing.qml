@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // FocusRing: the one keyboard-focus indicator every control in the popup draws -- a
 // thin accent outline just outside the control's edge. It sits outside so the ring
@@ -15,7 +16,7 @@ Rectangle {
     id: root
 
     property bool active: parent ? parent.activeFocus : false
-    property color accent: Color.accent
+    property color accent: Commons.Color.accent
     property real inset: Style.space(3)
     property real cornerRadius: Style.cornerRadius
 

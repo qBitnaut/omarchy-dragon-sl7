@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // DetailRow: one label and value on a line, the label muted on the left and the value on
 // the right. An empty value shows an em dash.
@@ -12,8 +13,8 @@ Item {
 
     property string label: ""
     property string value: ""
-    property color foreground: Color.foreground
-    property color muted: Color.muted
+    property color foreground: Commons.Color.foreground
+    property color muted: Commons.Color.muted
     property string fontFamily: Style.font.family
 
     implicitHeight: Math.max(labelText.implicitHeight, valueText.implicitHeight) + Style.space(2)

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // SettingToggleRow: a settings row with a label (and optional description) on the
@@ -26,9 +27,9 @@ Item {
     property string description: ""
     property bool checked: false
     property string trailingText: ""
-    property color foreground: Color.foreground
-    property color muted: Color.muted
-    property color accent: Color.accent
+    property color foreground: Commons.Color.foreground
+    property color muted: Commons.Color.muted
+    property color accent: Commons.Color.accent
     property string fontFamily: Style.font.family
 
     signal toggled()

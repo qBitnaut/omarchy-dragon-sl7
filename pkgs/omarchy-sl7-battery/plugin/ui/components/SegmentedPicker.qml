@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 import "../../lib/Format.js" as Format
@@ -30,9 +31,9 @@ Rectangle {
     property var options: []
     property string value: ""
     property bool stretch: true
-    property color foreground: Color.foreground
+    property color foreground: Commons.Color.foreground
     property color muted: Qt.darker(foreground, 1.4)
-    property color accent: Color.accent
+    property color accent: Commons.Color.accent
     property color trackColor: Util.alpha(foreground, 0.05)
     property string fontFamily: Style.font.family
     property real fontSize: Style.font.bodySmall

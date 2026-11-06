@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // StatTile: a quiet filled card holding one headline number -- label, value with a
 // unit, an optional detail line and an optional progress meter along the bottom.
@@ -25,13 +26,13 @@ Rectangle {
     property string detail: ""
     property real progress: -1
     property real marker: -1
-    property color accent: Color.accent
+    property color accent: Commons.Color.accent
     property bool tinted: false
     property bool compact: false
-    property color foreground: Color.foreground
-    property color muted: Color.muted
+    property color foreground: Commons.Color.foreground
+    property color muted: Commons.Color.muted
     property color fill: Util.alpha(foreground, 0.05)
-    property color background: Color.popups.background
+    property color background: Commons.Color.popups.background
     property string fontFamily: Style.font.family
 
     radius: Style.cornerRadius
