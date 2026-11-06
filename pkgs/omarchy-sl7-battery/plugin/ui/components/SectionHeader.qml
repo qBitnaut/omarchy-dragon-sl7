@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // SectionHeader: the small uppercase label that opens a popup section, with an
 // optional trailing note on the same baseline (a count, a range, "step 45 s").
@@ -14,7 +15,7 @@ Item {
 
     property string text: ""
     property string trailing: ""
-    property color foreground: Color.muted
+    property color foreground: Commons.Color.muted
     property color trailingColor: foreground
     property string fontFamily: Style.font.family
 

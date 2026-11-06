@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 import "lib/Format.js" as Format
@@ -39,16 +40,16 @@ Panel {
     property var themeColors: ({})
 
     function themeBase() {
-        var popups = Color.popups || ({})
+        var popups = Commons.Color.popups || ({})
         return {
-            foreground: Color.foreground,
-            background: Color.background,
-            accent: Color.accent,
-            urgent: Color.urgent,
-            muted: Color.muted,
-            popupsBackground: popups.background || Color.background,
-            popupsText: popups.text || Color.foreground,
-            popupsBorder: popups.border || Color.muted,
+            foreground: Commons.Color.foreground,
+            background: Commons.Color.background,
+            accent: Commons.Color.accent,
+            urgent: Commons.Color.urgent,
+            muted: Commons.Color.muted,
+            popupsBackground: popups.background || Commons.Color.background,
+            popupsText: popups.text || Commons.Color.foreground,
+            popupsBorder: popups.border || Commons.Color.muted,
         }
     }
 
@@ -58,7 +59,7 @@ Panel {
 
     FileView {
         id: colorsFile
-        path: Color.currentThemePath + "/colors.toml"
+        path: Commons.Color.currentThemePath + "/colors.toml"
         watchChanges: true
         printErrors: false
         onLoaded: root.themeColors = Theme.parseColorsToml(text())
@@ -67,7 +68,7 @@ Panel {
     }
 
     Connections {
-        target: Color
+        target: Commons.Color
         function onAccentChanged() { colorsFile.reload() }
         function onForegroundChanged() { colorsFile.reload() }
         function onBackgroundChanged() { colorsFile.reload() }

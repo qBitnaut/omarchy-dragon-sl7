@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 import "../../lib/Spark.js" as Spark
 
@@ -47,19 +48,19 @@ Canvas {
     property int rows: 6
     property real dotSize: Style.space(3)
     property real dotGap: Style.space(2)
-    property color color: Color.accent
+    property color color: Commons.Color.accent
     property real bodyOpacity: 0.45
-    property color trackColor: Util.alpha(Color.foreground, 0.08)
+    property color trackColor: Util.alpha(Commons.Color.foreground, 0.08)
     property var marks: []
-    property color markColor: Color.urgent
+    property color markColor: Commons.Color.urgent
     property int futureFrom: -1
     property var gapMarks: []
     property var bridgeMarks: []
-    property color bridgeColor: Util.alpha(Color.foreground, 0.45)
-    property color gapColor: Util.alpha(Color.foreground, 0.2)
-    property color dividerColor: Util.alpha(Color.foreground, 0.35)
+    property color bridgeColor: Util.alpha(Commons.Color.foreground, 0.45)
+    property color gapColor: Util.alpha(Commons.Color.foreground, 0.2)
+    property color dividerColor: Util.alpha(Commons.Color.foreground, 0.35)
     property real dividerWidth: 1
-    property color futureColor: Util.alpha(Color.foreground, 0.45)
+    property color futureColor: Util.alpha(Commons.Color.foreground, 0.45)
 
     readonly property int columns: Spark.columnsFor(width, dotSize, dotGap)
     readonly property real rowPitch: dotSize + dotGap

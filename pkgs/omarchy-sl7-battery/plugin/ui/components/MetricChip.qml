@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // MetricChip: a small selectable card naming one chart series -- its key colour and
 // label, with a one-line summary of that series over the current window underneath
@@ -21,11 +22,11 @@ Rectangle {
 
     property string label: ""
     property string value: ""
-    property color keyColor: Color.accent
+    property color keyColor: Commons.Color.accent
     property bool selected: false
-    property color foreground: Color.foreground
-    property color muted: Color.muted
-    property color accent: Color.accent
+    property color foreground: Commons.Color.foreground
+    property color muted: Commons.Color.muted
+    property color accent: Commons.Color.accent
     property color fill: Util.alpha(foreground, 0.05)
     property string fontFamily: Style.font.family
 

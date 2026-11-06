@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // SettingSliderRow: a labelled numeric setting -- label and value readout on one line,
@@ -41,9 +42,9 @@ Item {
     property bool checkable: false
     property bool checked: true
     property QtObject bar: null
-    property color foreground: Color.foreground
-    property color muted: Color.muted
-    property color accent: Color.accent
+    property color foreground: Commons.Color.foreground
+    property color muted: Commons.Color.muted
+    property color accent: Commons.Color.accent
     property string fontFamily: Style.font.family
 
     signal moved(real value)

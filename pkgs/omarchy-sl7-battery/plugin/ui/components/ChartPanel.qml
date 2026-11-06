@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // ChartPanel: a DotChart with omarchy-words-style axis notes -- the axis maximum and
 // minimum in a narrow column on the left, and the time span under the chart
@@ -24,10 +25,10 @@ Item {
     property int rows: 12
     property var marks: []
     property real bodyOpacity: 0.45
-    property color color: Color.accent
-    property color markColor: Color.urgent
-    property color foreground: Color.foreground
-    property color muted: Color.muted
+    property color color: Commons.Color.accent
+    property color markColor: Commons.Color.urgent
+    property color foreground: Commons.Color.foreground
+    property color muted: Commons.Color.muted
     property color trackColor: Util.alpha(foreground, 0.08)
     property string maxText: ""
     property string minText: ""
