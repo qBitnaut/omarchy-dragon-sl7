@@ -337,40 +337,89 @@ lock_session_locked() {
   esac
 }
 
-# Does the session manager say the session is locked? 0 = locked or cannot tell,
-# 1 = certainly not. Used only when the lock plugin's own IPC cannot answer.
+# Is the session locked, as far as the compositor and the session manager can tell?
+# 0 = locked or cannot tell (leave it alone), 1 = certainly not locked.
+# omarchy-hyprland-session-locked exits 0 locked, 1 unlocked, 2 undetermined; 0 and 2 both
+# mean leave alone. logind LockedHint is only a secondary signal (the shell may not set it).
 lock_hint_locked() {
-  local hint
-  command -v loginctl >/dev/null 2>&1 || return 0
-  hint=$(loginctl show-session "${XDG_SESSION_ID:-self}" -p LockedHint --value 2>/dev/null) || return 0
+  local rc hint
+  if command -v omarchy-hyprland-session-locked >/dev/null 2>&1; then
+    omarchy-hyprland-session-locked >/dev/null 2>&1
+    rc=$?
+    [[ $rc == 1 ]] || return 0
+  fi
+  command -v loginctl >/dev/null 2>&1 || return 1
+  hint=$(loginctl show-session "${XDG_SESSION_ID:-auto}" -p LockedHint --value 2>/dev/null) || return 0
   [[ $hint == no ]] && return 1
+  [[ $hint == yes ]] && return 0
+  # no readable hint: the compositor said unlocked, trust it
+  command -v omarchy-hyprland-session-locked >/dev/null 2>&1 && return 1
   return 0
 }
 
-# Health check of the enabled lock plugin: the shell answers (shell ping) but the plugin's
-# IPC (lock status) does not, twice in a row 10 s apart (SL7_LOCK_HEALTH_WAIT), so the
-# plugin failed to load or crashed and no lock can be requested. Then disable it (the stock
-# lock screen returns) and notify. Never acts while locked, when the lock state cannot be
-# read, when the shell is not up, or when the plugin is not enabled. Returns 1 only when it
-# disabled the plugin.
+# One probe of the lock plugin IPC. 0 = the plugin is certainly gone: the shell answered
+# "Target not found." or "Function not found.". Anything else (answered, timed out, shell
+# not ready, not running) is inconclusive and returns 1.
+lock_ipc_dead() {
+  local err
+  err=$(OMARCHY_SHELL_IPC_TIMEOUT=5s timeout 7 omarchy-shell lock status 2>&1 >/dev/null) && return 1
+  grep -qE '^(Target not found|Function not found)\.$' <<<"$err"
+}
+
+# Wait until the shell answers a ping: every SL7_LOCK_SHELL_POLL s (3) up to
+# SL7_LOCK_SHELL_MAX s (90). 0 = it answers.
+lock_wait_shell() {
+  local poll=${SL7_LOCK_SHELL_POLL:-3} max=${SL7_LOCK_SHELL_MAX:-90} t=0
+  until timeout 3 omarchy-shell shell ping >/dev/null 2>&1; do
+    (( t >= max )) && return 1
+    sleep "$poll"
+    t=$((t + poll))
+  done
+}
+
+# Health check of the enabled lock plugin. The login hook can run before the shell is up, so
+# it first waits for the shell (ping) and for the plugin scan to finish (lock_enabled_state is
+# not "unknown"). Then the plugin's IPC (lock status) must be dead (the shell says Target or
+# Function not found) on three probes, SL7_LOCK_HEALTH_WAIT (10) s apart; any other outcome
+# is inconclusive and leaves everything alone. Then disable it (the stock lock screen
+# returns) and notify. Never acts while locked or possibly locked. Every early return logs
+# why. Returns 1 only when it disabled the plugin.
 lock_health_check() {
-  local wait=${SL7_LOCK_HEALTH_WAIT:-10}
-  command -v omarchy-shell >/dev/null 2>&1 || return 0
-  [[ $(lock_enabled_state) == enabled ]] || return 0
-  timeout 3 omarchy-shell shell ping >/dev/null 2>&1 || return 0
-  ! timeout 3 omarchy-shell lock status >/dev/null 2>&1 || return 0
-  sleep "$wait"
-  timeout 3 omarchy-shell shell ping >/dev/null 2>&1 || return 0
-  ! timeout 3 omarchy-shell lock status >/dev/null 2>&1 || return 0
+  local wait=${SL7_LOCK_HEALTH_WAIT:-10} poll=${SL7_LOCK_SHELL_POLL:-3} max=${SL7_LOCK_SHELL_MAX:-90}
+  local state i t=0 body
+  command -v omarchy-shell >/dev/null 2>&1 || { note "health check: omarchy-shell not found; skipping"; return 0; }
+  lock_wait_shell || { note "health check: the shell did not answer within ${max}s; skipping"; return 0; }
+  state=$(lock_enabled_state)
+  while [[ $state == unknown ]]; do
+    if (( t >= max )); then
+      note "health check: plugin list not readable within ${max}s; skipping"
+      return 0
+    fi
+    sleep "$poll"
+    t=$((t + poll))
+    state=$(lock_enabled_state)
+  done
+  [[ $state == enabled ]] || { note "health check: $LOCK_ID is $state; nothing to check"; return 0; }
+  for i in 1 2 3; do
+    lock_ipc_dead || { note "health check: lock IPC is not confirmed dead (probe $i); leaving it alone"; return 0; }
+    (( i < 3 )) && sleep "$wait"
+  done
   if lock_hint_locked; then
-    note "lock plugin IPC is not answering, but the session is (or may be) locked; leaving it alone"
+    note "health check: lock plugin IPC is dead, but the session is (or may be) locked; leaving it alone"
     return 0
   fi
-  warn "$LOCK_ID IPC is not answering while the shell is up; disabling it so the stock lock screen returns"
+  warn "$LOCK_ID IPC is gone while the shell is up; disabling it so the stock lock screen returns"
   lock_disable_plugin
   omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
+  if [[ $(lock_enabled_state) == disabled ]]; then
+    body='Its lock plugin did not answer; the stock Omarchy lock screen is back. Run: omarchy-sl7-faceunlock lock status'
+    note "health check: $LOCK_ID disabled"
+  else
+    body='Its lock plugin did not answer and could not be disabled. Run: omarchy-sl7-faceunlock lock status / omarchy plugin disable nate.howdy-lock'
+    warn "health check: could not disable $LOCK_ID"
+  fi
   if command -v notify-send >/dev/null 2>&1; then
-    notify-send -u critical -a 'Face Unlock' 'Face Unlock lock screen disabled' 'Its lock plugin did not answer; the stock Omarchy lock screen is back. Run: omarchy-sl7-faceunlock lock status' >/dev/null 2>&1 || true
+    notify-send -u critical -a 'Face Unlock' 'Face Unlock lock screen problem' "$body" >/dev/null 2>&1 || true
   fi
   return 1
 }
