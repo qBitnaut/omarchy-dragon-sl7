@@ -217,6 +217,9 @@ if [[ -x $powermode ]]; then
   pm_out=$("$powermode" status 2>&1)
   pm_rc=$?
   while IFS= read -r line; do printf 'INFO  powermode: %s\n' "$line"; done <<<"$pm_out"
+  if grep -q '^cpu cap owner: power-profiles-daemon' <<<"$pm_out"; then
+    warn "CPU caps are owned by power-profiles-daemon (CpuDriver cpufreq), not omarchy-sl7-powermode: sudo systemctl daemon-reload && sudo systemctl restart power-profiles-daemon applies the omarchy-surface-sl7 drop-in (--block-driver=cpufreq)"
+  fi
   if ((pm_rc == 0)); then
     pass "power mode matches the power source"
   else

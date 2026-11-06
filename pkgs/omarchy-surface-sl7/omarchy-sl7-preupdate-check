@@ -1,0 +1,131 @@
+#!/bin/bash
+# Read-only check to run before an Omarchy update (4.5 and later) on the Surface Laptop 7.
+#
+#   omarchy-sl7-preupdate-check          report, exit 1 when something needs attention
+#   omarchy-sl7-preupdate-check --fix    also run: pacman -D --asexplicit <packages>
+#                                        for the packages below that are installed only
+#                                        as dependencies (the only thing --fix changes)
+#
+# Checks:
+#   1. systemd-ukify and python-gobject are installed explicitly. Omarchy releases stop
+#      depending on packages they used to pull in, and an update that sweeps orphans
+#      then removes whatever was left marked as a dependency.
+#   2. power-profiles-daemon cannot fight omarchy-sl7-powermode over the CPU caps: the
+#      omarchy-surface-sl7 drop-in is in effect (--block-driver=cpufreq) and the running
+#      daemon does not report CpuDriver cpufreq.
+#      A packaged ExecStart= line with arguments beyond the binary is flagged too.
+#   3. The Face Unlock lock screen overlay (omarchy-sl7-faceunlock) is current, if used.
+set -u
+
+keep_pkgs=(systemd-ukify python-gobject)
+pacman_bin=${OMARCHY_SL7_PACMAN:-pacman}
+systemctl_bin=${OMARCHY_SL7_SYSTEMCTL:-systemctl}
+powermode=${OMARCHY_SL7_POWERMODE:-/usr/bin/omarchy-sl7-powermode}
+faceunlock=${OMARCHY_SL7_FACEUNLOCK:-/usr/bin/omarchy-sl7-faceunlock}
+
+fix=0
+case ${1:-} in
+  --fix) fix=1 ;;
+  '') ;;
+  -h | --help)
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    echo "usage: ${0##*/} [--fix]" >&2
+    exit 2
+    ;;
+esac
+
+problems=0
+pass() { printf 'PASS  %s\n' "$1"; }
+warn() { printf 'WARN  %s\n' "$1"; problems=$((problems + 1)); }
+info() { printf 'INFO  %s\n' "$1"; }
+
+# 1. explicit install state
+to_fix=()
+for pkg in "${keep_pkgs[@]}"; do
+  if ! "$pacman_bin" -Qq "$pkg" >/dev/null 2>&1; then
+    warn "$pkg is not installed (sudo pacman -S --needed $pkg)"
+  elif "$pacman_bin" -Qqe "$pkg" >/dev/null 2>&1; then
+    pass "$pkg is installed explicitly"
+  else
+    warn "$pkg is installed only as a dependency; an orphan sweep can remove it"
+    to_fix+=("$pkg")
+  fi
+done
+if ((${#to_fix[@]})); then
+  if ((fix)); then
+    if ((EUID == 0)) || [[ -n ${OMARCHY_SL7_ALLOW_NONROOT:-} ]]; then
+      if "$pacman_bin" -D --asexplicit "${to_fix[@]}"; then
+        info "marked explicit: ${to_fix[*]}"
+        problems=$((problems - ${#to_fix[@]}))
+      fi
+    else
+      info "--fix needs root: sudo ${0##*/} --fix"
+    fi
+  else
+    info "fix: sudo pacman -D --asexplicit ${to_fix[*]}   (or: sudo ${0##*/} --fix)"
+  fi
+fi
+
+# The shell and lock checks need the user's session; as root they would look at the wrong one.
+if ((EUID == 0)) && [[ -z ${OMARCHY_SL7_ALLOW_NONROOT:-} ]]; then
+  info "re-run without sudo for the shell and lock checks"
+  if ((problems)); then
+    echo "${0##*/}: $problems item(s) need attention"
+    exit 1
+  fi
+  echo "${0##*/}: package checks passed"
+  exit 0
+fi
+
+# 2. power-profiles-daemon and the CPU caps
+if "$pacman_bin" -Qq omarchy-power-profiles-daemon >/dev/null 2>&1; then
+  unit=$("$systemctl_bin" cat power-profiles-daemon.service 2>/dev/null)
+  if grep -q '^ExecStart=.*--block-driver=cpufreq' <<<"$unit"; then
+    pass "power-profiles-daemon unit blocks the cpufreq driver (omarchy-surface-sl7 drop-in)"
+  else
+    warn "power-profiles-daemon unit does not block the cpufreq driver; it caps the CPU against omarchy-sl7-powermode (reinstall omarchy-surface-sl7, then sudo systemctl daemon-reload)"
+  fi
+  # The packaged unit (not a drop-in) should start the daemon without arguments of its own.
+  pkg_exec=$(grep -h '^ExecStart=' /usr/lib/systemd/system/power-profiles-daemon.service 2>/dev/null | head -n1)
+  pkg_exec=${pkg_exec#ExecStart=}
+  pkg_exec=${pkg_exec#[@+!-]}
+  read -r -a pkg_words <<<"$pkg_exec"
+  if ((${#pkg_words[@]} > 1)); then
+    warn "the packaged power-profiles-daemon ExecStart= has arguments (${pkg_exec#* }); check they do not select the cpufreq driver or fight omarchy-sl7-powermode"
+  fi
+  if [[ -x $powermode ]]; then
+    drv=$("$powermode" status 2>/dev/null | sed -n 's/^cpu cap owner: \(.*\) (.*/\1/p' | head -n1)
+    case $drv in
+      omarchy-sl7-powermode) pass "omarchy-sl7-powermode owns the CPU caps" ;;
+      power-profiles-daemon) warn "the running power-profiles-daemon owns the CPU caps (CpuDriver cpufreq): sudo systemctl restart power-profiles-daemon" ;;
+      *) info "CPU cap owner unknown (omarchy-sl7-powermode status did not say)" ;;
+    esac
+  fi
+else
+  info "omarchy-power-profiles-daemon not installed; nothing to collide with"
+fi
+
+# 3. lock screen overlay
+if [[ -x $faceunlock ]]; then
+  lock_out=$("$faceunlock" lock status 2>/dev/null)
+  if grep -q 'installed=yes' <<<"$lock_out"; then
+    if grep -q 'patched=yes' <<<"$lock_out"; then
+      pass "Face Unlock lock overlay is applied"
+    else
+      warn "Face Unlock lock overlay is not (fully) applied: omarchy-sl7-faceunlock lock apply (while unlocked)"
+    fi
+    state=$(sed -n 's/.*state=\([a-z]*\).*/\1/p' <<<"$lock_out" | head -n1)
+    [[ $state == enabled ]] || info "lock plugin state: ${state:-unknown}"
+  else
+    info "Face Unlock lock plugin not installed; skipped"
+  fi
+fi
+
+if ((problems)); then
+  echo "${0##*/}: $problems item(s) need attention"
+  exit 1
+fi
+echo "${0##*/}: ready for the update"

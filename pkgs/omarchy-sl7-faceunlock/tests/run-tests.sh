@@ -294,7 +294,7 @@ remove) rm -rf "$SL7_PLUGIN_DIR/nate.howdy-lock" ;;
 update) echo "update" >>"$T/omarchy.log" ;;
 esac
 STUB
-  printf '#!/bin/bash\necho "disable $1" >>"%s/omarchy.log"\n' "$T" >"$T/bin/omarchy-plugin-disable"
+  printf '#!/bin/bash\necho "disable $1" >>"%s/omarchy.log"\n[[ -e "%s/disable-fails" ]] || : >"%s/plugin-off"\n' "$T" "$T" "$T" >"$T/bin/omarchy-plugin-disable"
   chmod +x "$T/bin/omarchy" "$T/bin/omarchy-plugin-disable"
   export PATH=$T/bin:$PATH SL7_LOCK_URL=$nate
   check "lock install applies patch then enables" "$APP" lock install
@@ -338,10 +338,15 @@ STUB
   cat >"$T/bin/omarchy-shell" <<STUB
 #!/bin/bash
 [[ \$1 == -q ]] && shift
-[[ \$1 == lock && \$2 == status ]] && { cat "$T/shell-state"; exit 0; }
+[[ \$1 == shell && \$2 == ping ]] && { [[ -e "$T/shell-down" ]] && exit 1; echo ok; exit 0; }
+[[ \$1 == lock && \$2 == status ]] && { [[ -e "$T/ipc-slow" ]] && { echo "Shell is not ready." >&2; exit 1; }; [[ -e "$T/ipc-dead" ]] && { echo "Target not found." >&2; exit 1; }; cat "$T/shell-state"; exit 0; }
 echo "\$*" >>"$T/shell.log"
 STUB
-  chmod +x "$T/bin/omarchy-shell"
+  printf '#!/bin/bash\n[[ -e "%s/plugin-off" ]] && echo "[{\\"id\\":\\"nate.howdy-lock\\",\\"enabled\\":false}]" || echo "[{\\"id\\":\\"nate.howdy-lock\\",\\"enabled\\":true}]"\n' "$T" >"$T/bin/omarchy-plugin-list"
+  printf '#!/bin/bash\ncat "%s/hint"\n' "$T" >"$T/bin/loginctl"
+  printf '#!/bin/bash\nexit "$(cat "%s/session-rc")"\n' "$T" >"$T/bin/omarchy-hyprland-session-locked"
+  printf '#!/bin/bash\necho "$*" >>"%s/notify.log"\n' "$T" >"$T/bin/notify-send"
+  chmod +x "$T/bin/omarchy-shell" "$T/bin/omarchy-plugin-list" "$T/bin/loginctl" "$T/bin/notify-send" "$T/bin/omarchy-hyprland-session-locked"
   cp -p "$svc.sl7-orig" "$svc"
   cp -p "$lv.sl7-orig" "$lv"
   patch -p1 -s -d "$SL7_PLUGIN_DIR/nate.howdy-lock" -i "$LIB/lock-patch/howdy-lock-pam.patch" >/dev/null 2>&1
@@ -356,6 +361,48 @@ STUB
   check "lock auto rescans plugins" grep -q 'shell rescanPlugins' "$T/shell.log"
   : >"$T/shell.log"
   check "lock auto is quiet once current" bash -c "'$APP' lock auto && [[ ! -s '$T/shell.log' ]]"
+  # lock health check: the shell answers but the plugin IPC is gone (waits set to 0 here)
+  export SL7_LOCK_HEALTH_WAIT=0 SL7_LOCK_SHELL_POLL=0 SL7_LOCK_SHELL_MAX=0
+  printf '{"locked":false,"requested":false,"sessionLocked":false,"secure":false}\n' >"$T/shell-state"
+  echo no >"$T/hint"
+  echo 1 >"$T/session-rc"
+  : >"$T/omarchy.log"
+  check "health: plugin IPC alive, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  : >"$T/ipc-slow"
+  check "health: IPC timing out is inconclusive, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  rm -f "$T/ipc-slow"
+  : >"$T/ipc-dead"
+  echo 0 >"$T/session-rc"
+  check "health: IPC dead, compositor says locked, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  echo 2 >"$T/session-rc"
+  check "health: IPC dead, lock undetermined, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  echo 1 >"$T/session-rc"
+  echo yes >"$T/hint"
+  check "health: IPC dead, LockedHint yes, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  echo no >"$T/hint"
+  : >"$T/shell-down"
+  check "health: shell not up, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  check "health: shell not up is logged" bash -c "'$APP' lock auto | grep -q 'did not answer'"
+  rm -f "$T/shell-down"
+  : >"$T/plugin-off"
+  check "health: plugin not enabled, nothing disabled" bash -c "'$APP' lock auto && ! grep -q disable '$T/omarchy.log'"
+  rm -f "$T/plugin-off"
+  : >"$T/disable-fails"
+  rm -f "$T/notify.log"
+  check "health: disable that does not take: lock auto succeeds" "$APP" lock auto
+  check "health: disable that does not take: not told the stock lock is back" bash -c "grep -q 'could not be disabled' '$T/notify.log' && ! grep -q 'stock Omarchy lock screen is back' '$T/notify.log'"
+  rm -f "$T/disable-fails" "$T/notify.log"
+  check "health: IPC dead, unlocked: lock auto succeeds" "$APP" lock auto
+  check "health: IPC dead, unlocked: plugin disabled" grep -q 'disable nate.howdy-lock' "$T/omarchy.log"
+  check "health: IPC dead, unlocked: user notified" grep -q 'stock Omarchy lock screen is back' "$T/notify.log"
+  rm -f "$T/ipc-dead" "$T/hint" "$T/notify.log" "$T/plugin-off" "$T/session-rc"
+  # stock lock drift report
+  mkdir -p "$T/omarchy-path/shell/plugins/lock"
+  printf 'Item {}\n' >"$T/omarchy-path/shell/plugins/lock/Service.qml"
+  printf 'Item {}\n' >"$T/omarchy-path/shell/plugins/lock/LockView.qml"
+  check "lock status: changed stock lock is reported" bash -c "OMARCHY_PATH='$T/omarchy-path' '$APP' lock status | grep -q 'stock-lock=differs from omarchy 4.5.0-3'"
+  check "lock status: missing stock lock is reported" bash -c "OMARCHY_PATH='$T/none' '$APP' lock status | grep -q 'stock-lock=absent'"
+  check "stock hashes are 64 hex digits" bash -c "source '$LIB/lock.sh' && [[ \$LOCK_STOCK_SERVICE_SHA256 =~ ^[0-9a-f]{64}\$ && \$LOCK_STOCK_LOCKVIEW_SHA256 =~ ^[0-9a-f]{64}\$ ]]"
   # LockView.qml drift: nothing is written, Service.qml included
   cp -p "$svc" "$T/svc.full"
   cp -p "$svc.sl7-orig" "$svc"

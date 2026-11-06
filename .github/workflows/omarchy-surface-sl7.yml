@@ -38,7 +38,7 @@ jobs:
             omarchy-sl7-repo-ensure 10-omarchy-sl7-repo sl7-ir-probe sl7-ir-emitter-test \
             sl7-usb-rpm sl7-park omarchy-sl7-powermode omarchy-sl7-test-entry \
             omarchy-sl7-wifi-powersave.dispatcher sl7-camera-check omarchy-sl7-bag-guard \
-            omarchy-surface-sl7-camera-stage
+            omarchy-surface-sl7-camera-stage omarchy-sl7-preupdate-check
           luac5.4 -p guard-pro-audio.lua
           for f in sl7-vrr-rate sl7-proftop sl7-camera-tuning; do
             python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$f"
@@ -124,6 +124,8 @@ jobs:
             usr/bin/sl7-camera-check \
             usr/bin/sl7-proftop \
             usr/bin/omarchy-sl7-bag-guard \
+            usr/bin/omarchy-sl7-preupdate-check \
+            usr/lib/systemd/system/power-profiles-daemon.service.d/50-omarchy-surface-sl7.conf \
             etc/omarchy-surface-sl7/bag-guard.conf \
             usr/lib/systemd/system/omarchy-surface-sl7-bag-guard.service; do
             grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }

@@ -61,6 +61,20 @@ _sl7_repo() {
   /usr/bin/omarchy-sl7-repo-ensure --hook --provision-users || true
 }
 
+# The power-profiles-daemon drop-in (--block-driver=cpufreq) only takes effect when the
+# daemon restarts. try-restart leaves a stopped daemon alone; image builds skip it.
+_sl7_ppd() {
+  if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --chroot; then
+    return 0
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl try-restart power-profiles-daemon.service >/dev/null 2>&1 || true
+  # the watcher re-applies the CPU caps and takes ownership from the restarted daemon
+  systemctl try-restart omarchy-surface-sl7-powermode.service >/dev/null 2>&1 || true
+  return 0
+}
+
 _sl7_setup() {
   _sl7_repo
   "$_sl7_dir/neutralize-surface-keyboard" || true
@@ -90,6 +104,8 @@ _sl7_setup() {
   fi
 
   _sl7_camera || true
+
+  _sl7_ppd || true
 
   _sl7_rebuild
 }

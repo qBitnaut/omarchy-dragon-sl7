@@ -245,6 +245,18 @@ and the `Commons` alias exist on both. These two patches are the only ones
 that depend on the 4.0.6 shell (the stranded-lock helper and the `Commons`
 alias).
 
+The login hook (`lock auto`) also runs a health check. It first waits for the shell
+(`omarchy-shell shell ping`, up to 90 s) and for the plugin scan to finish, then probes
+`lock status` three times, 10 s apart. Only the answers `Target not found.` or `Function not found.`
+count as dead; a timeout or a shell that is not ready is inconclusive and changes nothing.
+If all three probes are dead and the session is not locked (`omarchy-hyprland-session-locked`
+exits 1; exit 0 or 2 means locked or undetermined and it leaves things alone; logind `LockedHint`
+is a secondary signal), it disables the plugin and notifies you: the stock lock screen is back,
+or, if the disable did not take, how to disable it by hand. Every early return writes a line to
+`journalctl --user -u omarchy-sl7-faceunlock-lock.service`. It never acts while the session is
+locked. `lock status` also reports `stock-lock=`: whether Omarchy's own
+`omarchy.lock` files still match the 4.5.0-3 hashes (informational; the overlay is not ported to 4.5).
+
 After the package is installed or upgraded, on each Surface Laptop 7, while the
 screen is unlocked:
 

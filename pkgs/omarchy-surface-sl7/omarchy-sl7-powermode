@@ -22,8 +22,12 @@
 #
 # The script only READS the PPD profile; it never sets it. (Omarchy's shell runs
 # omarchy-powerprofiles-set on UPower OnBattery changes, and sl7-batteryd may switch to
-# power-saver at a low charge; PPD has no real backend on ARM, so the profile alone
-# changes nothing until this script acts on it.)
+# power-saver at a low charge.) Omarchy 4.5's omarchy-power-profiles-daemon has its own
+# cpufreq driver that caps scaling_max_freq (60% power-saver, 75% balanced); the
+# omarchy-surface-sl7 drop-in power-profiles-daemon.service.d/50-omarchy-surface-sl7.conf
+# blocks it (--block-driver=cpufreq) so that this script is the only CPU cap writer.
+# When the daemon still reports CpuDriver cpufreq (drop-in overridden or not yet
+# restarted), the daemon owns the CPU caps and sys_cpu leaves them alone.
 set -u
 
 conf=${OMARCHY_SL7_POWER_CONF:-/etc/omarchy-surface-sl7/power.conf}
@@ -125,6 +129,43 @@ detect_profile() {
   return 0
 }
 
+# Prints the CpuDriver the daemon reports for the active profile (for example cpufreq,
+# the driver of Omarchy 4.5's omarchy-power-profiles-daemon), or nothing when the daemon
+# is not running. OMARCHY_SL7_PPD_CPU_DRIVER overrides it (tests; set but empty = none).
+detect_cpu_driver() {
+  local dest path out active
+  if [[ -n ${OMARCHY_SL7_PPD_CPU_DRIVER+x} ]]; then
+    echo "$OMARCHY_SL7_PPD_CPU_DRIVER"
+    return 0
+  fi
+  command -v busctl >/dev/null 2>&1 || return 0
+  for dest in org.freedesktop.UPower.PowerProfiles net.hadess.PowerProfiles; do
+    path=/${dest//./\/}
+    out=$(timeout 3 busctl --system get-property "$dest" "$path" "$dest" Profiles 2>/dev/null) || continue
+    active=$(detect_profile)
+    [[ -n $active ]] || active=balanced
+    # aa{sv} 3 4 "Profile" s "power-saver" "CpuDriver" s "x" ...: the CpuDriver of the active
+    # profile (quoted strings sit at even awk fields when split on a double quote).
+    out=$(awk -v want="$active" -F'"' '
+      { for (i = 2; i < NF; i += 2) {
+          if ($i == "Profile") cur = $(i + 2)
+          if ($i == "CpuDriver") {
+            if (first == "") first = $(i + 2)
+            if (cur == want) drv = $(i + 2)
+          }
+        } }
+      END { print (drv != "" ? drv : first) }' <<<"$out")
+    echo "$out"
+    return 0
+  done
+  return 0
+}
+
+# cpu_owner -> "ppd" when the daemon drives the CPU caps itself (CpuDriver cpufreq), else "sl7".
+cpu_owner() {
+  if [[ $(detect_cpu_driver) == cpufreq ]]; then echo ppd; else echo sl7; fi
+}
+
 # effective_level SOURCE PROFILE -> saver | perf | battery | ac
 effective_level() {
   case ${2:-} in
@@ -208,6 +249,10 @@ cpu_step() {
 
 sys_cpu() { # level
   local pol min max cap want
+  if [[ $(cpu_owner) == ppd ]]; then
+    echo "cpu caps are owned by power-profiles-daemon (CpuDriver cpufreq); not writing scaling_max_freq" >&2
+    return 0
+  fi
   want=$(cpu_cap_khz "$1")
   for pol in "$cpufreq"/policy*; do
     [[ -r $pol/cpuinfo_max_freq && -w $pol/scaling_max_freq ]] || continue
@@ -461,19 +506,25 @@ apply_user() { # battery|ac (the source)
 # Prints a report; exit 1 when ENABLE=yes and the applied caps disagree with
 # the current power source.
 status() {
-  local src bad=0 pol cur max want d freqs n w dev f mon profile level
+  local src bad=0 pol cur max want d freqs n w dev f mon profile level owner
   src=$(detect_source)
   profile=$(detect_profile)
   level=$(effective_level "$src" "$profile")
   echo "power source: $src"
   echo "power profile: ${profile:-none (PPD not running or PROFILE_AWARE=no)}"
+  owner=$(cpu_owner)
+  if [[ $owner == ppd ]]; then
+    echo "cpu cap owner: power-profiles-daemon (CpuDriver cpufreq; the omarchy-surface-sl7 drop-in power-profiles-daemon.service.d/50-omarchy-surface-sl7.conf blocks it: sudo systemctl daemon-reload && sudo systemctl restart power-profiles-daemon)"
+  else
+    echo "cpu cap owner: omarchy-sl7-powermode (power-profiles-daemon CpuDriver: $(detect_cpu_driver | sed 's/^$/none/'))"
+  fi
   echo "level: $level (applied: mode $(cat "$run_dir/mode" 2>/dev/null || echo unset), profile $(cat "$run_dir/profile" 2>/dev/null || echo unset), level $(cat "$run_dir/level" 2>/dev/null || echo unset); ENABLE=$ENABLE, config $conf)"
   for pol in "$cpufreq"/policy*; do
     [[ -r $pol/scaling_max_freq ]] || continue
     cur=$(<"$pol/scaling_max_freq")
     max=$(<"$pol/cpuinfo_max_freq")
     echo "cpu ${pol##*/}: scaling_max_freq $cur kHz (hardware max $max)"
-    if [[ $ENABLE == yes ]]; then
+    if [[ $ENABLE == yes && $owner == sl7 ]]; then
       want=$(cpu_cap_khz "$level")
       if uncapped "$level"; then
         want=$max
@@ -583,7 +634,7 @@ watch() {
 }
 
 # Root watcher (omarchy-surface-sl7-powermode.service): applies once at start, then again
-# whenever power-profiles-daemon's ActiveProfile changes. Plug/unplug and resume reach
+# whenever power-profiles-daemon's ActiveProfile changes or its bus name reappears. Plug/unplug and resume reach
 # apply_system through udev (power-event) and the system-sleep hook as before. It sits in
 # a pipe read between events, so it costs nothing while idle.
 sys_apply_now() {
@@ -598,14 +649,27 @@ sys_watch() {
   ((EUID == 0)) || [[ -n ${OMARCHY_SL7_ALLOW_NONROOT:-} ]] || { echo "system watch needs root" >&2; exit 1; }
   sys_apply_now
   while :; do
-    gdbus monitor --system --dest org.freedesktop.UPower.PowerProfiles 2>/dev/null |
-      grep --line-buffered "'ActiveProfile'" |
+    {
+      # ActiveProfile changes; resubscribed after the daemon went away and came back.
+      (while :; do
+        gdbus monitor --system --dest org.freedesktop.UPower.PowerProfiles 2>/dev/null |
+          grep --line-buffered "'ActiveProfile'"
+        sleep 30
+      done) &
+      # The daemon's bus name appearing (start or restart): its owner decides who caps the CPU.
+      gdbus monitor --system --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus 2>/dev/null |
+        grep --line-buffered -E "NameOwnerChanged.*'org\.freedesktop\.UPower\.PowerProfiles', ''," &
+      wait
+    } |
       while IFS= read -r _; do
         # Coalesce bursts.
         while read -r -t 1 _; do :; done
         sys_apply_now
       done
-    # The monitor ended (PPD restarted or the bus went away): look again, then re-subscribe.
+    # Not reached today: the ActiveProfile watcher above loops forever, so `wait` never
+    # returns and this pipeline never ends (a vanished bus is handled by that loop's own
+    # resubscribe). Kept as a safety net should the monitors ever end: look again, then
+    # re-subscribe.
     sleep 30
     sys_apply_now
   done

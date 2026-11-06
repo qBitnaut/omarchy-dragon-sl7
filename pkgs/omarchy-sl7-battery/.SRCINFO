@@ -1,7 +1,7 @@
 pkgbase = omarchy-sl7-battery
 	pkgdesc = Surface Laptop 7 battery app for Omarchy: charge, time left with a projection, history, sleep drain, power profiles and an auto power saver (replaces the Power bar widget)
 	pkgver = 0.1.0
-	pkgrel = 11
+	pkgrel = 12
 	url = https://github.com/qBitnaut/omarchy-dragon-sl7
 	install = omarchy-sl7-battery.install
 	arch = aarch64
@@ -10,6 +10,7 @@ pkgbase = omarchy-sl7-battery
 	depends = gcc-libs
 	depends = glibc
 	depends = glib2
+	depends = python-gobject
 	depends = systemd
 	depends = bash
 	depends = jq

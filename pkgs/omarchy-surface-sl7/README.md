@@ -25,7 +25,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 5 | factory Wi-Fi/BT MAC | `/usr/bin/sl7-mac`, `sl7-wifi-mac.service`, `sl7-bt-mac.service`, `99-sl7-bt-mac.rules` |
 | 6 | no Pro Audio on the speaker card | `/usr/share/wireplumber/wireplumber.conf.d/50-omarchy-surface-sl7.conf`, `.../scripts/omarchy-surface-sl7/guard-pro-audio.lua` |
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
-| 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter` |
+| 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter`, `/usr/bin/omarchy-sl7-preupdate-check`, `power-profiles-daemon.service.d/50-omarchy-surface-sl7.conf` |
 | 8b3 | bag guard: suspend, then power off, a laptop left awake with the lid closed on battery (section 8) | `/usr/bin/omarchy-sl7-bag-guard`, `omarchy-surface-sl7-bag-guard.service`, `/etc/omarchy-surface-sl7/bag-guard.conf` |
 | 8d | optional kernel test boot entries, PSR (known broken) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | `leds_qcom_flash` kept unloaded (the PMIC IR LED path is retired), read-only `sl7-ir-emitter-test --status` and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
@@ -248,6 +248,17 @@ use this tool for the SL7.
   or `sl7-doctor`. Wi-Fi: NetworkManager re-applies its own setting when a connection is
   re-activated; the shipped drop-in and dispatcher script (above) make that setting
   `enable` and put the power-source policy back right after.
+  **Omarchy 4.5 and the CPU caps.** `omarchy-power-profiles-daemon` (Omarchy 4.5) ships a cpufreq
+  driver that caps `scaling_max_freq` itself (60% power-saver, 75% balanced) and re-applies
+  it on resume. Two writers would fight, so the package ships the drop-in
+  `/usr/lib/systemd/system/power-profiles-daemon.service.d/50-omarchy-surface-sl7.conf`
+  (`ExecStart=/usr/lib/power-profiles-daemon --block-driver=cpufreq`) and the scriptlet runs
+  `try-restart` on the daemon. If the daemon still reports `CpuDriver` `cpufreq`,
+  `omarchy-sl7-powermode` leaves the CPU caps alone, `status` and `sl7-doctor` name the owner,
+  and the root watcher re-applies when the daemon's bus name reappears.
+  `omarchy-sl7-preupdate-check` (read-only; `--fix` runs `pacman -D --asexplicit` on
+  `systemd-ukify` and `python-gobject` if they are only dependencies) checks this, the
+  explicit-install state and the Face Unlock lock overlay before an Omarchy update.
 - **Bag guard** (`omarchy-sl7-bag-guard`, unit `omarchy-surface-sl7-bag-guard.service`, enabled by
   default, config `/etc/omarchy-surface-sl7/bag-guard.conf`). A backstop for a laptop that is
   awake in a bag: logind normally suspends on lid close, and this acts only when that did not
