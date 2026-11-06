@@ -666,7 +666,10 @@ sys_watch() {
         while read -r -t 1 _; do :; done
         sys_apply_now
       done
-    # The monitors ended (the bus went away): look again, then re-subscribe.
+    # Not reached today: the ActiveProfile watcher above loops forever, so `wait` never
+    # returns and this pipeline never ends (a vanished bus is handled by that loop's own
+    # resubscribe). Kept as a safety net should the monitors ever end: look again, then
+    # re-subscribe.
     sleep 30
     sys_apply_now
   done

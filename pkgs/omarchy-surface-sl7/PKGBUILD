@@ -112,7 +112,7 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         '51-omarchy-surface-sl7-ir-camera.conf'
         '50-omarchy-surface-sl7-ppd.conf'
         'omarchy-sl7-preupdate-check')
-sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
+sha256sums=('c44c0eb16811b070bbb0c4fa505f62cc5ce05a7b3d89fa8bd5201ab9f2ff6f61'
             '5ab89c9cdb32ea9ab9bf940b722f07609fb9fad202fb3f9b0c9cf77f7c134003'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
             'c30667a4a8c7707c90afba346b8dad70a84ab1c0ef3f4c29a53d439de5f72f59'
@@ -148,7 +148,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '796d977f39d10441bdd32a2c44377241697d7fba6a34b25cb01a4f835f709dd1'
             'd002cab0467b46cc91db61494686e21347d0d05e7be67695d387f86b3b5bae24'
             '6ac11a2da8156315c769d10df8efcaffff2a8be44cc92c830bda3a2fb1a7c588'
-            '3a55023b3b45814204acb1950de873e734089f53972cdf616f22a32e342f9fbc'
+            '4c5e59055b0f7149f00203b4f7f9313d9c69323e9d36b59c56415f5375391081'
             '09bc6578287daa4a1953c7b2f888d0423242410f8b926f9b455fe026dc5cfe87'
             '43be05503a70fa3badf65785b9230d5997a23f1b9f93ff380a8f77fd63951d76'
             '9c7cdc52e2e47585fd813f8e34d217708665a5a65f2514bdfda122c715483a88'
@@ -183,7 +183,7 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '93de124366cf20d310560e6c369f6bacc822980106c985533d829d7f6179bda2'
             '17ca36de1a8baba478dd83cca059ad7afc8785d25a8aff2b981d46da2b63d8c8'
             '16b43cd2dc8f0eed3a3271bbafb615fdeff2f2485407f1788e18615de4cbe478'
-            'fb22f1476f9f567f5f1cb4e0e533ca29b53b2afad5fa516399fa0657653dea8a')
+            'e50809e0729e262223b767705a15c6e545fae5e26f46bdf2748df75fbfeadf8e')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"

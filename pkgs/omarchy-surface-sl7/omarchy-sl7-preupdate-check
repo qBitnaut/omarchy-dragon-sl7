@@ -13,6 +13,7 @@
 #   2. power-profiles-daemon cannot fight omarchy-sl7-powermode over the CPU caps: the
 #      omarchy-surface-sl7 drop-in is in effect (--block-driver=cpufreq) and the running
 #      daemon does not report CpuDriver cpufreq.
+#      A packaged ExecStart= line with arguments beyond the binary is flagged too.
 #   3. The Face Unlock lock screen overlay (omarchy-sl7-faceunlock) is current, if used.
 set -u
 
@@ -27,7 +28,7 @@ case ${1:-} in
   --fix) fix=1 ;;
   '') ;;
   -h | --help)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)
@@ -68,6 +69,17 @@ if ((${#to_fix[@]})); then
   fi
 fi
 
+# The shell and lock checks need the user's session; as root they would look at the wrong one.
+if ((EUID == 0)) && [[ -z ${OMARCHY_SL7_ALLOW_NONROOT:-} ]]; then
+  info "re-run without sudo for the shell and lock checks"
+  if ((problems)); then
+    echo "${0##*/}: $problems item(s) need attention"
+    exit 1
+  fi
+  echo "${0##*/}: package checks passed"
+  exit 0
+fi
+
 # 2. power-profiles-daemon and the CPU caps
 if "$pacman_bin" -Qq omarchy-power-profiles-daemon >/dev/null 2>&1; then
   unit=$("$systemctl_bin" cat power-profiles-daemon.service 2>/dev/null)
@@ -75,6 +87,14 @@ if "$pacman_bin" -Qq omarchy-power-profiles-daemon >/dev/null 2>&1; then
     pass "power-profiles-daemon unit blocks the cpufreq driver (omarchy-surface-sl7 drop-in)"
   else
     warn "power-profiles-daemon unit does not block the cpufreq driver; it caps the CPU against omarchy-sl7-powermode (reinstall omarchy-surface-sl7, then sudo systemctl daemon-reload)"
+  fi
+  # The packaged unit (not a drop-in) should start the daemon without arguments of its own.
+  pkg_exec=$(grep -h '^ExecStart=' /usr/lib/systemd/system/power-profiles-daemon.service 2>/dev/null | head -n1)
+  pkg_exec=${pkg_exec#ExecStart=}
+  pkg_exec=${pkg_exec#[@+!-]}
+  read -r -a pkg_words <<<"$pkg_exec"
+  if ((${#pkg_words[@]} > 1)); then
+    warn "the packaged power-profiles-daemon ExecStart= has arguments (${pkg_exec#* }); check they do not select the cpufreq driver or fight omarchy-sl7-powermode"
   fi
   if [[ -x $powermode ]]; then
     drv=$("$powermode" status 2>/dev/null | sed -n 's/^cpu cap owner: \(.*\) (.*/\1/p' | head -n1)
