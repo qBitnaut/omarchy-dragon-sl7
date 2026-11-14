@@ -3,7 +3,7 @@
 Face Unlock setup and face manager for Omarchy on the Surface Laptop 7. It is
 a gum TUI in Omarchy's floating terminal, in the style of
 `omarchy-setup-security-fingerprint`. It configures
-[howdy-next](https://codeberg.org/nathawat/howdy-next) against the IR camera
+[howdy-next](https://github.com/nathawatc/howdy-next) against the IR camera
 that `sl7-ir-bridge` exposes at `/dev/v4l/by-id/sl7-ir-camera`, manages
 enrolled faces, and edits the PAM stacks for sudo, polkit and the lock screen
 with backups, markers and rollback.

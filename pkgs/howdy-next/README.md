@@ -1,6 +1,6 @@
 # howdy-next
 
-[howdy-next](https://codeberg.org/nathawat/howdy-next) for Arch Linux ARM (aarch64):
+[howdy-next](https://github.com/nathawatc/howdy-next) for Arch Linux ARM (aarch64):
 a C++23 reimplementation of Howdy face authentication (CLI, PAM module, compare
 process, setuid auth helper). It recognises faces with OpenCV DNN (YuNet detection,
 SFace recognition); the two ONNX models come from the `howdy-next-models` package.
@@ -17,19 +17,19 @@ license text comes from Arch's `licenses` package); our packaging files are MIT.
 
 | | |
 |---|---|
-| Upstream | https://codeberg.org/nathawat/howdy-next |
+| Upstream | https://github.com/nathawatc/howdy-next (moved from Codeberg, archived 2026-10-31) |
 | Release | `v3.4.2` (2026-09-26), `pkgver=3.4.2` |
-| Tag object / commit | `5f44399f8a03c9f814bdf58f2a49e7f812ad2895` / `06f82530403fc3bc64da59016c3c25bf82532f8d` |
-| Source | `https://codeberg.org/nathawat/howdy-next/archive/v3.4.2.tar.gz` |
-| Tarball sha256 | `e2e3afabc3d6d3fd696ec0ab6a1f144b6254449216b390be579864a6fd26c50a` |
-| Tarball b2sum (matches the AUR) | `7e891a8ad0e4b30cc85ea2e29b2dfa47e2e488245eaec26e77906fbab46234d2dc444a040451a68bfa16ad4009409c96784f003e58213f5a5c7bd74a63862494` |
+| Tag object / commit | `8ca91ff1dda6fe942139c1c0578317df9d43d4ad` / `eaf94ce277dac203258e32b244e0bbf398a5772e` |
+| Source | `https://github.com/nathawatc/howdy-next/archive/refs/tags/v3.4.2.tar.gz` (extracts to `howdy-next-3.4.2/`) |
+| Tarball sha256 | `9620a67387e8bce7d8f01c84fb0beaea90e5dcad4f14f9fe50b94c67a72f2e18` |
+| Tarball b2sum (matches the AUR) | `9ea44933c9c694d8398f5ec6f701efed9c57bf0bfb8eaf4612e4355532113c50d1d7f72227f0138b10d09f5ce14adbbf7c98f4d83e7b431a1d2d2395a3f885cf` |
 | `polkit-agent-helper-howdy.conf` sha256 | `2283fc4684751caa41e87023755bba5c3468475b6ed632b13a4ac6e9c748c512` |
 
 ### Updating the pins
 
-1. Pick the new tag (`git ls-remote https://codeberg.org/nathawat/howdy-next 'refs/tags/v*'`).
+1. Pick the new tag (`git ls-remote https://github.com/nathawatc/howdy-next 'refs/tags/v*'`).
 2. Set `pkgver`, reset `pkgrel=1`, update the tag and commit in the PKGBUILD comment.
-3. `curl -fsSLO https://codeberg.org/nathawat/howdy-next/archive/vX.Y.Z.tar.gz`, then
+3. `curl -fsSLO https://github.com/nathawatc/howdy-next/archive/refs/tags/vX.Y.Z.tar.gz`, then
    `sha256sum` it into `sha256sums`. Compare its b2sum with the AUR PKGBUILD as a
    cross-check.
 4. Diff the new `howdy/include/model_assets/opencv_model_manifest.hpp` and
