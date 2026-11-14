@@ -14,8 +14,8 @@ pkgbase=linux-sl7
 pkgname=("$pkgbase" "$pkgbase-headers")
 _srcname=linux-7.2
 _desc="Microsoft Surface Laptop 7"
-pkgver=7.2.12
-pkgrel=30
+pkgver=7.2.15
+pkgrel=31
 arch=('aarch64')
 url="https://github.com/qBitnaut/omarchy-dragon-sl7"
 license=('GPL-2.0-only')
@@ -157,11 +157,12 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0121-soc-qcom-smp2p-reset-inbound-state-only-on-restart.patch'
         'patches/0122-soc-qcom-add-ADSP-power-limits-Modern-Standby-notification.patch'
         'patches/0123-soc-qcom-adsp-pwr-lmts-drop-an-unused-include-and-say-why-the-send-blocks.patch'
+        'patches/0124-serial-qcom-geni-release-the-OPP-and-ICC-votes-in-system-sleep-instead-of-force-suspending.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
 sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
-            'db20b9c86ae2680a27c4d8ceb50c47cb78f4319d7dddc1ce99ced8a59e429283'
+            '2d89124e7adfe0e806bd4ae2c67da530ec4e7b45f466ccae77464dbcc878c7ac'
             'SKIP'
             'SKIP'
          'SKIP'
@@ -279,6 +280,7 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'SKIP'
             'SKIP'
             'SKIP'
+         'SKIP'
          'SKIP'
          'SKIP'
          'SKIP'
