@@ -711,6 +711,6 @@ A public repo is safe because no firmware is ever committed or published: only f
   - https://github.com/geocausa/SP11X1ECamera
   - https://github.com/ooaklee/linux-surface-pro-11-oe/issues/42
   - https://github.com/linux-surface/acpidumps
-  - https://codeberg.org/nathawat/howdy-next
+  - https://github.com/nathawatc/howdy-next
   - https://github.com/hyprwm/hyprlock/issues/910, https://github.com/hyprwm/hyprlock/issues/535, https://github.com/omacom/omarchy/pull/8336 (live face-unlock PR), https://github.com/omacom/omarchy/pull/5212 (closed)
 - **Full source lists:** `*/SOURCES.md` in the research folder (see "Research" at the top).
