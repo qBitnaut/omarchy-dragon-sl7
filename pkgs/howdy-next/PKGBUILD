@@ -47,17 +47,24 @@ install=howdy-next.install
 # Release tag v3.4.2 (tag object 8ca91ff1dda6, commit eaf94ce277da). Upstream moved
 # from Codeberg to GitHub; GitHub archives extract to howdy-next-<version>/.
 _tag="v${pkgver}"
+# 0002 is upstream commit 9cd8d1b03e65 (PR #16, fixes issue #15): CMake 4.5 made
+# pkg_check_modules(REQUIRED) accept packages whose Requires cannot be resolved,
+# which fails native-cross-pkg-config-isolation in check(). Drop the patch once a
+# release includes it (https://github.com/nathawatc/howdy-next/issues/15).
 source=(
 	"${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/${_tag}.tar.gz"
 	'polkit-agent-helper-howdy.conf'
 	'0001-quiet-opencv-dnn-target-warning.patch'
+	'0002-fail-configure-on-unresolvable-pkg-config-requires.patch'
 )
 sha256sums=('9620a67387e8bce7d8f01c84fb0beaea90e5dcad4f14f9fe50b94c67a72f2e18'
             'd8e7f8bdf7830d24b0b373e778510ef817f7843a850a584ea7bff8d3c0f10437'
-            '09f91691afcfc02472ba3a524b8812fde7fc53213749d28028f614d9242157ae')
+            '09f91691afcfc02472ba3a524b8812fde7fc53213749d28028f614d9242157ae'
+            '9b0d36216d000edde87efaa6c3df9f2542c460294d3fabf65e9e774fb1cfcb7e')
 
 prepare() {
 	patch -d "$srcdir/$pkgname-$pkgver" -p1 < "$srcdir/0001-quiet-opencv-dnn-target-warning.patch"
+	patch -d "$srcdir/$pkgname-$pkgver" -p1 < "$srcdir/0002-fail-configure-on-unresolvable-pkg-config-requires.patch"
 }
 
 build() {

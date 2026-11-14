@@ -51,6 +51,16 @@ happens in CI (`.github/workflows/howdy-next.yml`, which uses `ci-build.sh` in t
 pinned `omarchy-pkg-builder` image and uploads both packages as the artifact
 `howdy-next-aarch64`).
 
+## Patches
+
+- `0001-quiet-opencv-dnn-target-warning.patch`: silences an OpenCV DNN target warning.
+- `0002-fail-configure-on-unresolvable-pkg-config-requires.patch`: upstream commit
+  `9cd8d1b03e65` (PR #16, fixes
+  [issue #15](https://github.com/nathawatc/howdy-next/issues/15)), minus its
+  `AGENTS.md` note. CMake 4.5 made `pkg_check_modules(REQUIRED)` accept packages whose
+  `Requires` cannot be resolved, which fails `native-cross-pkg-config-isolation` in
+  `check()` on the ALARM builder (CMake 4.5.0). Drop it once a release includes it.
+
 ## Installed files
 
 - `/usr/bin/howdy`: the CLI (`howdy config`, `add`, `test`, `clear`, `disable`, ...)
