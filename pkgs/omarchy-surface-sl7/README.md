@@ -27,6 +27,7 @@ target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 | 7 | firmware installer | `/usr/bin/omarchy-surface-sl7-firmware` |
 | 8 | power | `/usr/lib/udev/rules.d/99-omarchy-surface-sl7-power.rules`, `/usr/lib/omarchy-surface-sl7/power-event`, `/usr/bin/omarchy-surface-sl7-power`, `/usr/bin/omarchy-sl7-powermode`, `omarchy-surface-sl7-powermode.service`, `/usr/lib/systemd/user/omarchy-sl7-powermode.service`, `/etc/omarchy-surface-sl7/power.conf`, `/usr/bin/sl7-powertest`, `/usr/bin/sl7-powermeter`, `/usr/bin/omarchy-sl7-preupdate-check`, `power-profiles-daemon.service.d/50-omarchy-surface-sl7.conf` |
 | 8b3 | bag guard: suspend, then power off, a laptop left awake with the lid closed on battery (section 8) | `/usr/bin/omarchy-sl7-bag-guard`, `omarchy-surface-sl7-bag-guard.service`, `/etc/omarchy-surface-sl7/bag-guard.conf` |
+| 8b4 | low-battery policy: UPower powers off at 5% and a resume hook powers off at or below 5% while discharging (section 8) | `/etc/UPower/UPower.conf.d/50-sl7-low-battery.conf`, `/usr/lib/systemd/system-sleep/zz-low-battery-poweroff` |
 | 8d | optional kernel test boot entries, PSR (known broken) and `clk-unused` (experimental), off by default | `/usr/bin/omarchy-sl7-test-entry`, `/usr/bin/omarchy-sl7-psr-entry` (wrapper), `/etc/boot/hooks/post.d/80-omarchy-sl7-test-entry` |
 | 8g | `leds_qcom_flash` kept unloaded (the PMIC IR LED path is retired), read-only `sl7-ir-emitter-test --status` and `sl7-ir-lab` (section 11c) | `/usr/lib/modprobe.d/omarchy-surface-sl7-ir.conf`, `/usr/bin/sl7-ir-emitter-test` |
 | 8e | IR/RGB camera Phase A probe, read-only | `/usr/bin/sl7-ir-probe` |
@@ -96,6 +97,15 @@ running unit. Our hook, on `post`, schedules (`systemd-run --on-active=2`, so sp
 re-initialised) `restart-iptsd`, which finds the hidraw nodes by `HID_ID` (vendor
 `045E`, product `0C77`/`0C6E`) and restarts their `iptsd@dev-hidrawN.service`.
 
+### 4b. Wi-Fi board data (`sl7-ath12k-board`)
+
+Do not drop the `sl7-ath12k-board` hook because linux-firmware 20261019 "now has the SL7": its
+`board-2.bin` carries the SL7's exact board name (`17cb:1107`, `qmi-board-id=255`) on the Samsung
+Galaxy Book4 Edge calibration data (linux-firmware commit 575bbe3f), not the 3378 data we use.
+Our hook appends the name to the 3378 entry, which comes first, so ath12k's first match should
+keep our data (inferred, not tested). `sl7-doctor` only greps for the name, so it cannot tell
+the two apart.
+
 ### 5. Wi-Fi/Bluetooth MAC
 
 Ships [valeronm/sl7-mac](https://github.com/valeronm/sl7-mac) (MIT) at a pinned commit,
@@ -150,8 +160,10 @@ different file before `msiextract` parses it (unless `--allow-unverified`), then
 unprivileged user `nobody` into a directory only that user can write and takes ownership of the
 result before reading it. It needs `msiextract` (msitools); pymsi is not supported. Afterwards it runs
 `limine-mkinitcpio`, or `mkinitcpio -P`, unless `--no-rebuild`. Omarchy's own
-`qcom-firmware-extract` puts the zap shader in `Romulus/`, where mainline does not look;
-use this tool for the SL7.
+`qcom-firmware-extract` (installed by Omarchy 4.5 on aarch64-qualcomm) takes the firmware names
+from the running device tree and reads a Windows driver store, not the MSI; this tool needs no
+Windows partition and checks each file against a known sha256, so use it for the SL7 (whether
+Omarchy's extractor now lays out the SL7 files correctly has not been tested here).
 
 ### 8. Power (small, safe, partly opt-in)
 
@@ -195,8 +207,9 @@ use this tool for the SL7.
   (`omarchy-surface-sl7-powermode.service`) and shortly after resume. On battery it caps every
   cpufreq policy's `scaling_max_freq` (2188800 kHz), caps the GPU devfreq `max_freq` at the
   middle entry of `available_frequencies`, turns Wi-Fi power save on and sets the platform
-  profile to `low-power` if the kernel has one (linux-sl7 does not build the Surface driver, so
-  that is normally a no-op). On AC all of it returns to hardware maximum, Wi-Fi power save off,
+  profile to `low-power` if the kernel exposes one (linux-sl7 builds `surface_platform_profile` as a
+  module, `CONFIG_SURFACE_PLATFORM_PROFILE=m`, but whether the SL7 binds it under a device tree
+  boot is unverified, so this is normally a no-op). On AC all of it returns to hardware maximum, Wi-Fi power save off,
   profile `balanced`. Writes are idempotent. The user part, a user service
   (`omarchy-sl7-powermode.service`, enabled globally for `graphical-session.target`) subscribes
   to UPower's `OnBattery` over D-Bus and to Hyprland's socket, and switches `eDP-1` to 60 Hz on
@@ -267,6 +280,18 @@ use this tool for the SL7.
   should print `s "yes"`.
   `ENABLED=0` leaves the service running but idle; `systemctl disable --now
   omarchy-surface-sl7-bag-guard` removes it.
+- **Low-battery poweroff** (`/etc/UPower/UPower.conf.d/50-sl7-low-battery.conf`, a conffile, and
+  `/usr/lib/systemd/system-sleep/zz-low-battery-poweroff`). UPower's default
+  `CriticalPowerAction=Auto` requested a plain suspend at 0%, and the machine then looped
+  suspend/wake until it browned out (a brownout can leave the touchpad dead until an EC drain).
+  The drop-in sets `PercentageLow=20`, `PercentageCritical=8`, `PercentageAction=5` and
+  `CriticalPowerAction=PowerOff`. The hook runs after every resume and, when the battery is at or
+  below 5% and `Discharging`, logs to the journal (`journalctl -t sl7-lowbatt`) and runs
+  `systemctl --no-block poweroff`; it always exits 0. There is no RTC wake alarm and hibernate is
+  untested on the SL7, so power off is the only critical action used. Dry run, changing nothing:
+  `sh /usr/lib/systemd/system-sleep/zz-low-battery-poweroff check`, or with
+  `LOWBATT_THRESH=100` to see `WOULD POWER OFF` while discharging. A real drain to 5% on battery
+  has not been tested yet.
 
 ### 8f. Touchpad defaults (tap-to-click off)
 
@@ -632,7 +657,7 @@ upstreaming. The package does not run it.
 
 ### 7b. Hardware video (Iris)
 
-linux-sl7 7.2.8-13 enables the Iris codec (patch 0086) with the Microsoft signed
+linux-sl7 7.2.8-13 and later (7.2.15-31 now) enable the Iris codec (patch 0086) with the Microsoft signed
 `qcom/x1e80100/microsoft/Romulus/qcvss8380.mbn`. Get it with `omarchy-surface-sl7-firmware`
 (the file is optional there, so a staging directory made before it existed still installs); the
 installer kit stages it too. It is not in the initramfs hook on purpose: `iris` is a module that
@@ -680,6 +705,12 @@ re-enable touchpad multitouch this boot (warn only),
 and whether `sl7-ir-bridge` is stuck in EBUSY (FAIL, with the fix command and the processes that
 hold the IR camera path; `/run/sl7-ir-bridge/ebusy` is written by the bridge after 30 s of failed
 session starts and removed at the next successful session or when the service stops).
+Omarchy 4.5 state is reported read-only: the platform from `omarchy-hw-platform` (PASS for
+`aarch64-qualcomm`, WARN for another answer, INFO when the detector is absent), whether Limine
+migration 1791898365 (boot menu `timeout: 1` and `quiet: yes`) has run and what `limine.conf`
+holds (INFO), the number of device trees in uki.conf's `DeviceTreeAuto` (INFO; WARN if an `-el2`
+tree is listed), and whether mpv has a `hwdec` setting (INFO). OWE Wi-Fi and the RGB camera wiring
+are not checked here; `sl7-camera-check` covers the camera.
 Exit 1 on any failure.
 
 ### 11b. Optional kernel test entries (`omarchy-sl7-test-entry`)

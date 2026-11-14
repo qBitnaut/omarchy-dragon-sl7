@@ -424,6 +424,61 @@ else
   printf 'INFO  Iris: v4l2-ctl (v4l-utils) not installed; checked /sys/class/video4linux only\n'
 fi
 
+# Omarchy 4.5 platform detection. 4.5 keys its per-platform handling (stable
+# channel default, Qualcomm hooks) on omarchy-hw-platform. Older Omarchy has no
+# detector: INFO. A different answer on a machine whose device tree is romulus13
+# is a WARN, since the installed Omarchy may predate the aarch64-qualcomm name.
+omarchy_platform=$(command -v omarchy-hw-platform 2>/dev/null || true)
+if [[ -n $omarchy_platform ]]; then
+  platform=$("$omarchy_platform" 2>/dev/null) || platform=
+  case $platform in
+    aarch64-qualcomm) pass "Omarchy platform is aarch64-qualcomm (omarchy-hw-platform)" ;;
+    '') warn "omarchy-hw-platform printed no platform (contradictory device tree identity?)" ;;
+    *) warn "omarchy-hw-platform says \"$platform\", not aarch64-qualcomm; Qualcomm-specific Omarchy handling will not apply" ;;
+  esac
+else
+  printf 'INFO  Omarchy platform: omarchy-hw-platform not found (Omarchy older than 4.5, or not on PATH)\n'
+fi
+
+# Limine boot menu: Omarchy migration 1791898365 sets "timeout: 1" and
+# "quiet: yes" in limine.conf unless the user set their own. Read-only report;
+# limine.conf may be unreadable to this user (ESP mounted umask=0077).
+lim_mig=1791898365.sh
+lim_state=${OMARCHY_MIGRATION_STATE:-$HOME/.local/state/omarchy/migrations}
+lim_ship=${OMARCHY_PATH:-/usr/share/omarchy}/migrations
+if [[ -f $lim_state/$lim_mig ]]; then
+  printf 'INFO  Limine: Omarchy migration %s is recorded as run\n' "${lim_mig%.sh}"
+elif [[ -f $lim_ship/$lim_mig ]]; then
+  printf 'INFO  Limine: Omarchy migration %s is pending (omarchy-migrate)\n' "${lim_mig%.sh}"
+else
+  printf 'INFO  Limine: Omarchy migration %s not shipped by this Omarchy (older than 4.5)\n' "${lim_mig%.sh}"
+fi
+if [[ -n $vrr_conf && -r $vrr_conf ]]; then
+  lim_timeout=$(grep -Ei -m1 '^[[:space:]]*timeout:' "$vrr_conf" 2>/dev/null | tr -s ' ')
+  lim_quiet=$(grep -Ei -m1 '^[[:space:]]*quiet:' "$vrr_conf" 2>/dev/null | tr -s ' ')
+  printf 'INFO  Limine: %s has "%s" and "%s"\n' "$vrr_conf" "${lim_timeout:-no timeout: line}" "${lim_quiet:-no quiet: line}"
+else
+  printf 'INFO  Limine: limine.conf not readable as this user; timeout/quiet not checked (run as root)\n'
+fi
+
+# DeviceTreeAuto: both writers (update-uki-dtbs here, Omarchy's dtb-uki.sh) list
+# trees from /boot/dtbs/qcom; -el2 trees must never be listed.
+dta=$(grep -m1 '^DeviceTreeAuto=' "$uki_config" 2>/dev/null)
+if [[ -n $dta ]]; then
+  dta_n=$(grep -o '[^ ,=:]*\.dtb' <<<"$dta" | sort -u | wc -l)
+  printf 'INFO  DeviceTreeAuto: %s device tree(s) listed in %s\n' "$dta_n" "$uki_config"
+  if grep -q -- '-el2\.dtb' <<<"$dta"; then
+    warn "DeviceTreeAuto lists an -el2 device tree (not usable on the SL7; run /usr/lib/omarchy-surface-sl7/update-uki-dtbs)"
+  fi
+fi
+
+# Hardware video decode from userspace. Iris state is reported above; this only
+# shows whether mpv is told to use it (no mpv.conf hwdec line is not a fault).
+if command -v mpv >/dev/null 2>&1; then
+  mpv_hwdec=$(grep -h -m1 '^[[:space:]]*hwdec[[:space:]]*=' "$HOME/.config/mpv/mpv.conf" 2>/dev/null)
+  printf 'INFO  hwdec: mpv installed, mpv.conf %s\n' "${mpv_hwdec:-has no hwdec line (software decode unless set per run, --hwdec=v4l2m2m-copy)}"
+fi
+
 # IR bridge lock-up. sl7-ir-bridge writes this file when its session starts have
 # failed with EBUSY for 30 s (something else, usually PipeWire/WirePlumber
 # through libcamera, holds the IR camera path); the service removes it when it

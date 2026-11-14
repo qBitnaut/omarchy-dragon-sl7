@@ -16,6 +16,12 @@ import subprocess
 import sys
 import tempfile
 
+# WARNING: do not drop this hook because upstream "now has the SL7". linux-firmware
+# 20261019 added a board entry with this exact name (17cb:1107 ss 1107,
+# qmi-board-id=255), but it holds the Samsung Galaxy Book4 Edge calibration data
+# (linux-firmware commit 575bbe3f), not the 3378 data. Our name is appended to the
+# 3378 entry, which comes first, so ath12k's first match keeps our data (inferred,
+# not tested). sl7-doctor only greps for the name and cannot tell the two apart.
 PFX = "bus=pci,vendor=17cb,device=1107,subsystem-vendor=17cb,"
 SFX = ",qmi-chip-id=2,qmi-board-id=255"
 MATCH = PFX + "subsystem-device=3378" + SFX
