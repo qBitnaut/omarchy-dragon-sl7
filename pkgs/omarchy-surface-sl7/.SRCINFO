@@ -116,6 +116,8 @@ pkgbase = omarchy-surface-sl7
 	source = 51-omarchy-surface-sl7-ir-camera.conf
 	source = 50-omarchy-surface-sl7-ppd.conf
 	source = omarchy-sl7-preupdate-check
+	source = 50-omarchy-surface-sl7-low-battery.conf
+	source = omarchy-surface-sl7-low-battery-poweroff
 	sha256sums = ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097
 	sha256sums = 8a455783faeb4d164d3186eb8240ba08725289bca4514c1a9dda7e9cee9f7415
 	sha256sums = 03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e
@@ -183,5 +185,7 @@ pkgbase = omarchy-surface-sl7
 	sha256sums = 17ca36de1a8baba478dd83cca059ad7afc8785d25a8aff2b981d46da2b63d8c8
 	sha256sums = 16b43cd2dc8f0eed3a3271bbafb615fdeff2f2485407f1788e18615de4cbe478
 	sha256sums = e50809e0729e262223b767705a15c6e545fae5e26f46bdf2748df75fbfeadf8e
+	sha256sums = 74fe2181112758ee58319503f469af288172b1c54e11e57dd46c9cedbce96d10
+	sha256sums = 6667363bb31312cc23b7d0b6434a1577b361d1f3b37d201efbf0d6f09daee8e4
 
 pkgname = omarchy-surface-sl7

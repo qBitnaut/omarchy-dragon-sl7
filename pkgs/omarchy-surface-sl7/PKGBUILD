@@ -107,7 +107,9 @@ source=("sl7-mac-$_slmac_commit.tar.gz::https://github.com/valeronm/sl7-mac/arch
         'omarchy-surface-sl7-camera-stage.service'
         '51-omarchy-surface-sl7-ir-camera.conf'
         '50-omarchy-surface-sl7-ppd.conf'
-        'omarchy-sl7-preupdate-check')
+        'omarchy-sl7-preupdate-check'
+        '50-omarchy-surface-sl7-low-battery.conf'
+        'omarchy-surface-sl7-low-battery-poweroff')
 sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '8a455783faeb4d164d3186eb8240ba08725289bca4514c1a9dda7e9cee9f7415'
             '03007a78a59ffaca8fa22000030c80081887a6b19a671b51dc99ed7244a57d5e'
@@ -174,7 +176,9 @@ sha256sums=('ba3d524894ab1e691432417c50d8ea22f85b4a7b5bd70cb4ac609024814bd097'
             '93de124366cf20d310560e6c369f6bacc822980106c985533d829d7f6179bda2'
             '17ca36de1a8baba478dd83cca059ad7afc8785d25a8aff2b981d46da2b63d8c8'
             '16b43cd2dc8f0eed3a3271bbafb615fdeff2f2485407f1788e18615de4cbe478'
-            'e50809e0729e262223b767705a15c6e545fae5e26f46bdf2748df75fbfeadf8e')
+            'e50809e0729e262223b767705a15c6e545fae5e26f46bdf2748df75fbfeadf8e'
+            '74fe2181112758ee58319503f469af288172b1c54e11e57dd46c9cedbce96d10'
+            '6667363bb31312cc23b7d0b6434a1577b361d1f3b37d201efbf0d6f09daee8e4')
 
 package() {
   local lib="$pkgdir/usr/lib/omarchy-surface-sl7"

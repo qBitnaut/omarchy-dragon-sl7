@@ -27,6 +27,7 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
     make -j"$(nproc)" modules_prepare
     make -j"$(nproc)" \
         drivers/spi/spi-geni-qcom.o \
+        drivers/tty/serial/qcom_geni_serial.o \
         drivers/dma/qcom/gpi.o \
         drivers/hid/spi-hid/ \
         drivers/firmware/arm_scmi/perf.o \
