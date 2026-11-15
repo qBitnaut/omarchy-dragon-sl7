@@ -240,10 +240,37 @@ follows upstream 4.0.6 lock-state logic:
   a plain-text status line, and the key auto-repeat guard (#7806), kept ahead of
   the fork's Escape-cancels-face branch.
 
-One fork serves both Omarchy 4.0.x stable and 4.5-class edge: the helper binary
-and the `Commons` alias exist on both. These two patches are the only ones
-that depend on the 4.0.6 shell (the stranded-lock helper and the `Commons`
-alias).
+These two patches are the ones that depend on the 4.0.6 shell (the stranded-lock
+helper and the `Commons` alias).
+
+### Compatibility with Omarchy 4.5 and parity gaps
+
+The overlay is checked against Omarchy 4.5.0 stable and against edge (the
+`omarchy-dev` pin of the ISO pipeline and the head of `quattro`).
+`tests/omarchy-compat.sh <omarchy-checkout>` applies the four patches to
+nate8199's clone at `e5e5402` in a scratch directory and verifies what the
+patched QML and shell code depend on: the `Commons` and `Ui` exports, the
+`Color.lock.*` tokens, the `Border.surfaceSpec` signature, the `Button` and
+`BorderSurface` properties, the helper binaries, the `omarchy-shell` `qs ipc`
+fallback and its `Target not found.` mapping, the `clonedFrom` capability
+inheritance and `addDisabled` in `PluginRegistry.qml`, and that the stock lock
+manifest declares `authentication`. A stock lock whose hashes differ from
+`LOCK_STOCK_*` only warns. CI runs it blocking against `v4.5.0` and the latest
+`v4.5.x` tag, and weekly, advisory only, against the dev pin and `quattro`.
+
+The clone is nate8199's fork of the stock lock screen, not the stock lock, and
+it is behind it in a few places. Known parity gaps (the stock lock has these,
+the clone does not):
+
+- Fingerprint pacing.
+- Video wallpaper.
+- Translations and right-to-left layout.
+- The 15 s blank timer after wake.
+- The IPC fast path: calls to the stock lock go through the shell socket
+  (~5 ms), calls to the clone through `qs ipc` (~45 ms).
+- Focus restore after a VT switch
+  ([omacom/omarchy#17277](https://github.com/omacom/omarchy/issues/17277)): after
+  coming back from a TTY the password field may not have focus; click the field.
 
 The login hook (`lock auto`) also runs a health check. It first waits for the shell
 (`omarchy-shell shell ping`, up to 90 s) and for the plugin scan to finish, then probes
@@ -255,7 +282,8 @@ is a secondary signal), it disables the plugin and notifies you: the stock lock 
 or, if the disable did not take, how to disable it by hand. Every early return writes a line to
 `journalctl --user -u omarchy-sl7-faceunlock-lock.service`. It never acts while the session is
 locked. `lock status` also reports `stock-lock=`: whether Omarchy's own
-`omarchy.lock` files still match the 4.5.0-3 hashes (informational; the overlay is not ported to 4.5).
+`omarchy.lock` files still match the 4.5.0-3 hashes (informational: a difference means the
+stock lock changed and the overlay should be rechecked with `tests/omarchy-compat.sh`).
 
 After the package is installed or upgraded, on each Surface Laptop 7, while the
 screen is unlocked:
@@ -326,6 +354,33 @@ In order of preference:
 (`omarchy-sl7-faceunlock --menu-remove`, run first) and the lock plugin
 (`omarchy plugin remove nate.howdy-lock`).
 
+### Locked out by the lock screen
+
+UNVERIFIED: this runbook is inferred from the Omarchy commands and has not been
+run on a locked-out machine. Read it before you need it.
+
+The password path always works, even when the face button or the camera does
+not: type your password in the field (click it first if it has no focus, see
+the VT-switch gap above). If the lock screen itself is broken (blank,
+unresponsive, no field), get to a shell on another VT (Ctrl+Alt+F3) or over
+SSH, log in as your user, and:
+
+1. Switch back to the stock lock screen:
+   ```
+   omarchy plugin disable nate.howdy-lock
+   omarchy-restart-shell
+   ```
+2. If the shell does not come back, kill the shell and restart it:
+   ```
+   quickshell kill -p /usr/share/omarchy/shell --any-display
+   omarchy-restart-shell
+   ```
+   From a TTY or over SSH, `omarchy-shell` recovers the Wayland display from
+   the compositor socket by itself, so this works outside the session.
+
+SSH or a TTY login is the safety net, so keep one reachable (enabled `sshd`, or
+simply a second VT) before you test a new lock screen.
+
 ## Tests
 
 `tests/run-tests.sh` runs everything that does not need the device, against
@@ -333,7 +388,11 @@ fixture copies in a temp directory: the PAM editors (idempotence, exact
 restore, foreign lines, rollback, dry run), the JSONC menu merge, the CSV
 parsing of `howdy list --plain`, argument validation of the root helper, the
 CLI end to end with a fake `howdy`, and the lock overlay against a clone of
-the plugin at `e5e5402` (set `SL7_TEST_NATE_REPO` to use a local clone).
+the plugin at `e5e5402` (set `SL7_TEST_NATE_REPO` to use a local clone, and
+`SL7_REQUIRE_LOCK_TESTS=1`, as CI does, to count a skipped lock block as a
+failure). Its lock block also proves `tests/omarchy-compat.sh` against the
+fixture checkout in `tests/fixtures/omarchy-min`: it passes there and fails
+when a token such as `Color.lock.borderError` is removed.
 Hooks: `SL7_PAM_DIR`, `SL7_VENDOR_PAM_DIR`, `SL7_STATE_DIR`, `SL7_PAM_MODULE`,
 `SL7_FAILLOCK_MODULE`, `SL7_BRIDGE_FOREIGN_FILE`, `SL7_LID_GATE`, `SL7_LID_STATE`, `SL7_HOWDY_BIN`, `SL7_HOWDY_CONFIG`,
 `SL7_MENU_FILE`, `SL7_PLUGIN_DIR`, `SL7_ASSUME_ROOT=1`, `SL7_NO_SYSTEMCTL=1`.

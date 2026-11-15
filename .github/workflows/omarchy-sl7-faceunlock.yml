@@ -6,6 +6,9 @@ on:
       - 'pkgs/omarchy-sl7-faceunlock/**'
       - '.github/workflows/omarchy-sl7-faceunlock.yml'
   workflow_dispatch:
+  schedule:
+    # Weekly: new Omarchy tags and edge moves are caught without a push here.
+    - cron: '23 5 * * 1'
 
 permissions:
   contents: read
@@ -17,6 +20,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -25,10 +29,14 @@ jobs:
           persist-credentials: false
 
       - name: Lint and fixture tests
+        env:
+          # The lock-plugin block needs nate8199's clone; a skip must not pass in CI.
+          SL7_REQUIRE_LOCK_TESTS: '1'
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck jq
+          shellcheck -x -s bash -S warning pkgs/omarchy-sl7-faceunlock/tests/omarchy-compat.sh
           if grep -rIn '[[:space:]]$' pkgs/omarchy-sl7-faceunlock; then
             echo "trailing whitespace found" >&2
             exit 1
@@ -62,7 +70,7 @@ jobs:
           set -euo pipefail
           pkg=$(ls out/*.pkg.tar.* | head -n1)
           tar -tf "$pkg" | sort > out/contents.txt
-          for f in usr/bin/omarchy-sl7-faceunlock usr/lib/sl7-faceunlock/root-helper usr/lib/sl7-faceunlock/lid-closed usr/lib/sl7-faceunlock/lock-patch/howdy-lock-pam.patch usr/lib/sl7-faceunlock/lock-patch/howdy-lock-state-sync.patch usr/lib/systemd/user/omarchy-sl7-faceunlock-menu.service usr/lib/systemd/user/omarchy-sl7-faceunlock-lock.service; do
+          for f in usr/bin/omarchy-sl7-faceunlock usr/lib/sl7-faceunlock/root-helper usr/lib/sl7-faceunlock/lid-closed usr/lib/sl7-faceunlock/lock-patch/howdy-lock-pam.patch usr/lib/sl7-faceunlock/lock-patch/howdy-lock-state-sync.patch usr/lib/sl7-faceunlock/lock-patch/howdy-lock-upstream-4.0.6.patch usr/lib/sl7-faceunlock/lock-patch/howdy-lock-view-4.0.6.patch usr/lib/sl7-faceunlock/lock-patch/LICENSE.nate8199 usr/share/licenses/omarchy-sl7-faceunlock/LICENSE.nate8199 usr/lib/systemd/user/omarchy-sl7-faceunlock-menu.service usr/lib/systemd/user/omarchy-sl7-faceunlock-lock.service; do
             grep -qx "$f" out/contents.txt || { echo "missing: $f" >&2; exit 1; }
           done
 
@@ -71,3 +79,65 @@ jobs:
           name: omarchy-sl7-faceunlock-aarch64
           path: out/*.pkg.tar.*
           if-no-files-found: error
+
+  # The overlay is a patched clone of nate8199's plugin; this checks what the clone
+  # depends on against Omarchy itself. Blocking for the stable 4.5 line.
+  compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compatibility with Omarchy v4.5.0 and the latest v4.5.x
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          latest=$(git ls-remote --tags --refs https://github.com/omacom/omarchy.git 'v4.5.*' \
+            | sed 's|.*refs/tags/||' | grep -E '^v4\.5\.[0-9]+$' | sort -V | tail -n1)
+          echo "latest stable 4.5 tag: $latest"
+          rc=0
+          for tag in $(printf '%s\n' v4.5.0 "$latest" | sort -Vu); do
+            echo "::group::omarchy $tag"
+            rm -rf "$RUNNER_TEMP/omarchy-$tag"
+            git clone -q --depth 1 --branch "$tag" https://github.com/omacom/omarchy.git "$RUNNER_TEMP/omarchy-$tag"
+            pkgs/omarchy-sl7-faceunlock/tests/omarchy-compat.sh "$RUNNER_TEMP/omarchy-$tag" || rc=1
+            echo "::endgroup::"
+          done
+          exit "$rc"
+
+  # Advisory: the omarchy-dev pin of the ISO pipeline (upstream.lock) and the head of
+  # quattro. A failure here is an early warning, not a reason to block.
+  compat-edge:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [omarchy-dev-pin, quattro-head]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compatibility with ${{ matrix.target }} (advisory)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          ref=quattro
+          if [[ ${{ matrix.target }} == omarchy-dev-pin ]]; then
+            ref=$(sed -n 's/^OMARCHY_SHA=//p' upstream.lock)
+          fi
+          mkdir "$RUNNER_TEMP/omarchy"
+          cd "$RUNNER_TEMP/omarchy"
+          git init -q
+          git fetch -q --depth 1 https://github.com/omacom/omarchy.git "$ref"
+          git -c advice.detachedHead=false checkout -q FETCH_HEAD
+          cd "$GITHUB_WORKSPACE"
+          pkgs/omarchy-sl7-faceunlock/tests/omarchy-compat.sh "$RUNNER_TEMP/omarchy"

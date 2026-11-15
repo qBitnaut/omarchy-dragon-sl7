@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy.lock",
+  "name": "Lock Screen",
+  "omarchy": { "capabilities": ["authentication"] },
+  "kinds": ["service"],
+  "entryPoints": { "service": "Service.qml" }
+}

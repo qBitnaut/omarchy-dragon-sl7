@@ -17,8 +17,10 @@ LOCK_PRISTINE_SHA256=1144e7a896f971001276997595f24c0d471ddbf196aee09c83f4f5809b6
 LOCK_PRISTINE_LOCKVIEW_SHA256=d60d682b6972a179774096fba8ba3d9f3340ff8f1e9e48978ed32db556c5f69f
 
 # sha256 of Omarchy's own stock lock plugin files (omarchy.lock) as shipped in the
-# omarchy 4.5.0-3 package (pacman -Qkk clean), used to report drift of the stock lock
-# the overlay is compared against. Informational only: nothing is edited because of it.
+# omarchy 4.5.0-3 package (pacman -Qkk clean; identical at the v4.5.0 tag). They are
+# reported as drift of the stock lock the overlay is compared against. Informational
+# only: nothing is edited because of it. tests/omarchy-compat.sh checks the clone's
+# dependencies against an Omarchy checkout (CI: v4.5.x blocking, dev and quattro advisory).
 LOCK_STOCK_VERSION=4.5.0-3
 LOCK_STOCK_SERVICE_SHA256=cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9
 LOCK_STOCK_LOCKVIEW_SHA256=e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a

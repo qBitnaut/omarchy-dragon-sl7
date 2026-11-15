@@ -3,6 +3,7 @@
 # Usage: tests/run-tests.sh   (set SL7_TEST_NATE_REPO to a local clone of
 # nate8199/omarchy-plugin-howdy-face at e5e5402 to run the lock-plugin tests
 # offline; otherwise it is cloned from GitHub, or the tests are skipped).
+# SL7_REQUIRE_LOCK_TESTS=1 (set in CI) turns a skipped lock block into a failure.
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 LIB=$ROOT/lib
@@ -422,9 +423,29 @@ STUB
   check "drifted upstream: plugin disabled (stock lock stays)" grep -q 'disable nate.howdy-lock' "$T/omarchy.log"
   check "drifted upstream: file untouched" bash -c "[[ \$(head -n1 '$SL7_PLUGIN_DIR/nate.howdy-lock/Service.qml') == 'import QtQuick' ]]"
   check "lock remove" "$APP" lock remove
+
+  # omarchy-compat.sh: passes on the fixture checkout, fails when a dependency goes
+  export SL7_TEST_NATE_REPO=$nate
+  COMPAT=$ROOT/tests/omarchy-compat.sh
+  rm -rf "$T/fix"
+  cp -r "$ROOT/tests/fixtures/omarchy-min" "$T/fix"
+  check "compat: fixture checkout passes" "$COMPAT" "$T/fix"
+  sed -i '/borderError/d' "$T/fix/shell/Commons/Color.qml"
+  check_not "compat: fails when Color.lock.borderError is removed" "$COMPAT" "$T/fix"
+  check "compat: names the missing token" bash -c "'$COMPAT' '$T/fix' | grep -q '^FAIL Color.lock.borderError'"
+  cp "$ROOT/tests/fixtures/omarchy-min/shell/Commons/Color.qml" "$T/fix/shell/Commons/Color.qml"
+  rm -f "$T/fix/bin/omarchy-system-wake"
+  check_not "compat: fails when a helper binary is gone" "$COMPAT" "$T/fix"
+  cp -p "$ROOT/tests/fixtures/omarchy-min/bin/omarchy-system-wake" "$T/fix/bin/"
+  sed -i 's/function surfaceSpec(section, token, fallbackColor, fallbackWidth, alphaKey)/function surfaceSpec(section, token, fallbackColor)/' "$T/fix/shell/Commons/Border.qml"
+  check_not "compat: fails when Border.surfaceSpec changes signature" "$COMPAT" "$T/fix"
 else
-  skip=$((skip + 1))
-  printf 'SKIP lock plugin tests (no clone of nate8199/omarchy-plugin-howdy-face)\n'
+  if [[ ${SL7_REQUIRE_LOCK_TESTS:-} == 1 ]]; then
+    bad_ "lock plugin tests (required, but no clone of nate8199/omarchy-plugin-howdy-face at e5e5402)"
+  else
+    skip=$((skip + 1))
+    printf 'SKIP lock plugin tests (no clone of nate8199/omarchy-plugin-howdy-face)\n'
+  fi
 fi
 
 printf '\n%s passed, %s failed, %s skipped\n' "$pass" "$fail" "$skip"

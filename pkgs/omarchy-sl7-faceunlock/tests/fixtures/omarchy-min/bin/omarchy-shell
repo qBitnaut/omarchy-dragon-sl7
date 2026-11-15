@@ -1,0 +1,7 @@
+#!/bin/bash
+output=$(timeout 2s qs ipc -n -p "$OMARCHY_PATH/shell" call -- "$@" 2>/dev/null)
+case $output in
+  "Target not found." | "Function not found.")
+    fail "$output"
+    ;;
+esac
