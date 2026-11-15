@@ -11,7 +11,7 @@
 
 pkgname=howdy-next
 pkgver=3.4.2
-pkgrel=4
+pkgrel=5
 pkgdesc='Modern C++ reimplementation of Howdy facial authentication on Linux (aarch64, models in howdy-next-models)'
 arch=('aarch64')
 url='https://github.com/nathawatc/howdy-next'
@@ -47,24 +47,29 @@ install=howdy-next.install
 # Release tag v3.4.2 (tag object 8ca91ff1dda6, commit eaf94ce277da). Upstream moved
 # from Codeberg to GitHub; GitHub archives extract to howdy-next-<version>/.
 _tag="v${pkgver}"
-# 0002 is upstream commit 9cd8d1b03e65 (PR #16, fixes issue #15): CMake 4.5 made
+# Both patches are upstream pull requests, applied in this order (same as the AUR
+# package). Drop each once a release includes it.
+# 0001 is upstream commit 9cd8d1b03e65 (PR #16, fixes issue #15): CMake 4.5 made
 # pkg_check_modules(REQUIRED) accept packages whose Requires cannot be resolved,
-# which fails native-cross-pkg-config-isolation in check(). Drop the patch once a
-# release includes it (https://github.com/nathawatc/howdy-next/issues/15).
+# which fails native-cross-pkg-config-isolation in check()
+# (https://github.com/nathawatc/howdy-next/issues/15).
+# 0002 is upstream PR #21 (commit 4500af9a7152): pins the OpenCV DNN engine by
+# OpenCV version and filters the false-positive "Targets are not supported by the
+# new graph engine" warning. Trailing whitespace stripped from the patch file.
 source=(
 	"${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/${_tag}.tar.gz"
 	'polkit-agent-helper-howdy.conf'
-	'0001-quiet-opencv-dnn-target-warning.patch'
-	'0002-fail-configure-on-unresolvable-pkg-config-requires.patch'
+	'0001-fail-configure-on-unresolvable-pkg-config-requires.patch'
+	'0002-pin-dnn-engine-by-opencv-version-and-filter-target-warning.patch'
 )
 sha256sums=('9620a67387e8bce7d8f01c84fb0beaea90e5dcad4f14f9fe50b94c67a72f2e18'
             'd8e7f8bdf7830d24b0b373e778510ef817f7843a850a584ea7bff8d3c0f10437'
-            '09f91691afcfc02472ba3a524b8812fde7fc53213749d28028f614d9242157ae'
-            'd9a278f61121b2e7a7a0c791b426a35ddf34a3b198fc928f4b361b902195f45f')
+            'd9a278f61121b2e7a7a0c791b426a35ddf34a3b198fc928f4b361b902195f45f'
+            'aef8035165109187e6f9537f9b9f94e77ae898546d0d97718828a05b1debd2b6')
 
 prepare() {
-	patch -d "$srcdir/$pkgname-$pkgver" -p1 < "$srcdir/0001-quiet-opencv-dnn-target-warning.patch"
-	patch -d "$srcdir/$pkgname-$pkgver" -p1 < "$srcdir/0002-fail-configure-on-unresolvable-pkg-config-requires.patch"
+	patch -d "$srcdir/$pkgname-$pkgver" -p1 < "$srcdir/0001-fail-configure-on-unresolvable-pkg-config-requires.patch"
+	patch -d "$srcdir/$pkgname-$pkgver" -p1 < "$srcdir/0002-pin-dnn-engine-by-opencv-version-and-filter-target-warning.patch"
 }
 
 build() {

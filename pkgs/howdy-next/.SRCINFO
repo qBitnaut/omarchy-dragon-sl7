@@ -1,7 +1,7 @@
 pkgbase = howdy-next
 	pkgdesc = Modern C++ reimplementation of Howdy facial authentication on Linux (aarch64, models in howdy-next-models)
 	pkgver = 3.4.2
-	pkgrel = 4
+	pkgrel = 5
 	url = https://github.com/nathawatc/howdy-next
 	install = howdy-next.install
 	arch = aarch64
@@ -26,11 +26,11 @@ pkgbase = howdy-next
 	backup = etc/howdy/config.ini
 	source = howdy-next-3.4.2.tar.gz::https://github.com/nathawatc/howdy-next/archive/refs/tags/v3.4.2.tar.gz
 	source = polkit-agent-helper-howdy.conf
-	source = 0001-quiet-opencv-dnn-target-warning.patch
-	source = 0002-fail-configure-on-unresolvable-pkg-config-requires.patch
+	source = 0001-fail-configure-on-unresolvable-pkg-config-requires.patch
+	source = 0002-pin-dnn-engine-by-opencv-version-and-filter-target-warning.patch
 	sha256sums = 9620a67387e8bce7d8f01c84fb0beaea90e5dcad4f14f9fe50b94c67a72f2e18
 	sha256sums = d8e7f8bdf7830d24b0b373e778510ef817f7843a850a584ea7bff8d3c0f10437
-	sha256sums = 09f91691afcfc02472ba3a524b8812fde7fc53213749d28028f614d9242157ae
 	sha256sums = d9a278f61121b2e7a7a0c791b426a35ddf34a3b198fc928f4b361b902195f45f
+	sha256sums = aef8035165109187e6f9537f9b9f94e77ae898546d0d97718828a05b1debd2b6
 
 pkgname = howdy-next

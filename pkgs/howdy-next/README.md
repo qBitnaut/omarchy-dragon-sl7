@@ -53,13 +53,31 @@ pinned `omarchy-pkg-builder` image and uploads both packages as the artifact
 
 ## Patches
 
-- `0001-quiet-opencv-dnn-target-warning.patch`: silences an OpenCV DNN target warning.
-- `0002-fail-configure-on-unresolvable-pkg-config-requires.patch`: upstream commit
+- `0001-fail-configure-on-unresolvable-pkg-config-requires.patch`: upstream commit
   `9cd8d1b03e65` (PR #16, fixes
   [issue #15](https://github.com/nathawatc/howdy-next/issues/15)), minus its
   `AGENTS.md` note. CMake 4.5 made `pkg_check_modules(REQUIRED)` accept packages whose
   `Requires` cannot be resolved, which fails `native-cross-pkg-config-isolation` in
   `check()` on the ALARM builder (CMake 4.5.0). Drop it once a release includes it.
+- `0002-pin-dnn-engine-by-opencv-version-and-filter-target-warning.patch`: upstream
+  PR #21 (commit `4500af9a7152`, as shipped in AUR `howdy-next` 3.4.2-4), with
+  trailing whitespace stripped (our CI lints for it; `patch` applies both forms
+  identically). It sets `OPENCV_FORCE_DNN_ENGINE` from the OpenCV enum for the
+  version built against (`ENGINE_NEW` on 5.0, `ENGINE_OPENCV` on 5.1+, where the
+  value `2` would select ONNX Runtime) and installs an OpenCV log filter that drops
+  only the exact "Targets are not supported by the new graph engine for now"
+  warning (level, source file, function and message must all match) on OpenCV
+  5.0.0 through 5.1.0. It also adds tests to `face_model_test`, which `check()`
+  runs. Drop it once a release includes it.
+
+Applied in order by `prepare()`; the order matches the AUR package (PR #16, then PR
+\#21). Both apply cleanly to the pinned v3.4.2 tarball.
+
+Dropped in pkgrel 5: our own `0001-quiet-opencv-dnn-target-warning.patch`, which
+silenced the same warning by lowering the global OpenCV log level to ERROR. That
+hid every OpenCV warning, not just the false positive, and did not address the
+engine pin. The upstream maintainer's PR #21 replaces it with a targeted filter,
+so we follow upstream rather than carry a divergent patch.
 
 ## Installed files
 
