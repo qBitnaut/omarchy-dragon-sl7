@@ -23,7 +23,7 @@ index 0c903a5..6bbb201 100644
 +        "linux-sl7",
 +        "linux-sl7-headers",
 +        "omarchy-surface-sl7",
-+        "iptsd-sl7",
++        "iptsd",
 +        "omarchy-sl7-battery",
 +        "omarchy-sl7-keyring",
 +        "linux-firmware-qcom"

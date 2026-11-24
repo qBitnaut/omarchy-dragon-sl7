@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Run INSIDE the Arch Linux ARM builder container, as root.
 # Builds the packages that are not downloaded as CI artifacts, adds the
-# prebuilt linux-sl7 and iptsd-sl7 packages, and creates the local pacman
+# prebuilt linux-sl7 and iptsd packages, and creates the local pacman
 # repository "omarchy-sl7" that omarchy-iso mounts with --local-repo.
 #
 # Environment (all mounts read-only except /repo):
@@ -18,7 +18,7 @@ prebuilt="${SL7_PREBUILT:-/prebuilt}"
 src="${SL7_SOURCES:-/src}"
 repo="${SL7_REPO:-/repo}"
 work=/build
-expected=(linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-surface-sl7 omarchy-sl7-keyring omarchy-sl7-battery qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
+expected=(linux-sl7 linux-sl7-headers iptsd omarchy-surface-sl7 omarchy-sl7-keyring omarchy-sl7-battery qcom-firmware-extract linux-aarch64-pkgbase-shim archinstall)
 
 grep -q '^DisableSandbox' /etc/pacman.conf ||
 	sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
@@ -73,6 +73,8 @@ ln -sf omarchy-sl7.db omarchy.db
 # Every package the installer needs must be listed in the database.
 listing="$(tar -tzf omarchy-sl7.db.tar.gz)"
 for name in "${expected[@]}"; do
+	# Transition: until iptsd is released, the retired name iptsd-sl7 stands in.
+	if [ "$name" = iptsd ] && grep -Eq '^iptsd-sl7-[0-9][^/]*/desc$' <<<"$listing"; then continue; fi
 	if ! grep -Eq "^$name-[0-9][^/]*/desc$" <<<"$listing"; then
 		echo "build-repo: $name is missing from omarchy-sl7.db" >&2
 		exit 1

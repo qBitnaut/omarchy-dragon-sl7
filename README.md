@@ -86,7 +86,7 @@ does not keep Windows. Details for every step are in
 5. **First boot.** The webcam tuning is generated automatically from your own driver
    package. Set up face unlock from the Omarchy menu: Setup > Security > Face Unlock.
 6. **Updates** arrive through the signed `[omarchy-sl7]` repository: `omarchy-update`
-   carries `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`, the face unlock packages and the
+   carries `linux-sl7`, `iptsd`, `libcamera-sl7`, the face unlock packages and the
    add-on.
 
 ### From Windows
@@ -152,7 +152,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 | Feature | Status | Notes |
 |---|---|---|
 | Keyboard | Works | Surface Aggregator modules in the initramfs, so it also works at the LUKS prompt. The prompt can be blank for the first boots: type blind. |
-| Touchpad | Works | `iptsd-sl7` (a fork with Surface Laptop 7 fixes). Tap-to-click is off by default (it caused false clicks while scrolling; set `tap_to_click = true` in `~/.config/hypr/input.lua` to bring it back). Drag latch keeps click-and-drag held, and lift-and-continue works: the drag stays while the physical click is held (iptsd-sl7 patch 0008, verified on the SL7). Disable-while-typing is active. A watchdog re-enables multitouch if the pad falls back to mouse mode. Haptic strength and click force follow Windows' settings (see [Touchpad settings](#touchpad-settings)). Gestures are your own Hyprland (Lua) config. |
+| Touchpad | Works | `iptsd` (a fork with Surface Laptop 7 fixes). Tap-to-click is off by default (it caused false clicks while scrolling; set `tap_to_click = true` in `~/.config/hypr/input.lua` to bring it back). Drag latch keeps click-and-drag held, and lift-and-continue works: the drag stays while the physical click is held (iptsd-sl7 patch 0008, verified on the SL7). Disable-while-typing is active. A watchdog re-enables multitouch if the pad falls back to mouse mode. Haptic strength and click force follow Windows' settings (see [Touchpad settings](#touchpad-settings)). Gestures are your own Hyprland (Lua) config. |
 | Touchscreen | Partial | SPI touch modules only (the 13.8" unit here). Units with the I2C module are not covered. Pen is untested. |
 | Display | Works | Native 2304x1536 at 120 Hz. |
 | Variable refresh (VRR) | Works | 24-120 Hz, on by default (`msm.vrr_enabled=1`; Hyprland `misc.vrr` set by the power mode service). Panel measured at 24 Hz idle, about 116 Hz under motion, no flicker. No chip-rail power change; battery power not measurable yet. Off: remove the `msm.vrr_enabled=1` line from `/etc/limine-entry-tool.d/omarchy-surface-sl7.conf`, `sudo limine-mkinitcpio`, reboot. |
@@ -177,7 +177,7 @@ Measured on the 13.8" X1P. "Works" means used daily without known problems;
 ### Touchpad settings
 
 Set in `/etc/iptsd.d/94-local.conf` (restart `iptsd` after editing). Full list in the
-[iptsd-sl7 README](pkgs/iptsd-sl7/README.md).
+[iptsd README](pkgs/iptsd-sl7/README.md).
 
 | Setting | Values | Status |
 |---|---|---|
@@ -275,7 +275,7 @@ bash omarchy-sl7-bootstrap.sh
 It checks the machine, fetches the repository public key and requires its fingerprint to be
 `6387C619EF246F6F20C536B72C3331C78353BA04` (embedded in the script), trusts it in pacman's
 keyring, adds `Include = /etc/pacman.d/omarchy-sl7.conf` above `[core]`, installs
-`omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-sl7-battery` in one
+`omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd omarchy-sl7-battery` in one
 `pacman -Syu` transaction through Omarchy's own wrapper (so the raw-pacman update guard is
 satisfied), and runs `sl7-doctor`. Every step is idempotent. `--no-install` stops before the
 transaction. From then on `omarchy update` carries our packages. Clean installs from our ISO
@@ -288,7 +288,7 @@ If a later Omarchy change drops the repository, `sudo omarchy-sl7-repo-ensure` p
 
 ### Day to day
 
-- `omarchy update` carries our packages (`linux-sl7`, `iptsd-sl7`, `omarchy-surface-sl7`
+- `omarchy update` carries our packages (`linux-sl7`, `iptsd`, `omarchy-surface-sl7`
   and the face unlock packages), because the repository sits above Omarchy's in
   `pacman.conf`.
 - After a kernel update, **power off and on** rather than rebooting. A warm reboot
@@ -432,7 +432,7 @@ SigLevel = Required DatabaseOptional
 Server = https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64
 ```
 
-- `.github/workflows/publish-repo.yml` runs after linux-sl7, iptsd-sl7, omarchy-surface-sl7,
+- `.github/workflows/publish-repo.yml` runs after linux-sl7, iptsd, omarchy-surface-sl7,
   omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock and omarchy-sl7-battery succeed on main (and on manual dispatch). It takes their latest artifacts
   plus the packages already on the release, refuses firmware files, signs every package
   (`gpg --detach-sign`), runs `repo-add --sign`, keeps the current and previous version of each
@@ -461,7 +461,7 @@ Surface Laptop 7 driver MSI. The .gitignore blocks firmware and captures.
 
 - Scripts and packaging are MIT licensed (see LICENSE).
 - Kernel patches under pkgs/linux-sl7/patches are GPL-2.0, like the Linux kernel they modify.
-- iptsd-sl7 (the iptsd fork) is GPL-2.0-or-later; howdy-next is GPL-3.0-or-later.
+- iptsd (the fork) is GPL-2.0-or-later; howdy-next is GPL-3.0-or-later.
 - Microsoft/Qualcomm firmware is never included and remains under its own license.
 - The Omarchy logo is Omarchy's, under the MIT license.
 

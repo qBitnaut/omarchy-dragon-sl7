@@ -9,6 +9,7 @@
 #         (*.pkg.tar.zst and their .sig). It is rewritten in place:
 #         - firmware guard (guard-artifacts.sh), debug packages dropped, file names checked
 #         - only the newest KEEP (default 2) versions of each package stay
+#         - retired names (iptsd-sl7 -> iptsd) are kept as files but dropped from the database
 #         - every package without a valid detached signature is signed
 #         - omarchy-sl7.db / .files (REAL copies, not symlinks) and their .sig are created
 #         - POOL/.assets lists every file to upload
@@ -78,6 +79,26 @@ for n in "${names[@]}"; do
 	done
 done
 ((${#current[@]})) || { echo "repo-build: no packages in $pool" >&2; exit 1; }
+
+# Retired package names (old=new). Once a package under the new name is in the
+# pool, the old name leaves the database: it conflicts with the new package, and
+# a database that listed both would make pacman pick between them. The old files
+# stay in the pool (rollback, existing download links) but are not listed. Until
+# the new name exists the old one stays, so the repository never loses the
+# package in between.
+declare -A retired=([iptsd-sl7]=iptsd)
+kept=()
+for f in "${current[@]}"; do
+	n="$(pkg_field "$f" pkgname)"
+	new="${retired[$n]:-}"
+	if [[ -n $new ]] && printf '%s\n' "${names[@]}" | grep -qxF "$new"; then
+		echo "repo-build: $f is retired in favour of $new; not listed in the database"
+		continue
+	fi
+	kept+=("$f")
+done
+current=("${kept[@]}")
+((${#current[@]})) || { echo "repo-build: no packages left after retiring old names" >&2; exit 1; }
 printf 'repo-build: current: %s\n' "${current[@]}"
 
 # 3. signing

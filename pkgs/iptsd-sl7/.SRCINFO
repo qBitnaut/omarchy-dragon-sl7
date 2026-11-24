@@ -1,7 +1,7 @@
-pkgbase = iptsd-sl7
+pkgbase = iptsd
 	pkgdesc = Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)
 	pkgver = 3.1.0.r20260717
-	pkgrel = 17
+	pkgrel = 18
 	url = https://github.com/alex-lentz/iptsd
 	arch = aarch64
 	license = GPL-2.0-or-later
@@ -17,8 +17,9 @@ pkgbase = iptsd-sl7
 	depends = libinih
 	depends = spdlog
 	depends = systemd-libs
-	provides = iptsd
-	conflicts = iptsd
+	provides = iptsd-sl7=3.1.0.r20260717-18
+	conflicts = iptsd-sl7
+	replaces = iptsd-sl7
 	options = !lto
 	backup = etc/iptsd.conf
 	backup = etc/iptsd.d/91-calibration-045E-0C77.conf
@@ -46,7 +47,7 @@ pkgbase = iptsd-sl7
 	sha256sums = c58408721cd808a51c4970d6e2a8397a136b899bcf6904069646c8f4ea6b86ef
 	sha256sums = 310675731eab637ede77f62c7bf6d2f65324504ddd218742341df483df81a513
 	sha256sums = 6b2bab2ad225a86ef1fd31e2a2736b641a3d5a91f5723d2069c18ecf63ae2889
-	sha256sums = 9b831b4000e98c86505a70bb04007205d40840d105b5ca694c0b0634f85f3eef
+	sha256sums = 256e036e80f188ed564200e1daa7b0bece1fea03a14e0800361e8aae8b5e2456
 	sha256sums = fea9cfdcbeb3362ac3ddab91263ba2075501e75955888659c1925939b5072cd7
 	sha256sums = 67754ccca79e232a0c068294f7190d949bbee8623fed333edbb7b7f52dca3a3e
 	sha256sums = c79e82423445434063ce5fc84db251580109b5ba5ba7c727357b395dd21faf76
@@ -60,4 +61,4 @@ pkgbase = iptsd-sl7
 	sha256sums = f6ad36b88fc84ae48095a8c6df09f260923226a9ba6e47e7b9babb71117eaa77
 	sha256sums = d354986084851a295fe3fa50f3011c35905126459978bfcbfce06b63692d74c4
 
-pkgname = iptsd-sl7
+pkgname = iptsd

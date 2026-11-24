@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
 
-      # --nodeps: omarchy, linux-sl7 and iptsd-sl7 are not in the ALARM repos
+      # --nodeps: omarchy, linux-sl7 and iptsd are not in the ALARM repos
       # (they come from the Omarchy and local repos at install time). The
       # package is files only, so nothing needs them to build.
       - name: Build package in ALARM container

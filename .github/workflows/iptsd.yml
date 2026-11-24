@@ -1,10 +1,10 @@
-name: iptsd-sl7
+name: iptsd
 
 on:
   push:
     paths:
       - 'pkgs/iptsd-sl7/**'
-      - '.github/workflows/iptsd-sl7.yml'
+      - '.github/workflows/iptsd.yml'
   workflow_dispatch:
 
 permissions:
@@ -64,10 +64,13 @@ jobs:
           if [ "$bti" -ne 0 ] && [ "$bti" -ne "$n" ]; then
             echo "mixed BTI across binaries ($bti/$n)" >&2; exit 1
           fi
+          # The package is named iptsd now; the directory keeps its old name.
+          tar -xOf "$pkg" .PKGINFO | grep -x 'pkgname = iptsd' >/dev/null
+          tar -xOf "$pkg" .PKGINFO | grep -x 'replaces = iptsd-sl7' >/dev/null
           tar -tf "$pkg" | grep -E 'etc/iptsd.d/91-calibration|61-iptsd-sl7|iptsd@.service|50-iptsd.rules'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: iptsd-sl7-aarch64
+          name: iptsd-aarch64
           path: out/*.pkg.tar.*
           if-no-files-found: error

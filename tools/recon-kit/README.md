@@ -139,7 +139,7 @@ tools/recon-kit/make-recon-usb.sh --device /dev/sdX --kernel-artifacts DIR --ipt
 `--from-ci RUN` runs `gh run download RUN --pattern 'linux-sl7-*'` into
 `$SL7_WORK/ci/linux-sl7` (run id, or `latest` for the newest successful `linux-sl7.yml`
 run; artifacts expire after 14 days). `--iptsd-from-ci RUN` does the same for
-`iptsd-sl7-aarch64`. The build verifies `SHA256SUMS` and refuses firmware-looking files
+`iptsd-aarch64`. The build verifies `SHA256SUMS` and refuses firmware-looking files
 in the artifacts.
 
 ### Design choices

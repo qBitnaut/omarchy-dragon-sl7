@@ -42,7 +42,7 @@ than GitHub's 2 GiB asset limit, so it is split into 1900 MiB parts
 signature, which must be a valid one by key `6387C619EF246F6F20C536B72C3331C78353BA04`; without it the
 script aborts unless you pass `--insecure-skip-signature`). By hand: `cat NAME.iso.part-* > NAME.iso; sha256sum -c NAME.iso.sha256`.
 
-The workflow takes the newest signed `linux-sl7`, `iptsd-sl7`, `libcamera-sl7`,
+The workflow takes the newest signed `linux-sl7`, `iptsd`, `libcamera-sl7`,
 `howdy-next`, `sl7-ir-bridge` and `omarchy-sl7-faceunlock` from the non-expiring
 `repo-aarch64` release (`upstream.lock` only holds minimum versions), and builds
 `omarchy-surface-sl7` from the checkout. The CI artifact `omarchy-sl7-installer-iso`

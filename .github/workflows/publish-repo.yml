@@ -3,7 +3,7 @@ name: publish-repo
 # Publishes the omarchy-sl7 pacman repository as assets of the rolling GitHub
 # Release "repo-aarch64":
 #   Server = https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64
-# Inputs: the latest successful, unexpired artifacts of linux-sl7, iptsd-sl7,
+# Inputs: the latest successful, unexpired artifacts of linux-sl7, iptsd,
 # omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock, omarchy-sl7-battery and libcamera-sl7 on main, plus the packages already
 # on the release. Releases cannot hold symlinks, so omarchy-sl7.db and
 # omarchy-sl7.files are real files (copies of the .tar.gz), with detached
@@ -14,7 +14,7 @@ name: publish-repo
 
 on:
   workflow_run:
-    workflows: [linux-sl7, iptsd-sl7, omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock, omarchy-sl7-battery, libcamera-sl7]
+    workflows: [linux-sl7, iptsd, omarchy-surface-sl7, omarchy-sl7-keyring, howdy-next, sl7-ir-bridge, omarchy-sl7-faceunlock, omarchy-sl7-battery, libcamera-sl7]
     types: [completed]
     branches: [main]
   workflow_dispatch:
@@ -90,7 +90,7 @@ jobs:
             echo "::warning title=publish-repo::no unexpired artifact for $1; keeping what the release has"
           }
           fetch linux-sl7.yml '^linux-sl7-' 'linux-sl7-*'
-          fetch iptsd-sl7.yml '^iptsd-sl7-aarch64$' 'iptsd-sl7-aarch64'
+          fetch iptsd.yml '^iptsd-aarch64$' 'iptsd-aarch64'
           fetch omarchy-surface-sl7.yml '^omarchy-surface-sl7-aarch64$' 'omarchy-surface-sl7-aarch64'
           fetch omarchy-sl7-keyring.yml '^omarchy-sl7-keyring-aarch64$' 'omarchy-sl7-keyring-aarch64'
           fetch howdy-next.yml '^howdy-next-aarch64$' 'howdy-next-aarch64'
