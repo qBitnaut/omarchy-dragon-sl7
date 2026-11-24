@@ -10,6 +10,16 @@ It is made only of files, pacman hooks and drop-ins. It depends on `omarchy`,
 needs no change to Omarchy. License: MIT for our files (see `LICENSE`);
 the bundled `sl7-mac` pieces are MIT too (`LICENSE.sl7-mac`).
 
+It also `provides` and `conflicts` with Omarchy's `microsoft-surface-laptop-7-support`,
+`microsoft-surface-snapdragon-addresses` and `surface-snapdragon-addresses`.
+Omarchy migration 1795337583 installs these with `omarchy-pkg-add`, which only
+calls pacman when `pacman -Q` (which resolves provides) finds one missing; with
+this package installed none is, so nothing is installed. They are not wanted:
+`sl7-mac` sets the same Wi-Fi/Bluetooth addresses, and the support package's
+modprobe options line would replace the v4l2loopback options owned by
+`sl7-ir-bridge`, which breaks face unlock. A direct `pacman -S` of one of them
+fails on the conflict.
+
 **No firmware is in this package.** The Microsoft/Qualcomm files are installed on the
 target by `qcom-firmware-extract` (a dependency, used by the installer) or by
 `omarchy-surface-sl7-firmware` (item 7, manual fallback).
