@@ -2,15 +2,20 @@
 #
 # iptsd with Surface Laptop 7 touchpad support (HID-over-SPI 045E:0C77), built
 # from the alex-lentz/iptsd fork pinned to an exact commit.
+#
+# Named "iptsd" (it was iptsd-sl7 until pkgrel 17) so that Omarchy's migrations
+# and dependencies, which name the package iptsd, resolve to this build when
+# [omarchy-sl7] is listed first, and so omarchy-surface-sl7 can depend on plain
+# iptsd and run on Omarchy's stock build too. The directory keeps its old name.
 
-pkgname=iptsd-sl7
+pkgname=iptsd
 # SL7 calibration (iptsd-calibrate output) by Oliver White, from bryce-hoehn's
 # linux-surface-laptop-7 repo. Upstream has no license; fetched at build time,
 # not redistributed in this repo.
 _calcommit=e60938dcf707d37d24e782e0029b9c9a567d67b8  # 2026-06-03
 _commit=3663e96e758145801c3cb1ce7c72f362d0d4a5f5  # 2026-07-17 00:26 UTC (2026-07-16 20:26 -0400)
 pkgver=3.1.0.r20260717
-pkgrel=17
+pkgrel=18
 pkgdesc='Userspace touch daemon for Surface devices, with Surface Laptop 7 touchpad support (alex-lentz fork)'
 arch=('aarch64')
 url='https://github.com/alex-lentz/iptsd'
@@ -20,8 +25,12 @@ depends=('fmt' 'libinih' 'spdlog' 'systemd-libs')
 # cmake is required: meson locates Microsoft.GSL through its CMake config.
 makedepends=('meson' 'ninja' 'cmake' 'cli11' 'eigen' 'microsoft-gsl' 'systemd')
 checkdepends=('binutils')
-provides=('iptsd')
-conflicts=('iptsd')
+# The old package name: replaces swaps it in one transaction on -Syu, conflicts
+# makes a direct -S of the new name remove it, provides keeps anything that
+# still names iptsd-sl7 satisfied.
+provides=("iptsd-sl7=$pkgver-$pkgrel")
+conflicts=('iptsd-sl7')
+replaces=('iptsd-sl7')
 backup=('etc/iptsd.conf'
         'etc/iptsd.d/91-calibration-045E-0C77.conf'
         'etc/iptsd.d/92-iptsd-sl7-tuning.conf')

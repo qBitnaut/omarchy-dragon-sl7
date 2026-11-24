@@ -50,7 +50,7 @@ jobs:
       - name: Load upstream.lock
         run: installer/scripts/lock-env.sh >> "$GITHUB_ENV"
 
-      # The prebuilt SL7 packages (linux-sl7, iptsd-sl7, libcamera-sl7, howdy-next,
+      # The prebuilt SL7 packages (linux-sl7, iptsd, libcamera-sl7, howdy-next,
       # sl7-ir-bridge, omarchy-sl7-faceunlock) come from the signed rolling release
       # repo-aarch64, which publish-repo.yml keeps current and which does not
       # expire (CI artifacts do, after 14 days). The newest version of each package
@@ -73,7 +73,8 @@ jobs:
             b="$(basename "$f")"
             [[ $b =~ ^(.+)-([^-]+-[^-]+)-[^-]+\.pkg\.tar\.zst$ ]] || { echo "cannot parse $b" >&2; exit 1; }
             n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
-            case "$n" in omarchy-surface-sl7 | omarchy-sl7-keyring | *-debug) continue ;; esac
+            # iptsd-sl7 is the retired name of iptsd (conflicts with it): never ship both.
+            case "$n" in omarchy-surface-sl7 | omarchy-sl7-keyring | iptsd-sl7 | *-debug) continue ;; esac
             if [ -z "${best[$n]:-}" ] || [ "$(printf '%s\n%s\n' "${bestv[$n]}" "$v" | sort -V | tail -n 1)" = "$v" ]; then
               best[$n]="$f"; bestv[$n]="$v"
             fi
@@ -92,7 +93,7 @@ jobs:
             [ "$(printf '%s\n%s\n' "$2" "$got" | sort -V | tail -n 1)" = "$got" ] || { echo "$1 $got is older than $2" >&2; exit 1; }
           }
           at_least linux-sl7 "$SL7_MIN_LINUX_SL7"
-          at_least iptsd-sl7 "$SL7_MIN_IPTSD_SL7"
+          at_least iptsd "$SL7_MIN_IPTSD_SL7"
           for n in "${!best[@]}"; do echo "$n ${bestv[$n]}"; done | sort | tee dl-versions.txt
 
       - name: Fetch pinned omarchy-pkgs and export its qcom-firmware-extract and linux-aarch64-pkgbase-shim PKGBUILDs

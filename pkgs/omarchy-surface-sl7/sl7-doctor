@@ -91,6 +91,20 @@ for id in 0C77 0C6E; do
   else fail "no hidraw node for 045E:$id (device not enumerated)"; fi
 done
 
+# Which iptsd build is installed: ours (omarchy-sl7, package iptsd, version
+# 3.1.0.r2026...) or Omarchy's stock one. Stock works as a trial (see the
+# iptsd README) but lacks the SL7 touchpad behaviours, so only INFO/WARN.
+if command -v pacman >/dev/null 2>&1; then
+  iptsd_ver=$(pacman -Q iptsd 2>/dev/null | awk '{print $2}')
+  if [[ -z $iptsd_ver ]]; then
+    fail "package iptsd not installed (sudo pacman -S omarchy-sl7/iptsd)"
+  elif [[ $iptsd_ver == *.r2026* || -e /etc/iptsd.d/92-iptsd-sl7-tuning.conf ]]; then
+    pass "iptsd $iptsd_ver (omarchy-sl7 build with the SL7 touchpad patches)"
+  else
+    warn "iptsd $iptsd_ver is Omarchy's stock build, not ours: no button hold/motion gating, lift grace, multitouch watchdog, drag latch, haptic/click force or Windows-style palm handling,; SL7 calibration and udev rules may be missing (revert: sudo pacman -S omarchy-sl7/iptsd)"
+  fi
+fi
+
 # iptsd's mode watchdog (iptsd-sl7 patch 0004) re-enables multitouch by itself when
 # the touchpad falls back to mouse mode; surface that it had to.
 recov=$(journalctl -b -o cat --no-pager -u 'iptsd@*.service' --grep 'sent legacy reports without touch data' 2>/dev/null | wc -l)

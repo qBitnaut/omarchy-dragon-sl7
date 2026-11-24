@@ -4,7 +4,7 @@ Omarchy add-on package for the Microsoft Surface Laptop 7 (Snapdragon X Plus/Eli
 DT `x1e80100-microsoft-romulus13` and `-romulus15`) on Arch Linux ARM.
 
 It is made only of files, pacman hooks and drop-ins. It depends on `omarchy`,
-`linux-sl7`, `iptsd-sl7` and `linux-firmware-qcom`, is in the group
+`linux-sl7`, `iptsd` and `linux-firmware-qcom`, is in the group
 `omarchy-platform-qualcomm`, and works when installed by pacman at any point
 (pacstrap or later). It does not depend on how the installer or ISO is built and
 needs no change to Omarchy. License: MIT for our files (see `LICENSE`);
@@ -88,7 +88,7 @@ appears. `sl7-doctor` fails if that file is active.
 
 ### 4. Touch
 
-`iptsd-sl7` already ships `iptsd@.service` and `50-iptsd.rules`, which start
+`iptsd` already ships `iptsd@.service` and `50-iptsd.rules`, which start
 `iptsd@<hidraw>` for both devices (touchpad `045E:0C77`, touchscreen `045E:0C6E`) via
 `iptsd-check-device`, so nothing needs enabling. Missing was the resume fix (run 5:
 after resume the virtual touchpad went static while the raw HID node kept sending).
@@ -1129,7 +1129,7 @@ is skipped in a chroot (pacstrap/mkarchiso; the installer builds the image) and 
 
 `/etc/pacman.d/omarchy-sl7.conf` defines `[omarchy-sl7]` (GitHub Release `repo-aarch64`,
 `SigLevel = Required DatabaseOptional`). `/etc/pacman.conf` carries
-`Include = /etc/pacman.d/omarchy-sl7.conf` above `[core]`, so `linux-sl7`, `iptsd-sl7` and
+`Include = /etc/pacman.d/omarchy-sl7.conf` above `[core]`, so `linux-sl7`, `iptsd` and
 this package win over `[alarm]` and `[omarchy]`. Keeping that line is automated:
 
 - `omarchy-sl7-repo-ensure` (idempotent; `--check` reports only) inserts or repairs it, but only
@@ -1153,7 +1153,7 @@ trusted.
 
 ## Order for an installer
 
-`pacstrap` with `linux-sl7`, this package (pulls `iptsd-sl7`, `linux-firmware-qcom`),
+`pacstrap` with `linux-sl7`, this package (pulls `iptsd`, `linux-firmware-qcom`),
 then Omarchy's hardware stage, then firmware (`omarchy-surface-sl7-firmware`), then one
 initramfs/UKI build.
 

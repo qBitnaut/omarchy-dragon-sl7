@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # omarchy-sl7-bootstrap: put an EXISTING Omarchy install on the Surface Laptop 7 onto the
-# omarchy-sl7 package repository, so `omarchy update` brings linux-sl7, iptsd-sl7 and
+# omarchy-sl7 package repository, so `omarchy update` brings linux-sl7, iptsd and
 # omarchy-surface-sl7 from then on. Clean installs from our installer do not need this.
 #
 # Recommended: download it, read it, run it.
@@ -19,7 +19,7 @@
 #   4. writes /etc/pacman.d/omarchy-sl7.conf and Includes it above [core] in /etc/pacman.conf
 #      (backup: /etc/pacman.conf.pre-omarchy-sl7)
 #   5. installs/upgrades omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers
-#      iptsd-sl7 omarchy-sl7-battery in ONE `pacman -Syu` transaction, through omarchy-update-pacman (Omarchy's own
+#      iptsd omarchy-sl7-battery in ONE `pacman -Syu` transaction, through omarchy-update-pacman (Omarchy's own
 #      transaction wrapper, which satisfies its update guard), else through the guard's
 #      documented bypass OMARCHY_ALLOW_DIRECT_PACMAN=1. Never a bare -Sy.
 #   6. gives your user the `omarchy refresh pacman` hook and runs sl7-doctor
@@ -39,7 +39,7 @@ EXPECTED_FPR=${SL7_EXPECTED_FPR:-6387C619EF246F6F20C536B72C3331C78353BA04}  # SL
 REPO_URL=${SL7_REPO_URL:-https://github.com/qBitnaut/omarchy-dragon-sl7/releases/download/repo-aarch64}
 KEY_URLS=("$REPO_URL/omarchy-sl7.pub.asc"
 	"https://raw.githubusercontent.com/qBitnaut/omarchy-dragon-sl7/main/tools/repo/omarchy-sl7.pub.asc")
-PACKAGES=(omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd-sl7 omarchy-sl7-battery)
+PACKAGES=(omarchy-sl7-keyring omarchy-surface-sl7 linux-sl7 linux-sl7-headers iptsd omarchy-sl7-battery)
 
 CONF=${SL7_PACMAN_CONF:-/etc/pacman.conf}
 SNIPPET=${SL7_SNIPPET:-/etc/pacman.d/omarchy-sl7.conf}
@@ -88,7 +88,7 @@ include_ok() {
 
 snippet_text() {
 	cat <<'EOF'
-# omarchy-sl7: Surface Laptop 7 packages (linux-sl7, iptsd-sl7, omarchy-surface-sl7, ...).
+# omarchy-sl7: Surface Laptop 7 packages (linux-sl7, iptsd, omarchy-surface-sl7, ...).
 # Included from /etc/pacman.conf ABOVE [core]/[alarm]/[omarchy] so these packages win;
 # omarchy-sl7-repo-ensure keeps the Include line there (see the package README).
 # Hosted as GitHub Release assets; pacman follows the redirect to GitHub's object storage.

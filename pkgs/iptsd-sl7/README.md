@@ -1,4 +1,4 @@
-# iptsd-sl7
+# iptsd (Surface Laptop 7 build, directory `pkgs/iptsd-sl7`)
 
 iptsd (userspace touch daemon) with Surface Laptop 7 13.8" touchpad support, for
 Arch Linux ARM (aarch64).
@@ -10,8 +10,78 @@ raw heatmaps, not finished HID touchpad reports. iptsd turns them into a uinput
 touchpad. Upstream `linux-surface/iptsd` v3.1.0 (2025-12-29) lacks the SL7 fixes
 (physical click on the Sensel haptic pad, button debounce, palm-suppression click
 leak, recovery after sleep when hidraw persists), which live in the
-`alex-lentz/iptsd` fork. Arch/ALARM ship upstream `iptsd` only, so this package
-provides and conflicts with `iptsd`.
+`alex-lentz/iptsd` fork. Arch/ALARM ship upstream `iptsd` only.
+
+## Why the package is called iptsd
+
+Up to pkgrel 17 the package was `iptsd-sl7` (provides and conflicts `iptsd`).
+Omarchy's own `iptsd` (3.1.0-6) is a different package of the same name, and
+Omarchy's migration 1795337583 runs `pacman -S --noconfirm --needed iptsd ...`
+on the SL7. pacman resolves the literal name first, so the migration picked
+Omarchy's `iptsd`, which conflicts with `iptsd-sl7`, and failed. Since pkgrel 18
+this package is `iptsd` itself, built from this directory (the directory name
+is unchanged), with `provides=iptsd-sl7`, `conflicts=iptsd-sl7` and
+`replaces=iptsd-sl7`. `[omarchy-sl7]` is listed above Omarchy's repositories,
+so the name `iptsd` resolves to this build, and `omarchy-surface-sl7` depends
+on plain `iptsd` (no version), so Omarchy's stock `iptsd` satisfies it too (see
+the trial below). There is no epoch; the version (`3.1.0.r20260717`) sorts above
+Omarchy's `3.1.0`.
+
+On an existing install `pacman -Syu` replaces `iptsd-sl7` by `iptsd` in the same
+transaction (the `replaces` prompt defaults to yes). The old `iptsd-sl7-*`
+files stay on the release but are not in the `[omarchy-sl7]` database once
+`iptsd` is published (`tools/repo/repo-build.sh`).
+
+## Trying Omarchy's stock iptsd (untested)
+
+Status: NOT tested on the laptop. Written from reading the packages, not from a
+run. Do this only with a way to recover the touchpad (keyboard, or a USB mouse,
+and the revert command below typed from the keyboard).
+
+Omarchy's `iptsd` 3.1.0-6 lacks the patch behaviours of this build:
+`ButtonHoldMs`, button motion gating (`ButtonMaxMoveMm`), lift grace
+(`LiftGraceMs`), the multitouch watchdog (patch 0004), the drag latch and its
+relatch / park / keep-while-button-held rules (`DragStartMm`, `DragReleaseStillMs`,
+`DragRelatchMs`), `HapticIntensity` / `ClickForce` and `PalmMode`. It has the
+touchpad `OrientationThresholdMax = 180` setting and the udev `ACTION!="remove"`
+fix (this build now has the first; its `61-` rule already skipped `remove`).
+It may also lack the SL7 touchpad support of the fork itself (the calibration
+and the `51-` / `61-` udev rules are ours), in which case the touchpad can stop
+working in multitouch mode.
+
+Switch to stock:
+
+```
+sudo pacman -S omarchy/iptsd
+```
+
+The explicit `omarchy/` repository bypasses `[omarchy-sl7]`. This is a
+downgrade (`3.1.0-6` is older than `3.1.0.r20260717-18`) and pacman may print a
+downgrade warning and ask to replace or remove conflicting files; read the
+prompt, it should only mention `iptsd`. `omarchy-surface-sl7` stays installed
+(its dependency is plain `iptsd`). Modified files under `/etc/iptsd.d` are
+kept as `.pacsave`; review `/etc/iptsd.d/` (`91-calibration-045E-0C77.conf`,
+`92-iptsd-sl7-tuning.conf`, `93-local-calibration.conf`, `94-local.conf`) for
+files that no longer apply, and `sudo systemctl restart iptsd@dev-hidrawN`
+(or `sudo /usr/lib/omarchy-surface-sl7/restart-iptsd`) after changing them.
+Add `IgnorePkg = iptsd` to `/etc/pacman.conf` for the trial, otherwise the next
+`pacman -Syu` upgrades back to this build (it is newer and in the first
+repository).
+
+What to test: tap (off by default here, set `tap_to_click = true` first), click
+and hold (no spurious clicks while scrolling), click and drag, haptic feedback
+strength, palm resting on the pad while typing, fast swipes (held frames).
+`sl7-doctor` reports the stock build as a WARN naming what is missing.
+
+Revert:
+
+```
+sudo pacman -S omarchy-sl7/iptsd
+```
+
+and remove `IgnorePkg = iptsd` again. This is an upgrade back to the SL7 build,
+which is still in `[omarchy-sl7]` as `iptsd`; pacman may ask to replace
+`iptsd` from another repository, answer yes.
 
 ## Fork pin
 
@@ -74,7 +144,7 @@ see its README, "Touchpad defaults"). Set it to `true` there to get tapping back
 ## Licensing
 
 - iptsd and this packaging: GPL-2.0-or-later (upstream `LICENSE` installed to
-  `/usr/share/licenses/iptsd-sl7/`).
+  `/usr/share/licenses/iptsd/`).
 - `91-calibration-045E-0C77.conf`: by Oliver White (bryce-hoehn/linux-surface-laptop-7,
   `config/touchpad/`, pinned to commit e60938dcf707d37d24e782e0029b9c9a567d67b8,
   2026-06-03). Upstream has no license; fetched, not redistributed in this repo.

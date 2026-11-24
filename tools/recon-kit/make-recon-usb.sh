@@ -90,8 +90,8 @@ test kernel (adds boot entries "omarchy-dragon-sl7 test kernel"; the sp11 entrie
                    Image, dtbs/, SHA256SUMS)
   --from-ci RUN    download that artifact with gh (run id, or "latest" successful run
                    of linux-sl7.yml) into $SL7_WORK/ci and use it
-  --iptsd-pkg FILE iptsd-sl7 pkg.tar.{zst,xz}, staged for the touchpad test in the guide
-  --iptsd-from-ci RUN  download the iptsd-sl7-aarch64 artifact (run id or "latest")
+  --iptsd-pkg FILE iptsd pkg.tar.{zst,xz}, staged for the touchpad test in the guide
+  --iptsd-from-ci RUN  download the iptsd-aarch64 artifact (run id or "latest")
   --iptsd-libs DIR soname-named libfmt.so.12 / libspdlog.so.1.17 copied to SL7DATA/sl7test/lib
                    (default: $SL7_RESEARCH/recon/work/iptsd-libs/stick-lib when present)
 USAGE
@@ -521,9 +521,9 @@ resolve_ci() {
 		KERNEL_DIR="$d"
 	fi
 	if [ -n "$IPTSD_CI_RUN" ]; then
-		fetch_ci "$IPTSD_CI_RUN" iptsd-sl7.yml 'iptsd-sl7-*' "$WORK/ci/iptsd-sl7"
+		fetch_ci "$IPTSD_CI_RUN" iptsd.yml 'iptsd-*' "$WORK/ci/iptsd"
 		# ALARM's makepkg defaults to .pkg.tar.xz; accept either compression
-		IPTSD_PKG="$(find "$WORK/ci/iptsd-sl7" \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) | head -n 1)"
+		IPTSD_PKG="$(find "$WORK/ci/iptsd" \( -name '*.pkg.tar.zst' -o -name '*.pkg.tar.xz' \) | head -n 1)"
 		[ -n "$IPTSD_PKG" ] || die "downloaded iptsd artifact has no pkg.tar.zst or pkg.tar.xz"
 	fi
 }
