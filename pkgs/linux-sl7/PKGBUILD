@@ -158,6 +158,7 @@ source=("https://www.kernel.org/pub/linux/kernel/v7.x/${_srcname}.tar.xz"
         'patches/0122-soc-qcom-add-ADSP-power-limits-Modern-Standby-notification.patch'
         'patches/0123-soc-qcom-adsp-pwr-lmts-drop-an-unused-include-and-say-why-the-send-blocks.patch'
         'patches/0124-serial-qcom-geni-release-the-OPP-and-ICC-votes-in-system-sleep-instead-of-force-suspending.patch'
+        'patches/0125-SL7-surface-aggregator-enable-POS-events-on-the-Surface-Laptop-7.patch'
         "vd55g-firmware-$_vd55g_fw.tar.gz::https://github.com/petm5/vd55g-firmware/archive/$_vd55g_fw.tar.gz"
         'LICENSE.vd55g-firmware'
         "v4l2loopback-$_v4l2lb.tar.gz::https://github.com/v4l2loopback/v4l2loopback/archive/refs/tags/v$_v4l2lb.tar.gz")
@@ -280,6 +281,7 @@ sha256sums=('f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3'
             'SKIP'
             'SKIP'
             'SKIP'
+         'SKIP'
          'SKIP'
          'SKIP'
          'SKIP'
