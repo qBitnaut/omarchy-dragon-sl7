@@ -73,12 +73,14 @@ jobs:
             b="$(basename "$f")"
             [[ $b =~ ^(.+)-([^-]+-[^-]+)-[^-]+\.pkg\.tar\.zst$ ]] || { echo "cannot parse $b" >&2; exit 1; }
             n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
-            # iptsd-sl7 is the retired name of iptsd (conflicts with it): never ship both.
-            case "$n" in omarchy-surface-sl7 | omarchy-sl7-keyring | iptsd-sl7 | *-debug) continue ;; esac
+            case "$n" in omarchy-surface-sl7 | omarchy-sl7-keyring | *-debug) continue ;; esac
             if [ -z "${best[$n]:-}" ] || [ "$(printf '%s\n%s\n' "${bestv[$n]}" "$v" | sort -V | tail -n 1)" = "$v" ]; then
               best[$n]="$f"; bestv[$n]="$v"
             fi
           done
+          # iptsd-sl7 is the retired name of iptsd (conflicts with it): never ship
+          # both. Until the release carries iptsd, the old package is used.
+          if [ -n "${best[iptsd]:-}" ]; then unset 'best[iptsd-sl7]' 'bestv[iptsd-sl7]'; fi
           for n in "${!best[@]}"; do
             f="${best[$n]}"
             [ -f "$f.sig" ] || { echo "$f has no signature" >&2; exit 1; }
@@ -93,7 +95,11 @@ jobs:
             [ "$(printf '%s\n%s\n' "$2" "$got" | sort -V | tail -n 1)" = "$got" ] || { echo "$1 $got is older than $2" >&2; exit 1; }
           }
           at_least linux-sl7 "$SL7_MIN_LINUX_SL7"
-          at_least iptsd "$SL7_MIN_IPTSD_SL7"
+          if [ -n "${bestv[iptsd]:-}" ]; then
+            at_least iptsd "$SL7_MIN_IPTSD_SL7"
+          else
+            at_least iptsd-sl7 3.1.0.r20260717-17 # transition: iptsd not released yet
+          fi
           for n in "${!best[@]}"; do echo "$n ${bestv[$n]}"; done | sort | tee dl-versions.txt
 
       - name: Fetch pinned omarchy-pkgs and export its qcom-firmware-extract and linux-aarch64-pkgbase-shim PKGBUILDs

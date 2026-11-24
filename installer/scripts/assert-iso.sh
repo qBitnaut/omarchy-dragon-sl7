@@ -85,6 +85,10 @@ mdir="$work/mirror/$mirror"
 for p in linux-sl7 linux-sl7-headers omarchy-surface-sl7 omarchy-sl7-keyring iptsd omarchy-sl7-battery linux-firmware-qcom \
 	qcom-firmware-extract linux-aarch64-pkgbase-shim; do
 	found="$(find "$mdir" -maxdepth 1 -name "$p-[0-9]*.pkg.tar.*" ! -name '*.sig')"
+	# Transition: until iptsd is released, the retired name iptsd-sl7 stands in.
+	if [ -z "$found" ] && [ "$p" = iptsd ]; then
+		found="$(find "$mdir" -maxdepth 1 -name 'iptsd-sl7-[0-9]*.pkg.tar.*' ! -name '*.sig')"
+	fi
 	[ -n "$found" ] || bad "offline mirror has no $p"
 done
 # omarchy-iso's orchestrator is written against archinstall 4.4 (4.5 dropped sanity_check(offline=)).

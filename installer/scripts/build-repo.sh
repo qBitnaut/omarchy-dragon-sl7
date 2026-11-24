@@ -73,6 +73,8 @@ ln -sf omarchy-sl7.db omarchy.db
 # Every package the installer needs must be listed in the database.
 listing="$(tar -tzf omarchy-sl7.db.tar.gz)"
 for name in "${expected[@]}"; do
+	# Transition: until iptsd is released, the retired name iptsd-sl7 stands in.
+	if [ "$name" = iptsd ] && grep -Eq '^iptsd-sl7-[0-9][^/]*/desc$' <<<"$listing"; then continue; fi
 	if ! grep -Eq "^$name-[0-9][^/]*/desc$" <<<"$listing"; then
 		echo "build-repo: $name is missing from omarchy-sl7.db" >&2
 		exit 1
