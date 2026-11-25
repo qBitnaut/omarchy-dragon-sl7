@@ -211,3 +211,6 @@
 
 # 35. serial qcom-geni: release only the OPP and ICC votes in system sleep, keep the engine clocked (Brandon Williams, Omarchy 2217; follows 0068/0069)
 0124-serial-qcom-geni-release-the-OPP-and-ICC-votes-in-system-sleep-instead-of-force-suspending.patch
+
+# 36. surface aggregator: enable POS events on the Surface Laptop 7 so the EC powers the touchpad (ItsLucas 004e91d1; issue #25)
+0125-SL7-surface-aggregator-enable-POS-events-on-the-Surface-Laptop-7.patch

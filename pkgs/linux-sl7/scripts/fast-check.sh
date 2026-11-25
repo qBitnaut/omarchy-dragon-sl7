@@ -53,6 +53,8 @@ if [[ ${SL7_COMPILE:-0} == 1 ]]; then
         drivers/soc/qcom/pmic_glink.o \
         drivers/soc/qcom/smp2p.o \
         drivers/soc/qcom/qcom_adsp_pwr_lmts.o \
+        drivers/platform/surface/surface_aggregator_registry.o \
+        drivers/platform/surface/surface_aggregator_tabletsw.o \
         drivers/soc/qcom/pmic_glink_altmode.o \
         drivers/usb/typec/ucsi/ucsi.o \
         drivers/hwmon/qcom_pld_power.o
